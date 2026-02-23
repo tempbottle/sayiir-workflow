@@ -159,6 +159,9 @@ export interface NapiWorkerHandle {
 
 export interface NativeAddon {
   getTaskContext(): NapiTaskExecutionContext | null;
+  parseYamlWorkflow(yamlStr: string): Record<string, unknown>;
+  evalJmespath(expr: string, data: unknown): unknown;
+  evalJmespathTruthy(expr: string, data: unknown): boolean;
   NapiFlowBuilder: new (name: string) => NapiFlowBuilder;
   NapiWorkflowEngine: new () => NapiWorkflowEngine;
   NapiContinuationStepper: new (

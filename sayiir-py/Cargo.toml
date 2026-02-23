@@ -22,6 +22,7 @@ sayiir-core = { workspace = true }
 sayiir-persistence = { workspace = true }
 sayiir-postgres = { workspace = true }
 sayiir-runtime = { workspace = true, features = ["json"] }
+sayiir-yaml = { workspace = true }
 tracing = { workspace = true }
 
 [build-dependencies]

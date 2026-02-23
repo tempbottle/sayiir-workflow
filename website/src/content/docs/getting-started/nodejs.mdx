@@ -142,9 +142,54 @@ const workflow = flow<{ id: number }>("checkout")
 const result = await runWorkflow(workflow, { id: 1 });
 ```
 
+## YAML workflows
+
+Define workflow structure in YAML — register handlers in code, load and run:
+
+```yaml
+# order-pipeline.yaml
+id: order-pipeline
+tasks:
+  - type: task
+    id: validate
+    handler: validate_order
+    input: "input"
+  - type: task
+    id: charge
+    handler: charge_payment
+    input: "tasks.validate.output"
+  - type: task
+    id: notify
+    handler: send_confirmation
+    input: "tasks.charge.output"
+```
+
+```typescript
+import { task, runWorkflow } from "sayiir";
+import { loadWorkflow } from "sayiir/yaml";
+
+const validateOrder = task("validate_order", (order) => {
+  return { ...order, valid: true };
+});
+
+const chargePayment = task("charge_payment", (order) => {
+  return { ...order, charged: true };
+});
+
+const sendConfirmation = task("send_confirmation", (order) => {
+  return `Order ${order.id} confirmed`;
+});
+
+const workflow = loadWorkflow("order-pipeline.yaml");
+const result = await runWorkflow(workflow, { id: 42, amount: 99.99 });
+```
+
+The `input` fields use [JMESPath](https://jmespath.org/) expressions to reference the workflow input or any prior task's output. See the [YAML Workflows guide](/guides/yaml-workflows/) for the full schema reference.
+
 ## Next steps
 
 - [Node.js API Reference](/reference/nodejs-api/) — Complete function and type reference
+- [YAML Workflows](/guides/yaml-workflows/) — Define workflows as config files
 - [Durable Workflows](/guides/durable-workflows/) — Lifecycle operations, delays
 - [Retries & Timeouts](/guides/retries-and-timeouts/) — Exponential backoff, timeout behavior
 - [Signals & Events](/guides/signals-and-events/) — Wait for external events

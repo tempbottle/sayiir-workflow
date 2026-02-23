@@ -137,8 +137,53 @@ workflow = (
 result = run_workflow(workflow, {"id": 1})
 ```
 
+## YAML workflows
+
+Define workflow structure in YAML — register handlers in code, load and run:
+
+```yaml
+# order-pipeline.yaml
+id: order-pipeline
+tasks:
+  - type: task
+    id: validate
+    handler: validate_order
+    input: "input"
+  - type: task
+    id: charge
+    handler: charge_payment
+    input: "tasks.validate.output"
+  - type: task
+    id: notify
+    handler: send_confirmation
+    input: "tasks.charge.output"
+```
+
+```python
+from sayiir import task, run_workflow
+from sayiir.yaml import load_workflow
+
+@task
+def validate_order(order):
+    return {**order, "valid": True}
+
+@task
+def charge_payment(order):
+    return {**order, "charged": True}
+
+@task
+def send_confirmation(order):
+    return f"Order {order['id']} confirmed"
+
+workflow = load_workflow("order-pipeline.yaml")
+result = run_workflow(workflow, {"id": 42, "amount": 99.99})
+```
+
+The `input` fields use [JMESPath](https://jmespath.org/) expressions to reference the workflow input or any prior task's output. See the [YAML Workflows guide](/guides/yaml-workflows/) for the full schema reference.
+
 ## Next steps
 
+- [YAML Workflows](/guides/yaml-workflows/) — define workflows as config files
 - [Retries & Timeouts](/guides/retries-and-timeouts/) — exponential backoff, timeout behavior
 - [Signals & Events](/guides/signals-and-events/) — wait for external events
 - [Parallel Workflows](/guides/parallel-workflows/) — fork/join parallelism

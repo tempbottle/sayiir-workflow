@@ -22,6 +22,7 @@ pub mod exceptions;
 mod flow;
 mod task;
 mod worker;
+mod yaml;
 
 /// Python module for Sayiir workflow library.
 #[pymodule]
@@ -39,6 +40,11 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<durable_engine::PyDurableEngine>()?;
     m.add_class::<worker::PyWorker>()?;
     m.add_class::<worker::PyWorkerHandle>()?;
+
+    // YAML support
+    m.add_function(wrap_pyfunction!(yaml::parse_yaml_workflow, m)?)?;
+    m.add_function(wrap_pyfunction!(yaml::eval_jmespath, m)?)?;
+    m.add_function(wrap_pyfunction!(yaml::eval_jmespath_truthy, m)?)?;
 
     // Register exception types
     m.add(

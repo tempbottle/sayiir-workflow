@@ -87,6 +87,11 @@ export default defineConfig({
               label: "Serialization & Migration",
               slug: "guides/serialization-and-versioning",
             },
+            {
+              label: "YAML Workflows",
+              slug: "guides/yaml-workflows",
+              badge: "New",
+            },
           ],
         },
         {

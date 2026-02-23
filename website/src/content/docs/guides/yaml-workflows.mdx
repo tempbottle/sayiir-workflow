@@ -1,0 +1,357 @@
+---
+title: YAML Workflows
+description: Define workflows as YAML config files — no code required for platform/DevOps engineers
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Overview
+
+YAML workflows let you define workflow structure as a config file instead of writing code. This is ideal for platform teams, DevOps engineers, and config-driven automation — define the workflow once in YAML, then execute it from Python or Node.js with a single function call.
+
+The YAML compiler produces the same `SerializableContinuation` and `TaskRegistry` used by the programmatic API — same execution engine, same checkpointing, same durability guarantees.
+
+## Quick Example
+
+```yaml
+id: order-processing
+tasks:
+  - type: task
+    id: validate
+    handler: validate_order
+    input: "input"
+  - type: task
+    id: charge
+    handler: charge_payment
+    input: "tasks.validate.output"
+  - type: task
+    id: notify
+    handler: send_confirmation
+    input: "tasks.charge.output"
+```
+
+The `input` field uses [JMESPath](https://jmespath.org/) expressions to reference any prior task's output or the workflow input.
+
+## Schema Reference
+
+### Workflow Definition
+
+Every YAML workflow has a top-level `id`, optional `metadata`, and a list of `tasks` (steps):
+
+```yaml
+id: my-workflow
+metadata:
+  version: "1.0"
+  owner: platform-team
+tasks:
+  - type: task
+    id: step1
+    handler: my_handler
+```
+
+### Step Types
+
+#### `task` — Execute a handler or built-in action
+
+```yaml
+- type: task
+  id: validate_order
+  handler: validate        # references a registered handler
+  input: "input"           # JMESPath expression (optional)
+  timeout_secs: 30         # optional timeout
+  retry:                   # optional retry policy
+    max_retries: 3
+    initial_delay_secs: 1.0
+    backoff_multiplier: 2.0
+    max_delay_secs: 30.0
+```
+
+A task must have either `handler` (referencing a user-registered function) or `action` (a built-in action).
+
+#### `delay` — Durable timer
+
+```yaml
+- type: delay
+  id: wait_30s
+  duration_secs: 30
+```
+
+#### `wait_for_signal` — Wait for an external event
+
+```yaml
+- type: wait_for_signal
+  id: approval
+  signal_name: manager_approval
+  timeout_secs: 86400    # 24 hours
+```
+
+#### `fork` — Parallel branches
+
+```yaml
+- type: fork
+  id: parallel_checks
+  branches:
+    - id: payment
+      tasks:
+        - type: task
+          id: validate_payment
+          handler: validate_payment
+    - id: inventory
+      tasks:
+        - type: task
+          id: check_stock
+          handler: check_inventory
+```
+
+All branches execute in parallel. After all complete, results are merged into a single context.
+
+#### `branch` — Conditional routing
+
+```yaml
+- type: branch
+  id: route_order
+  branches:
+    - when: "tasks.classify.output == 'high_value'"
+      tasks:
+        - type: task
+          id: premium_handler
+          handler: handle_premium
+    - when: "tasks.classify.output == 'standard'"
+      tasks:
+        - type: task
+          id: standard_handler
+          handler: handle_standard
+  default:
+    - type: task
+      id: fallback
+      handler: handle_default
+```
+
+The `when` expressions are evaluated in order — the first truthy match wins. If none match, the `default` branch runs.
+
+#### `loop` — Repeated iteration
+
+```yaml
+- type: loop
+  id: retry_loop
+  until: "tasks.attempt.output.success"
+  max_iterations: 10
+  on_max: fail           # or "exit_with_last"
+  body:
+    - type: task
+      id: attempt
+      handler: attempt_operation
+```
+
+Loops support either `until` (exit when expression is truthy) or `for_each` (iterate over an array).
+
+#### `child_workflow` — Nested workflow
+
+```yaml
+- type: child_workflow
+  id: sub_process
+  tasks:
+    - type: task
+      id: child_step
+      handler: child_handler
+```
+
+## JMESPath Context
+
+Every task has access to a context object via JMESPath expressions:
+
+```json
+{
+  "input": { ... },           // original workflow input
+  "tasks": {
+    "validate": {
+      "output": { ... }       // output of the 'validate' step
+    },
+    "charge": {
+      "output": { ... }       // output of the 'charge' step
+    }
+  }
+}
+```
+
+Use dot notation to access values:
+
+| Expression | Description |
+|---|---|
+| `input` | The workflow's original input |
+| `input.user_id` | A field from the input |
+| `tasks.validate.output` | Output of the "validate" step |
+| `tasks.validate.output.amount` | A nested field from a step's output |
+
+If no `input` expression is specified on a task, the previous step's output is passed through.
+
+## Built-in Actions
+
+Built-in actions don't require handler registration — the YAML compiler creates them automatically.
+
+### Shell
+
+```yaml
+- type: task
+  id: run_script
+  action:
+    type: shell
+    command: /usr/bin/python3
+    args: ["-c", "print('hello')"]
+    stdin: "input.data"       # optional JMESPath for stdin
+```
+
+Output: `{ "exit_code": 0, "stdout": "hello\n", "stderr": "" }`
+
+### HTTP (requires `http` feature)
+
+```yaml
+- type: task
+  id: call_api
+  action:
+    type: http
+    method: POST
+    url: https://api.example.com/orders
+    headers:
+      Authorization: "Bearer ${TOKEN}"
+      Content-Type: application/json
+    body: "tasks.validate.output"
+    timeout_secs: 10
+```
+
+Output: `{ "status": 200, "headers": {...}, "body": {...} }`
+
+### Lambda (requires `lambda` feature)
+
+```yaml
+- type: task
+  id: invoke_fn
+  action:
+    type: lambda
+    function_name: my-function
+    region: us-east-1
+    payload: "tasks.prepare.output"
+    qualifier: "$LATEST"
+```
+
+## Using YAML Workflows
+
+### From Python
+
+Register your handler functions, then compile and execute the YAML:
+
+```python
+from sayiir import task, run_workflow
+from sayiir.yaml import load_workflow
+
+@task
+def validate_order(order):
+    return {**order, "valid": True}
+
+@task
+def charge_payment(order):
+    return {**order, "charged": True}
+
+@task
+def send_confirmation(order):
+    return f"Order {order['id']} confirmed"
+
+# Load YAML and run
+workflow = load_workflow("order-processing.yaml")
+result = run_workflow(workflow, {"id": 42, "amount": 99.99})
+print(result)  # "Order 42 confirmed"
+```
+
+### From Node.js
+
+```typescript
+import { task, runWorkflow } from "sayiir";
+import { loadWorkflow } from "sayiir/yaml";
+
+const validateOrder = task("validate_order", (order) => {
+  return { ...order, valid: true };
+});
+
+const chargePayment = task("charge_payment", (order) => {
+  return { ...order, charged: true };
+});
+
+const sendConfirmation = task("send_confirmation", (order) => {
+  return `Order ${order.id} confirmed`;
+});
+
+const workflow = loadWorkflow("order-processing.yaml");
+const result = await runWorkflow(workflow, { id: 42, amount: 99.99 });
+console.log(result); // "Order 42 confirmed"
+```
+
+## Full Example: Order Pipeline
+
+Here's a complete YAML workflow that validates, processes, and notifies for an order:
+
+```yaml
+id: order-pipeline
+metadata:
+  version: "2.0"
+  team: platform
+tasks:
+  # Step 1: Validate the order
+  - type: task
+    id: validate
+    handler: validate_order
+    input: "input"
+    timeout_secs: 5
+
+  # Step 2: Check payment and inventory in parallel
+  - type: fork
+    id: checks
+    branches:
+      - id: payment
+        tasks:
+          - type: task
+            id: charge
+            handler: charge_payment
+            input: "tasks.validate.output"
+            retry:
+              max_retries: 3
+              initial_delay_secs: 1.0
+              backoff_multiplier: 2.0
+      - id: inventory
+        tasks:
+          - type: task
+            id: reserve
+            handler: reserve_inventory
+            input: "tasks.validate.output"
+
+  # Step 3: Wait for manager approval if high-value
+  - type: branch
+    id: approval_check
+    branches:
+      - when: "tasks.validate.output.amount > `500`"
+        tasks:
+          - type: wait_for_signal
+            id: manager_approval
+            signal_name: approve_order
+            timeout_secs: 86400
+    default:
+      - type: task
+        id: auto_approve
+        handler: auto_approve
+
+  # Step 4: Send confirmation
+  - type: task
+    id: notify
+    handler: send_confirmation
+    input: "tasks.validate.output"
+```
+
+## How It Works
+
+Under the hood, the YAML compiler:
+
+1. **Wraps each task** in an envelope that carries accumulated context (`{__ctx, __val}`)
+2. **Evaluates JMESPath** expressions to extract handler inputs from the context
+3. **Records outputs** in the context so later tasks can reference them
+4. **Produces standard** `SerializableContinuation` + `TaskRegistry` — the same types used by the programmatic API
+
+This means YAML workflows get all the same features: durable checkpointing, parallel execution, signal handling, retry policies, and PostgreSQL persistence.

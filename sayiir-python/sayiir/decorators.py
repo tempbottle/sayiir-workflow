@@ -169,8 +169,14 @@ def task(
         fn._input_type = hints.get(params[0]) if params else None  # type: ignore[attr-defined]
         fn._output_type = hints.get("return")  # type: ignore[attr-defined]
 
+        # Register in global registry for YAML workflow handler lookup
+        from .yaml import _register_global_task
+
+        _register_global_task(task_id, fn)
+
         return fn
 
     if func is not None and callable(func):
         return decorator(func)
+
     return decorator

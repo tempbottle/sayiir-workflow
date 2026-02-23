@@ -54,3 +54,6 @@ export { parseDuration } from "./duration.js";
 // Worker
 export { Worker, WorkerHandle } from "./worker.js";
 export type { WorkerOptions } from "./worker.js";
+
+// YAML
+export { loadWorkflow } from "./yaml.js";

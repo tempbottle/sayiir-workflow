@@ -1,0 +1,40 @@
+[package]
+name = "sayiir-yaml"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "Declarative YAML workflow definitions for Sayiir"
+
+[dependencies]
+sayiir-core = { workspace = true }
+sayiir-runtime = { workspace = true, default-features = false, features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yml = "0.0.12"
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util"] }
+jmespath = { version = "0.5", features = ["sync"] }
+
+# Optional built-in actions
+reqwest = { version = "0.13", features = ["json"], optional = true }
+aws-sdk-lambda = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
+schemars = { version = "1", optional = true }
+
+[features]
+default = ["http"]
+http = ["dep:reqwest"]
+lambda = ["dep:aws-sdk-lambda", "dep:aws-config"]
+json-schema = ["dep:schemars"]
+
+[dev-dependencies]
+sayiir-runtime = { workspace = true, features = ["json"] }
+sayiir-persistence = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+serde_json = { workspace = true }

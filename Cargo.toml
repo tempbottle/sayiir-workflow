@@ -5,6 +5,7 @@ members = [
     "sayiir-postgres",
     "sayiir-runtime",
     "sayiir-macros",
+    "sayiir-yaml",
     "sayiir-py",
     "sayiir-node",
     "tests/integration",
@@ -34,6 +35,7 @@ sayiir-persistence = { version = "0.2.0", path = "sayiir-persistence" }
 sayiir-runtime = { version = "0.2.0", path = "sayiir-runtime", default-features = false }
 sayiir-postgres = { version = "0.2.0", path = "sayiir-postgres" }
 sayiir-macros = { version = "0.2.0", path = "sayiir-macros" }
+sayiir-yaml = { version = "0.2.0", path = "sayiir-yaml", default-features = false }
 tracing = "0.1"
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = [

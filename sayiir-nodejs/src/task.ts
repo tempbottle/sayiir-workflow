@@ -6,7 +6,7 @@
  * reads these properties when constructing workflows.
  */
 
-import type { RetryPolicy, TaskOptions, ZodLike } from "./types.js";
+import type { RetryPolicy, TaskCallback, TaskOptions, ZodLike } from "./types.js";
 import { parseDuration } from "./duration.js";
 import type {
   NapiRetryPolicy,
@@ -14,6 +14,13 @@ import type {
   NapiTaskMetadata,
 } from "./native.js";
 import { getNative } from "./native.js";
+
+/**
+ * Global task registry populated by `task()`.
+ * Used by `loadWorkflow()` in the yaml module to find handlers by name.
+ * @internal
+ */
+export const _globalTaskRegistry = new Map<string, TaskCallback>();
 
 /** Branded type for a registered task function. */
 export interface TaskFn<TIn, TOut> {
@@ -53,6 +60,9 @@ export function task<TIn, TOut>(
     _outputSchema: { value: opts?.output, enumerable: false },
     _rawFn: { value: fn, enumerable: false },
   });
+
+  // Register in global registry for YAML workflow handler lookup
+  _globalTaskRegistry.set(id, taskFn as TaskCallback);
 
   return taskFn;
 }
