@@ -1,6 +1,7 @@
 //! Python-exposed persistence backends.
 
 use pyo3::prelude::*;
+use sayiir_dynamodb::DynamoDbBackend;
 use sayiir_persistence::InMemoryBackend;
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
@@ -80,6 +81,69 @@ impl PyPostgresBackend {
     }
 }
 
+/// Python-exposed `DynamoDB` persistence backend.
+///
+/// Connects to Amazon `DynamoDB` and stores workflow snapshots durably.
+/// Creates tables automatically on first connect.
+#[pyclass(from_py_object)]
+#[derive(Clone)]
+pub struct PyDynamoDbBackend {
+    pub(crate) inner: Arc<DynamoDbBackend<JsonCodec>>,
+    /// Kept alive for connection pool background tasks.
+    #[allow(dead_code)]
+    pub(crate) runtime: Arc<tokio::runtime::Runtime>,
+}
+
+#[pymethods]
+impl PyDynamoDbBackend {
+    /// Create a new `DynamoDB` backend.
+    ///
+    /// Args:
+    ///     region: AWS region (e.g. `us-east-1`)
+    ///     prefix: Table name prefix (e.g. `sayiir`)
+    ///     `endpoint_url`: Optional endpoint URL override (for `LocalStack`)
+    #[new]
+    #[pyo3(signature = (region, prefix, endpoint_url=None))]
+    fn new(region: &str, prefix: &str, endpoint_url: Option<&str>) -> PyResult<Self> {
+        tracing::info!("connecting to DynamoDB backend");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        let region = region.to_string();
+        let prefix = prefix.to_string();
+        let endpoint_url = endpoint_url.map(ToString::to_string);
+
+        let backend = runtime
+            .block_on(async {
+                let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .region(aws_config::Region::new(region));
+                if let Some(ref url) = endpoint_url {
+                    loader = loader.endpoint_url(url);
+                }
+                let config = loader.load().await;
+                DynamoDbBackend::<JsonCodec>::new(&config, &prefix).await
+            })
+            .map_err(|e: sayiir_persistence::BackendError| {
+                tracing::error!(error = %e, "failed to connect to DynamoDB");
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
+            })?;
+
+        tracing::info!("DynamoDB backend connected");
+
+        Ok(Self {
+            inner: Arc::new(backend),
+            runtime: Arc::new(runtime),
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        "DynamoDbBackend(...)".to_string()
+    }
+}
+
 /// Internal enum dispatching to either backend kind.
 ///
 /// Since `PersistentBackend` uses RPITIT (not object-safe), we use enum
@@ -87,6 +151,7 @@ impl PyPostgresBackend {
 pub(crate) enum BackendKind {
     InMemory(Arc<InMemoryBackend>),
     Postgres(Arc<PostgresBackend<JsonCodec>>),
+    DynamoDb(Arc<DynamoDbBackend<JsonCodec>>),
 }
 
 /// Dispatch a call to the backend regardless of variant.
@@ -99,6 +164,7 @@ macro_rules! with_backend {
         match &$self.backend {
             BackendKind::InMemory($backend) => $body,
             BackendKind::Postgres($backend) => $body,
+            BackendKind::DynamoDb($backend) => $body,
         }
     };
 }
@@ -118,6 +184,7 @@ macro_rules! dispatch {
         match $self {
             BackendKind::InMemory($inner) => $body,
             BackendKind::Postgres($inner) => $body,
+            BackendKind::DynamoDb($inner) => $body,
         }
     };
 }

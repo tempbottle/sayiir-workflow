@@ -20,7 +20,9 @@ use sayiir_runtime::{
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
 
-use crate::backend::{BackendKind, PyInMemoryBackend, PyPostgresBackend, with_backend};
+use crate::backend::{
+    BackendKind, PyDynamoDbBackend, PyInMemoryBackend, PyPostgresBackend, with_backend,
+};
 use crate::codec::{decode_to_pyobject, encode_pyobject};
 use crate::engine::{PyWorkflowStatus, execute_python_task};
 use crate::exceptions;
@@ -72,9 +74,19 @@ impl PyDurableEngine {
                 backend: BackendKind::Postgres(Arc::new(fresh_backend)),
                 runtime,
             })
+        } else if let Ok(ddb) = backend.extract::<PyDynamoDbBackend>() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+            Ok(Self {
+                backend: BackendKind::DynamoDb(Arc::clone(&ddb.inner)),
+                runtime,
+            })
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "backend must be InMemoryBackend or PostgresBackend",
+                "backend must be InMemoryBackend, PostgresBackend, or DynamoDbBackend",
             ))
         }
     }

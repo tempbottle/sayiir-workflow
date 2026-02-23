@@ -36,6 +36,7 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<engine::PyWorkflowStatus>()?;
     m.add_class::<backend::PyInMemoryBackend>()?;
     m.add_class::<backend::PyPostgresBackend>()?;
+    m.add_class::<backend::PyDynamoDbBackend>()?;
     m.add_class::<durable_engine::PyDurableEngine>()?;
     m.add_class::<worker::PyWorker>()?;
     m.add_class::<worker::PyWorkerHandle>()?;

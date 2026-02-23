@@ -1,0 +1,39 @@
+[package]
+name = "sayiir-dynamodb"
+description = "Amazon DynamoDB persistence backend for Sayiir workflow engine"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+categories.workspace = true
+keywords.workspace = true
+documentation = "https://docs.rs/sayiir-dynamodb"
+
+[lib]
+name = "sayiir_dynamodb"
+path = "src/lib.rs"
+
+[dependencies]
+sayiir-core = { workspace = true }
+sayiir-persistence = { workspace = true }
+aws-sdk-dynamodb = "1"
+aws-config = "1"
+bytes = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+ulid = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+sayiir-core = { workspace = true }
+sayiir-runtime = { workspace = true, features = ["rkyv", "json", "macros"] }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+aws-config = "1"
+testcontainers = "0.26"
+testcontainers-modules = { version = "0.14", features = ["localstack"] }

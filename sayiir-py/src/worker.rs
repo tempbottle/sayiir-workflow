@@ -20,7 +20,7 @@ use sayiir_runtime::{
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
 
-use crate::backend::{BackendKind, PyInMemoryBackend, PyPostgresBackend};
+use crate::backend::{BackendKind, PyDynamoDbBackend, PyInMemoryBackend, PyPostgresBackend};
 use crate::codec::encode_pyobject;
 use crate::engine::execute_python_task;
 use crate::exceptions;
@@ -116,7 +116,7 @@ impl PyWorker {
         let postgres_url = self.postgres_url.clone();
         let in_memory_backend = match &self.backend_kind {
             BackendKind::InMemory(b) => Some(Arc::clone(b)),
-            BackendKind::Postgres(_) => None,
+            BackendKind::Postgres(_) | BackendKind::DynamoDb(_) => None,
         };
         let worker_id = self.worker_id.clone();
         let claim_ttl = self.claim_ttl;
@@ -346,9 +346,11 @@ fn extract_backend(backend: &Bound<'_, PyAny>) -> PyResult<(BackendKind, Option<
             BackendKind::Postgres(Arc::clone(&pg.inner)),
             Some(pg.url.clone()),
         ))
+    } else if let Ok(ddb) = backend.extract::<PyDynamoDbBackend>() {
+        Ok((BackendKind::DynamoDb(Arc::clone(&ddb.inner)), None))
     } else {
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "backend must be InMemoryBackend or PostgresBackend",
+            "backend must be InMemoryBackend, PostgresBackend, or DynamoDbBackend",
         ))
     }
 }

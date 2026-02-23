@@ -21,7 +21,9 @@ use sayiir_runtime::{
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
 
-use crate::backend::{BackendKind, NapiInMemoryBackend, NapiPostgresBackend, with_backend};
+use crate::backend::{
+    BackendKind, NapiDynamoDbBackend, NapiInMemoryBackend, NapiPostgresBackend, with_backend,
+};
 use crate::codec::encode_js_value;
 use crate::exceptions;
 use crate::flow::NapiWorkflow;
@@ -108,6 +110,20 @@ impl NapiDurableEngine {
 
         Ok(Self {
             backend: BackendKind::Postgres(Arc::new(fresh_backend)),
+            runtime,
+        })
+    }
+
+    /// Create a new durable engine with a `DynamoDB` backend.
+    #[napi(factory)]
+    pub fn with_dynamodb(backend: &NapiDynamoDbBackend) -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+
+        Ok(Self {
+            backend: BackendKind::DynamoDb(Arc::clone(&backend.inner)),
             runtime,
         })
     }

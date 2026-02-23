@@ -21,7 +21,7 @@ use sayiir_runtime::{
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
 
-use crate::backend::{BackendKind, NapiInMemoryBackend, NapiPostgresBackend};
+use crate::backend::{BackendKind, NapiDynamoDbBackend, NapiInMemoryBackend, NapiPostgresBackend};
 use crate::exceptions;
 use crate::flow::NapiWorkflow;
 
@@ -76,6 +76,33 @@ impl NapiWorker {
             worker_id,
             backend_kind: BackendKind::Postgres(Arc::clone(&backend.inner)),
             postgres_url: Some(backend.url.clone()),
+            poll_interval: Duration::from_millis(
+                #[allow(clippy::cast_sign_loss)]
+                {
+                    poll_interval_ms.unwrap_or(5000.0) as u64
+                },
+            ),
+            claim_ttl: Duration::from_millis(
+                #[allow(clippy::cast_sign_loss)]
+                {
+                    claim_ttl_ms.unwrap_or(300_000.0) as u64
+                },
+            ),
+        }
+    }
+
+    /// Create a worker with a `DynamoDB` backend.
+    #[napi(factory)]
+    pub fn with_dynamodb(
+        worker_id: String,
+        backend: &NapiDynamoDbBackend,
+        poll_interval_ms: Option<f64>,
+        claim_ttl_ms: Option<f64>,
+    ) -> Self {
+        Self {
+            worker_id,
+            backend_kind: BackendKind::DynamoDb(Arc::clone(&backend.inner)),
+            postgres_url: None,
             poll_interval: Duration::from_millis(
                 #[allow(clippy::cast_sign_loss)]
                 {
@@ -155,7 +182,7 @@ impl NapiWorker {
         let postgres_url = self.postgres_url.clone();
         let in_memory_backend = match &self.backend_kind {
             BackendKind::InMemory(b) => Some(Arc::clone(b)),
-            BackendKind::Postgres(_) => None,
+            BackendKind::Postgres(_) | BackendKind::DynamoDb(_) => None,
         };
         let worker_id = self.worker_id.clone();
         let claim_ttl = self.claim_ttl;

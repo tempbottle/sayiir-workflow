@@ -156,6 +156,15 @@ Single-binary durable execution with zero infrastructure. For CLI tools, edge fu
 - SQLite via rusqlite with WAL mode
 - Expose to all language bindings
 
+### AWS Backends (DynamoDB + SQS)
+
+Native AWS persistence and task claiming for teams running on AWS infrastructure.
+
+- **DynamoDB backend** — Serverless persistence with on-demand scaling, no database to manage
+- **SQS-based task claiming** — Replace PostgreSQL polling with SQS message-driven task distribution
+- Fully serverless workflow execution when combined with Lambda
+- Same `Backend` trait — swap in with zero workflow code changes
+
 ---
 
 ## Enterprise — [Sayiir Server](/server/)

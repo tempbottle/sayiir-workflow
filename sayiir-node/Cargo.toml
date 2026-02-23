@@ -20,7 +20,9 @@ serde_json = { workspace = true }
 sayiir-core = { workspace = true }
 sayiir-persistence = { workspace = true }
 sayiir-postgres = { workspace = true }
+sayiir-dynamodb = { workspace = true }
 sayiir-runtime = { workspace = true, features = ["json"] }
+aws-config = "1"
 tracing = { workspace = true }
 
 [build-dependencies]

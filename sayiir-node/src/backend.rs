@@ -2,6 +2,7 @@
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use sayiir_dynamodb::DynamoDbBackend;
 use sayiir_persistence::InMemoryBackend;
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
@@ -67,10 +68,62 @@ impl NapiPostgresBackend {
     }
 }
 
+/// `DynamoDB` persistence backend.
+///
+/// Connects to Amazon `DynamoDB` and stores workflow snapshots durably.
+#[napi]
+#[derive(Clone)]
+pub struct NapiDynamoDbBackend {
+    pub(crate) inner: Arc<DynamoDbBackend<JsonCodec>>,
+    #[allow(dead_code)]
+    pub(crate) runtime: Arc<tokio::runtime::Runtime>,
+}
+
+#[napi]
+impl NapiDynamoDbBackend {
+    /// Connect to `DynamoDB`.
+    ///
+    /// @param region - AWS region (e.g. `us-east-1`)
+    /// @param prefix - Table name prefix (e.g. `sayiir`)
+    /// @param `endpointUrl` - Optional endpoint URL override (for `LocalStack`)
+    #[napi(factory)]
+    pub fn connect(region: String, prefix: String, endpoint_url: Option<String>) -> Result<Self> {
+        tracing::info!("connecting to DynamoDB backend");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+
+        let backend = runtime
+            .block_on(async {
+                let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .region(aws_config::Region::new(region));
+                if let Some(ref url) = endpoint_url {
+                    loader = loader.endpoint_url(url);
+                }
+                let config = loader.load().await;
+                DynamoDbBackend::<JsonCodec>::new(&config, &prefix).await
+            })
+            .map_err(|e| {
+                tracing::error!(error = %e, "failed to connect to DynamoDB");
+                Error::new(Status::GenericFailure, e.to_string())
+            })?;
+
+        tracing::info!("DynamoDB backend connected");
+
+        Ok(Self {
+            inner: Arc::new(backend),
+            runtime: Arc::new(runtime),
+        })
+    }
+}
+
 /// Internal enum dispatching to either backend kind.
 pub(crate) enum BackendKind {
     InMemory(Arc<InMemoryBackend>),
     Postgres(Arc<PostgresBackend<JsonCodec>>),
+    DynamoDb(Arc<DynamoDbBackend<JsonCodec>>),
 }
 
 /// Dispatch a call to the backend regardless of variant.
@@ -79,6 +132,7 @@ macro_rules! with_backend {
         match &$self.backend {
             BackendKind::InMemory($backend) => $body,
             BackendKind::Postgres($backend) => $body,
+            BackendKind::DynamoDb($backend) => $body,
         }
     };
 }
@@ -99,6 +153,7 @@ macro_rules! dispatch {
         match $self {
             BackendKind::InMemory($inner) => $body,
             BackendKind::Postgres($inner) => $body,
+            BackendKind::DynamoDb($inner) => $body,
         }
     };
 }
