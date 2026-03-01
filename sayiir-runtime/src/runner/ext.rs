@@ -6,6 +6,16 @@ use sayiir_core::codec::{Codec, EnvelopeCodec};
 use sayiir_core::workflow::{Workflow, WorkflowStatus};
 
 /// Extension trait providing convenience methods on [`Workflow`].
+///
+/// # Caveats
+///
+/// This trait uses [`InProcessRunner`] under the hood, which means:
+/// - **No checkpointing** — workflow state is not persisted between steps.
+/// - **No crash recovery** — if the process dies, progress is lost.
+/// - **No distributed execution** — everything runs in the current process.
+///
+/// For production use with durability guarantees, use a [`WorkflowRunner`]
+/// backed by a persistence backend (e.g. `PostgreSQL`) instead.
 pub trait WorkflowRunExt<C, Input, M> {
     /// Run the workflow once in-process without persistence.
     ///

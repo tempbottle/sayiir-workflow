@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use sayiir_core::LoopResult;
 use sayiir_core::context::WorkflowContext;
 use sayiir_core::error::BoxError;
@@ -8,35 +10,10 @@ use sayiir_core::task::CoreTask;
 use sayiir_core::workflow::{WorkflowBuilder, WorkflowStatus};
 use sayiir_macros::{BranchKey, task, workflow};
 use sayiir_persistence::SnapshotStore;
-use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::CheckpointingRunner;
 use sayiir_runtime::serialization::JsonCodec;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::sync::Arc;
-use testcontainers::ImageExt;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
-
-// ─── Setup ───────────────────────────────────────────────────────────────────
-
-async fn setup() -> (
-    testcontainers::ContainerAsync<Postgres>,
-    PostgresBackend<JsonCodec>,
-) {
-    let container = Postgres::default()
-        .with_tag("17-alpine")
-        .start()
-        .await
-        .unwrap();
-    let port = container.get_host_port_ipv4(5432).await.unwrap();
-    let url = format!("postgresql://postgres:postgres@127.0.0.1:{port}/postgres");
-    let pool = PgPool::connect(&url).await.unwrap();
-    let backend = PostgresBackend::<JsonCodec>::connect_with(pool)
-        .await
-        .unwrap();
-    (container, backend)
-}
 
 // ─── Task definitions ────────────────────────────────────────────────────────
 
@@ -230,7 +207,7 @@ fn task_register_into_registry() {
 
 #[tokio::test]
 async fn task_macro_with_then_task() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let codec = Arc::new(JsonCodec);
@@ -261,7 +238,7 @@ async fn task_macro_with_then_task() {
 
 #[tokio::test]
 async fn task_macro_with_then_registered() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     // Use then_registered when task IDs are determined at runtime,
@@ -291,7 +268,7 @@ async fn task_macro_with_then_registered() {
 
 #[tokio::test]
 async fn workflow_macro_linear() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let workflow = workflow! {
@@ -313,7 +290,7 @@ async fn workflow_macro_linear() {
 
 #[tokio::test]
 async fn workflow_macro_inline_task() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let workflow = workflow! {
@@ -361,7 +338,7 @@ async fn join_branches(
 
 #[tokio::test]
 async fn workflow_macro_fork_join() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let workflow = workflow! {
@@ -384,7 +361,7 @@ async fn workflow_macro_fork_join() {
 async fn workflow_macro_signal() {
     use sayiir_persistence::SignalStore;
 
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let workflow = workflow! {
@@ -445,7 +422,7 @@ async fn handle_default(input: u32) -> Result<u32, BoxError> {
 
 #[tokio::test]
 async fn workflow_macro_route() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let workflow = workflow! {
@@ -479,7 +456,7 @@ async fn unwrap_envelope(
 
 #[tokio::test]
 async fn workflow_macro_route_then_next() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let workflow = workflow! {
@@ -516,7 +493,7 @@ enum Size {
 
 #[tokio::test]
 async fn workflow_macro_typed_route() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let workflow = workflow! {
@@ -543,7 +520,7 @@ async fn workflow_macro_typed_route() {
 
 #[tokio::test]
 async fn workflow_macro_typed_route_then_next() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let workflow = workflow! {
@@ -584,7 +561,7 @@ async fn accumulate(input: u32) -> Result<LoopResult<u32>, BoxError> {
 
 #[tokio::test]
 async fn workflow_macro_loop() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let workflow = workflow! {
@@ -604,7 +581,7 @@ async fn workflow_macro_loop() {
 
 #[tokio::test]
 async fn workflow_macro_loop_exit_with_last() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     // Body always returns Again; max 3 iterations with exit_with_last
@@ -625,7 +602,7 @@ async fn workflow_macro_loop_exit_with_last() {
 
 #[tokio::test]
 async fn workflow_macro_loop_in_pipeline() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let workflow = workflow! {
@@ -645,7 +622,7 @@ async fn workflow_macro_loop_in_pipeline() {
 
 #[tokio::test]
 async fn workflow_macro_flow_basic() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     // Build child workflow
@@ -672,7 +649,7 @@ async fn workflow_macro_flow_basic() {
 
 #[tokio::test]
 async fn workflow_macro_flow_in_pipeline() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, _url) = common::setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     // Build child: double

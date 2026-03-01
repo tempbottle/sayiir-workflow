@@ -69,6 +69,72 @@ impl TaskClaim {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claim(worker: &str, expires_at: Option<u64>) -> TaskClaim {
+        TaskClaim {
+            instance_id: "inst-1".into(),
+            task_id: "task-1".into(),
+            worker_id: worker.into(),
+            claimed_at: 1_000_000,
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn no_ttl_never_expires() {
+        assert!(!claim("w1", None).is_expired());
+    }
+
+    #[test]
+    fn future_expiry_is_not_expired() {
+        let far_future = Utc::now().timestamp() as u64 + 3600;
+        assert!(!claim("w1", Some(far_future)).is_expired());
+    }
+
+    #[test]
+    fn past_expiry_is_expired() {
+        assert!(claim("w1", Some(0)).is_expired());
+    }
+
+    #[test]
+    fn boundary_expiry_is_expired() {
+        // expires_at == now should be expired (now >= expires_at)
+        let now = Utc::now().timestamp() as u64;
+        assert!(claim("w1", Some(now)).is_expired());
+    }
+
+    #[test]
+    fn is_owned_by_matching_worker() {
+        assert!(claim("worker-a", None).is_owned_by("worker-a"));
+    }
+
+    #[test]
+    fn is_not_owned_by_different_worker() {
+        assert!(!claim("worker-a", None).is_owned_by("worker-b"));
+    }
+
+    #[test]
+    fn new_with_ttl_sets_expiry() {
+        let c = TaskClaim::new(
+            "i".into(),
+            "t".into(),
+            "w".into(),
+            Some(Duration::seconds(60)),
+        );
+        assert!(c.expires_at.is_some());
+        assert!(c.expires_at.unwrap() > c.claimed_at);
+    }
+
+    #[test]
+    fn new_without_ttl_has_no_expiry() {
+        let c = TaskClaim::new("i".into(), "t".into(), "w".into(), None);
+        assert!(c.expires_at.is_none());
+    }
+}
+
 /// Information about an available task ready for execution.
 #[derive(Debug, Clone)]
 pub struct AvailableTask {
