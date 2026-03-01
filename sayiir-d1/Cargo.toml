@@ -9,7 +9,6 @@ repository.workspace = true
 homepage.workspace = true
 categories.workspace = true
 keywords.workspace = true
-documentation = "https://docs.rs/sayiir-d1"
 
 [lib]
 name = "sayiir_d1"

@@ -63,8 +63,11 @@ impl codec::sealed::DecodeValue<WorkflowSnapshot> for JsonCodec {
 ///
 /// The assumption holds when each workflow instance is owned by a single
 /// Worker or Durable Object — the standard Cloudflare deployment model. For
-/// use cases that require concurrent writers, use the Postgres backend which
-/// wraps mutations in `SELECT … FOR UPDATE` transactions.
+/// use cases that require concurrent writers, this backend is not suitable.
+///
+/// D1 is a persistent SQLite database hosted by Cloudflare. The data survives across Worker invocations. But a single
+/// D1 binding is accessed by one Worker instance at a time per request, so concurrent writes from multiple in-flight
+/// requests to the same Worker are not possible (Workers are single-threaded per request).
 ///
 /// # Example
 ///
