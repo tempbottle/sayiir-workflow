@@ -822,6 +822,78 @@ impl WorkflowSnapshot {
         };
         self.updated_at = Self::current_timestamp();
     }
+
+    // --- Persistence helpers (database column extraction) ---
+
+    /// The current task ID, if the workflow is at a task position.
+    #[must_use]
+    pub fn current_task_id(&self) -> Option<&str> {
+        match &self.state {
+            WorkflowSnapshotState::InProgress {
+                position: ExecutionPosition::AtTask { task_id },
+                ..
+            } => Some(task_id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The count of completed tasks in the snapshot.
+    #[must_use]
+    pub fn completed_task_count(&self) -> i32 {
+        match &self.state {
+            WorkflowSnapshotState::InProgress {
+                completed_tasks, ..
+            }
+            | WorkflowSnapshotState::Cancelled {
+                completed_tasks, ..
+            }
+            | WorkflowSnapshotState::Paused {
+                completed_tasks, ..
+            } => completed_tasks.len().try_into().unwrap_or(i32::MAX),
+            _ => 0,
+        }
+    }
+
+    /// The error message, if the workflow is in a failed state.
+    #[must_use]
+    pub fn error_message(&self) -> Option<&str> {
+        match &self.state {
+            WorkflowSnapshotState::Failed { error } => Some(error.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The position kind string (e.g. `"at_task"`, `"at_delay"`), if applicable.
+    ///
+    /// Returns `None` for terminal states (Completed, Failed, Cancelled).
+    #[must_use]
+    pub fn position_kind(&self) -> Option<&str> {
+        match &self.state {
+            WorkflowSnapshotState::InProgress { position, .. }
+            | WorkflowSnapshotState::Paused { position, .. } => Some(position.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// The delay wake-at time, if the workflow is parked at a delay or timed signal.
+    #[must_use]
+    pub fn delay_wake_at(&self) -> Option<DateTime<Utc>> {
+        match &self.state {
+            WorkflowSnapshotState::InProgress {
+                position: ExecutionPosition::AtDelay { wake_at, .. },
+                ..
+            }
+            | WorkflowSnapshotState::InProgress {
+                position:
+                    ExecutionPosition::AtSignal {
+                        wake_at: Some(wake_at),
+                        ..
+                    },
+                ..
+            } => Some(*wake_at),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

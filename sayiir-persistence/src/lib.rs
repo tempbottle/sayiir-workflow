@@ -41,6 +41,7 @@
 
 mod backend;
 mod in_memory;
+pub mod validation;
 
 pub use backend::{BackendError, PersistentBackend, SignalStore, SnapshotStore, TaskClaimStore};
 pub use in_memory::InMemoryBackend;

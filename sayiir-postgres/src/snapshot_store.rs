@@ -7,10 +7,6 @@ use sqlx::Row;
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
-use crate::helpers::{
-    completed_task_count, current_task_id, delay_wake_at, error_message, is_terminal,
-    position_kind, status_str,
-};
 
 impl<C> SnapshotStore for PostgresBackend<C>
 where
@@ -25,7 +21,7 @@ where
         fields(
             db.system = "postgresql",
             instance_id = %snapshot.instance_id,
-            status = %status_str(&snapshot.state),
+            status = %snapshot.state.as_ref(),
         ),
         err(level = tracing::Level::ERROR),
     )]
@@ -33,13 +29,13 @@ where
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         tracing::debug!("saving snapshot");
         let data = self.encode(snapshot)?;
-        let status = status_str(&snapshot.state);
-        let task_id = current_task_id(snapshot).map(ToString::to_string);
-        let task_count = completed_task_count(snapshot);
-        let error = error_message(snapshot).map(ToString::to_string);
-        let terminal = is_terminal(snapshot);
-        let pos_kind = position_kind(snapshot);
-        let wake_at = delay_wake_at(snapshot);
+        let status = snapshot.state.as_ref();
+        let task_id = snapshot.current_task_id().map(ToString::to_string);
+        let task_count = snapshot.completed_task_count();
+        let error = snapshot.error_message().map(ToString::to_string);
+        let terminal = snapshot.state.is_terminal();
+        let pos_kind = snapshot.position_kind();
+        let wake_at = snapshot.delay_wake_at();
 
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
@@ -172,9 +168,9 @@ where
         snapshot.mark_task_completed(task_id.to_string(), output);
 
         let data = self.encode(&snapshot)?;
-        let status = status_str(&snapshot.state);
-        let current = current_task_id(&snapshot).map(ToString::to_string);
-        let task_count = completed_task_count(&snapshot);
+        let status = snapshot.state.as_ref();
+        let current = snapshot.current_task_id().map(ToString::to_string);
+        let task_count = snapshot.completed_task_count();
 
         sqlx::query(
             "UPDATE sayiir_workflow_snapshots

@@ -4,17 +4,13 @@
 //! implementations for true ACID atomicity.
 
 use sayiir_core::codec::{self, Decoder, Encoder};
-use sayiir_core::snapshot::{
-    PauseRequest, SignalKind, SignalRequest, SnapshotStatus, WorkflowSnapshot,
-};
+use sayiir_core::snapshot::{PauseRequest, SignalKind, SignalRequest, WorkflowSnapshot};
+use sayiir_persistence::validation::validate_signal_allowed;
 use sayiir_persistence::{BackendError, SignalStore};
 use sqlx::Row;
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
-use crate::helpers::{
-    completed_task_count, current_task_id, delay_wake_at, error_message, position_kind, status_str,
-};
 
 impl<C> SignalStore for PostgresBackend<C>
 where
@@ -230,10 +226,10 @@ where
         snapshot.mark_cancelled(reason, requested_by, interrupted_at_task.map(String::from));
 
         let data = self.encode(&snapshot)?;
-        let status = status_str(&snapshot.state);
-        let error = error_message(&snapshot).map(ToString::to_string);
-        let pos_kind = position_kind(&snapshot);
-        let wake_at = delay_wake_at(&snapshot);
+        let status = snapshot.state.as_ref();
+        let error = snapshot.error_message().map(ToString::to_string);
+        let pos_kind = snapshot.position_kind();
+        let wake_at = snapshot.delay_wake_at();
 
         sqlx::query(
             "UPDATE sayiir_workflow_snapshots
@@ -326,11 +322,11 @@ where
         snapshot.mark_paused(&pause_request);
 
         let data = self.encode(&snapshot)?;
-        let status = status_str(&snapshot.state);
-        let task_id = current_task_id(&snapshot).map(ToString::to_string);
-        let task_count = completed_task_count(&snapshot);
-        let pos_kind = position_kind(&snapshot);
-        let wake_at = delay_wake_at(&snapshot);
+        let status = snapshot.state.as_ref();
+        let task_id = snapshot.current_task_id().map(ToString::to_string);
+        let task_count = snapshot.completed_task_count();
+        let pos_kind = snapshot.position_kind();
+        let wake_at = snapshot.delay_wake_at();
 
         sqlx::query(
             "UPDATE sayiir_workflow_snapshots
@@ -386,7 +382,7 @@ where
         let mut snapshot = self.decode(raw)?;
 
         if !snapshot.state.is_paused() {
-            let state_name = status_str(&snapshot.state);
+            let state_name = snapshot.state.as_ref();
             return Err(BackendError::CannotPause(format!(
                 "Workflow is not paused (current state: {state_name:?})"
             )));
@@ -395,11 +391,11 @@ where
         snapshot.mark_unpaused();
 
         let data = self.encode(&snapshot)?;
-        let status = status_str(&snapshot.state);
-        let task_id = current_task_id(&snapshot).map(ToString::to_string);
-        let task_count = completed_task_count(&snapshot);
-        let pos_kind = position_kind(&snapshot);
-        let wake_at = delay_wake_at(&snapshot);
+        let status = snapshot.state.as_ref();
+        let task_id = snapshot.current_task_id().map(ToString::to_string);
+        let task_count = snapshot.completed_task_count();
+        let pos_kind = snapshot.position_kind();
+        let wake_at = snapshot.delay_wake_at();
 
         sqlx::query(
             "UPDATE sayiir_workflow_snapshots
@@ -422,30 +418,5 @@ where
         tx.commit().await.map_err(PgError)?;
         tracing::info!(instance_id, "workflow unpaused");
         Ok(snapshot)
-    }
-}
-
-/// Validate that a signal can be sent to a workflow in the given state.
-fn validate_signal_allowed(status: &str, kind: SignalKind) -> Result<(), BackendError> {
-    use std::str::FromStr;
-
-    let Ok(status) = SnapshotStatus::from_str(status) else {
-        // Unknown status from DB — be permissive (forward compatibility).
-        return Ok(());
-    };
-
-    match kind {
-        SignalKind::Cancel => match status {
-            SnapshotStatus::Completed | SnapshotStatus::Failed => {
-                Err(BackendError::CannotCancel(status.as_ref().to_string()))
-            }
-            _ => Ok(()),
-        },
-        SignalKind::Pause => match status {
-            SnapshotStatus::Completed | SnapshotStatus::Failed | SnapshotStatus::Cancelled => {
-                Err(BackendError::CannotPause(status.as_ref().to_string()))
-            }
-            _ => Ok(()),
-        },
     }
 }
