@@ -32,6 +32,7 @@ jobs:
               - 'sayiir-core/**'
               - 'sayiir-persistence/**'
               - 'sayiir-postgres/**'
+              - 'sayiir-d1/**'
               - 'sayiir-runtime/**'
               - 'sayiir-macros/**'
               - 'sayiir-py/**'
@@ -78,12 +79,17 @@ jobs:
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
 
       - name: Run cargo clippy
         run: cargo clippy -- -D warnings
+
+      - name: Run cargo clippy (D1 / WASM)
+        run: cargo clippy -p sayiir-d1 --target wasm32-unknown-unknown -- -D warnings
 
       - name: Run cargo test
         run: cargo test --workspace --all-features
