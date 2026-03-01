@@ -2,9 +2,8 @@
  * Sayiir — Durable workflow engine.
  *
  * Ambient module declaration for Monaco editor intellisense in the playground.
- * This is the canonical source — playground/sayiir.d.ts symlinks here.
  *
- * Keep in sync with the actual API surface when public types change.
+ * Generated from sayiir-nodejs source — keep in sync when public types change.
  */
 
 declare module "sayiir" {
@@ -55,7 +54,7 @@ declare module "sayiir" {
   /**
    * Define a named task.
    *
-   * ```js
+   * ```ts
    * const getUser = task("get-user", async (id) => db.getUser(id), {
    *   timeout: "30s",
    *   retries: 3,
@@ -69,10 +68,17 @@ declare module "sayiir" {
   ): TaskFn<TIn, TOut>;
 
   interface TaskExecutionContext {
-    taskId: string;
     workflowId: string;
-    instanceId?: string;
-    attempt: number;
+    instanceId: string;
+    taskId: string;
+    metadata: {
+      displayName?: string;
+      description?: string;
+      timeoutSecs?: number;
+      tags?: string[];
+      version?: string;
+    };
+    workflowMetadata?: Record<string, unknown> | null;
   }
 
   /** Get the current task execution context (null outside a task). */
@@ -108,9 +114,13 @@ declare module "sayiir" {
     done<T>(value: T): LoopResult<T>;
   };
 
+  type MaxIterationsPolicy = "fail" | "exit_with_last";
+
   interface LoopOptions {
+    /** Maximum number of iterations (default: 10). */
     maxIterations?: number;
-    onMax?: "fail" | "exit_with_last";
+    /** What to do when max iterations is reached (default: "fail"). */
+    onMax?: MaxIterationsPolicy;
   }
 
   // ── Branch ──
@@ -124,10 +134,14 @@ declare module "sayiir" {
     result: T;
   }
 
+  type InferBranchOutputs<T extends readonly BranchDef<any, any>[]> = {
+    [K in keyof T]: T[K] extends BranchDef<any, infer O> ? O : never;
+  };
+
   /**
    * Create a branch for `.fork()`.
    *
-   * ```js
+   * ```ts
    * flow("process")
    *   .fork([branch("email", sendEmail), branch("ship", shipOrder)])
    *   .join("merge", ([email, ship]) => ({ email, ship }))
@@ -137,7 +151,7 @@ declare module "sayiir" {
   function branch<TIn, TOut>(
     name: string,
     fn: TaskFn<TIn, TOut> | ((input: TIn) => TOut | Promise<TOut>),
-  ): BranchDef<TIn, TOut>;
+  ): BranchDef<TIn, Awaited<TOut>>;
 
   // ── Flow builder ──
 
@@ -146,12 +160,12 @@ declare module "sayiir" {
   }
 
   class Flow<TInput, TLast = TInput> {
-    then<TOut>(fn: TaskFn<TLast, TOut>): Flow<TInput, TOut>;
+    then<TOut>(fn: TaskFn<TLast, TOut>): Flow<TInput, Awaited<TOut>>;
     then<TOut>(
       id: string,
       fn: ((input: TLast) => TOut | Promise<TOut>) | TaskFn<TLast, TOut>,
       opts?: StepOptions,
-    ): Flow<TInput, TOut>;
+    ): Flow<TInput, Awaited<TOut>>;
 
     fork<TBranches extends readonly BranchDef<TLast, any>[]>(
       branches: [...TBranches],
@@ -184,7 +198,7 @@ declare module "sayiir" {
       opts?: LoopOptions,
     ): Flow<TInput, TOut>;
 
-    thenFlow<TOut>(workflow: Workflow<TLast, TOut>): Flow<TInput, TOut>;
+    thenFlow<TOut>(workflow: Workflow<TLast, TOut>): Flow<TInput, Awaited<TOut>>;
 
     build(): Workflow<TInput, TLast>;
   }
@@ -193,34 +207,30 @@ declare module "sayiir" {
     join<TOut>(
       id: string,
       fn: (branches: InferBranchOutputs<TBranches>) => TOut | Promise<TOut>,
-    ): Flow<TInput, TOut>;
+    ): Flow<TInput, Awaited<TOut>>;
   }
 
   class RouteBuilder<TInput, TLast, TBranchOut = never, TKey extends string = string> {
     branch<TOut>(
       key: TKey,
       fn: TaskFn<TLast, TOut> | ((input: TLast) => TOut | Promise<TOut>),
-    ): RouteBuilder<TInput, TLast, TBranchOut | TOut, TKey>;
+    ): RouteBuilder<TInput, TLast, TBranchOut | Awaited<TOut>, TKey>;
     branch<TOut>(
       key: TKey,
       id: string,
       fn: ((input: TLast) => TOut | Promise<TOut>) | TaskFn<TLast, TOut>,
-    ): RouteBuilder<TInput, TLast, TBranchOut | TOut, TKey>;
+    ): RouteBuilder<TInput, TLast, TBranchOut | Awaited<TOut>, TKey>;
 
     defaultBranch<TOut>(
       fn: TaskFn<TLast, TOut> | ((input: TLast) => TOut | Promise<TOut>),
-    ): RouteBuilder<TInput, TLast, TBranchOut | TOut, TKey>;
+    ): RouteBuilder<TInput, TLast, TBranchOut | Awaited<TOut>, TKey>;
     defaultBranch<TOut>(
       id: string,
       fn: ((input: TLast) => TOut | Promise<TOut>) | TaskFn<TLast, TOut>,
-    ): RouteBuilder<TInput, TLast, TBranchOut | TOut, TKey>;
+    ): RouteBuilder<TInput, TLast, TBranchOut | Awaited<TOut>, TKey>;
 
     done(): Flow<TInput, BranchEnvelope<TBranchOut>>;
   }
-
-  type InferBranchOutputs<T extends readonly BranchDef<any, any>[]> = {
-    [K in keyof T]: T[K] extends BranchDef<any, infer O> ? O : never;
-  };
 
   class Workflow<TIn, TOut> {
     readonly workflowId: string;
@@ -309,23 +319,47 @@ declare module "sayiir" {
 
   function parseDuration(input: Duration): number;
 
+  // ── Telemetry ──
+
+  /** Initialize the tracing subscriber (idempotent). */
+  function initTracing(): void;
+
+  /** Flush and shut down the OpenTelemetry tracer provider. */
+  function shutdownTracing(): void;
+
   // ── Worker ──
 
   interface WorkerOptions {
-    concurrency?: number;
     pollInterval?: Duration;
+    claimTtl?: Duration;
   }
 
   class Worker {
+    readonly workerId: string;
+    readonly backend: Backend;
+    readonly workflows: readonly Workflow<any, any>[];
+    readonly options: WorkerOptions;
+
     constructor(
-      workflow: Workflow<any, any>,
+      workerId: string,
       backend: Backend,
+      workflows: readonly Workflow<any, any>[],
       opts?: WorkerOptions,
     );
     start(): WorkerHandle;
   }
 
   class WorkerHandle {
-    stop(): void;
+    shutdown(): void;
+    cancelWorkflow(
+      instanceId: string,
+      opts?: { reason?: string; cancelledBy?: string },
+    ): void;
+    pauseWorkflow(
+      instanceId: string,
+      opts?: { reason?: string; pausedBy?: string },
+    ): void;
+    unpauseWorkflow(instanceId: string): void;
+    sendSignal(instanceId: string, signalName: string, payload: unknown): void;
   }
 }
