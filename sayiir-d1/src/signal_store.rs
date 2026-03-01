@@ -91,7 +91,11 @@ impl SignalStore for D1Backend {
 
         let requested_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
             .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|_| chrono::Utc::now());
+            .map_err(|e| {
+                BackendError::Backend(format!(
+                    "invalid created_at timestamp {created_at_str:?}: {e}"
+                ))
+            })?;
 
         Ok(Some(SignalRequest {
             reason,

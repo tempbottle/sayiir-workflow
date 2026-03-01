@@ -14,8 +14,16 @@ use wasm_bindgen_futures::JsFuture;
 /// A wrapper around [`JsFuture`] that implements [`Send`].
 pub(crate) struct SendJsFuture(JsFuture);
 
-// SAFETY: WASM is single-threaded — no real cross-thread access occurs.
+// SAFETY: WASM without atomics is single-threaded — no real cross-thread
+// access occurs.
+#[cfg(not(target_feature = "atomics"))]
 unsafe impl Send for SendJsFuture {}
+
+#[cfg(target_feature = "atomics")]
+compile_error!(
+    "sayiir-d1 relies on single-threaded WASM; \
+     building with atomics would make `unsafe impl Send` unsound"
+);
 
 impl Future for SendJsFuture {
     type Output = Result<JsValue, JsValue>;

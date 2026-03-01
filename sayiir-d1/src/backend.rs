@@ -61,14 +61,11 @@ impl codec::sealed::DecodeValue<WorkflowSnapshot> for JsonCodec {
 /// let backend = D1Backend::new(db).await?;
 /// ```
 pub struct D1Backend {
+    // `SendWrapper` provides `Send + Sync` for the `!Send` `D1Database`.
+    // SAFETY is upheld by `SendWrapper`'s contract: access only from the
+    // original thread — guaranteed on single-threaded WASM.
     db: SendWrapper<D1Database>,
 }
-
-// SAFETY: WASM is single-threaded. `JsValue` is `!Send` but there is only
-// one thread, so sending across async boundaries is safe. This matches the
-// pattern used by `worker-rs`.
-unsafe impl Send for D1Backend {}
-unsafe impl Sync for D1Backend {}
 
 impl D1Backend {
     /// Create a new D1 backend and run schema migrations.
