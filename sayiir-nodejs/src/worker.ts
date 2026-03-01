@@ -163,6 +163,9 @@ export class Worker {
       );
     }
 
-    throw new Error("Unsupported backend type");
+    const received = this.backend?.constructor?.name ?? typeof this.backend;
+    throw new Error(
+      `Unsupported backend type: ${received}. Expected InMemoryBackend or PostgresBackend.`,
+    );
   }
 }
