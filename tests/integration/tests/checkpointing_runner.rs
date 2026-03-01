@@ -1,7 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
+use common::{ctx, setup};
 use sayiir_core::codec::Encoder;
-use sayiir_core::context::WorkflowContext;
 use sayiir_core::error::BoxError;
 use sayiir_core::task::BranchOutputs;
 use sayiir_core::workflow::{WorkflowBuilder, WorkflowStatus};
@@ -11,32 +13,6 @@ use sayiir_runtime::CheckpointingRunner;
 use sayiir_runtime::serialization::JsonCodec;
 use sqlx::PgPool;
 use std::sync::Arc;
-use testcontainers::ImageExt;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
-
-async fn setup() -> (
-    testcontainers::ContainerAsync<Postgres>,
-    PostgresBackend<JsonCodec>,
-    String,
-) {
-    let container = Postgres::default()
-        .with_tag("17-alpine")
-        .start()
-        .await
-        .unwrap();
-    let port = container.get_host_port_ipv4(5432).await.unwrap();
-    let url = format!("postgresql://postgres:postgres@127.0.0.1:{port}/postgres");
-    let pool = PgPool::connect(&url).await.unwrap();
-    let backend = PostgresBackend::<JsonCodec>::connect_with(pool)
-        .await
-        .unwrap();
-    (container, backend, url)
-}
-
-fn ctx() -> WorkflowContext<JsonCodec, ()> {
-    WorkflowContext::new("test-wf", Arc::new(JsonCodec), Arc::new(()))
-}
 
 // ─── 1. run_single_task ──────────────────────────────────────────────────────
 

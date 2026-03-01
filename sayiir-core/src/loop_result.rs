@@ -92,3 +92,64 @@ impl<T> LoopResult<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn done_is_done() {
+        let r = LoopResult::Done(42);
+        assert!(r.is_done());
+        assert!(!r.is_again());
+    }
+
+    #[test]
+    fn again_is_again() {
+        let r = LoopResult::Again(42);
+        assert!(r.is_again());
+        assert!(!r.is_done());
+    }
+
+    #[test]
+    fn into_inner_done() {
+        assert_eq!(LoopResult::Done("hello").into_inner(), "hello");
+    }
+
+    #[test]
+    fn into_inner_again() {
+        assert_eq!(LoopResult::Again(99).into_inner(), 99);
+    }
+
+    #[test]
+    fn into_decision_done() {
+        let (decision, val) = LoopResult::Done(10).into_decision();
+        assert_eq!(decision, LoopDecision::Done);
+        assert_eq!(val, 10);
+    }
+
+    #[test]
+    fn into_decision_again() {
+        let (decision, val) = LoopResult::Again(5).into_decision();
+        assert_eq!(decision, LoopDecision::Again);
+        assert_eq!(val, 5);
+    }
+
+    #[test]
+    fn serde_round_trip_done() {
+        let r = LoopResult::Done(42u32);
+        let json = serde_json::to_string(&r).unwrap();
+        let back: LoopResult<u32> = serde_json::from_str(&json).unwrap();
+        assert!(back.is_done());
+        assert_eq!(back.into_inner(), 42);
+    }
+
+    #[test]
+    fn serde_round_trip_again() {
+        let r = LoopResult::Again("next".to_string());
+        let json = serde_json::to_string(&r).unwrap();
+        let back: LoopResult<String> = serde_json::from_str(&json).unwrap();
+        assert!(back.is_again());
+        assert_eq!(back.into_inner(), "next");
+    }
+}
