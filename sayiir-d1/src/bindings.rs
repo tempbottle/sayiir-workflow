@@ -86,5 +86,6 @@ pub(crate) fn get_blob_col(row: &JsValue, col: &str) -> Option<Vec<u8>> {
 #[allow(dead_code)]
 pub(crate) fn get_i32_col(row: &JsValue, col: &str) -> Option<i32> {
     let val = js_sys::Reflect::get(row, &JsValue::from_str(col)).ok()?;
+    #[allow(clippy::cast_possible_truncation)]
     val.as_f64().map(|f| f as i32)
 }

@@ -1,4 +1,4 @@
-//! Cloudflare D1 (SQLite) persistence backend for the Sayiir workflow engine.
+//! Cloudflare D1 (`SQLite`) persistence backend for the Sayiir workflow engine.
 //!
 //! This crate provides [`D1Backend`], an implementation of
 //! [`SnapshotStore`](sayiir_persistence::SnapshotStore) and
@@ -13,7 +13,7 @@
 //!   table for debugging and auditing.
 //! - **Signal support**: Cancel, pause, and external event buffering.
 //!
-//! # D1 / SQLite adaptations
+//! # D1 / `SQLite` adaptations
 //!
 //! - `BLOB` instead of `BYTEA`
 //! - `TEXT` with ISO 8601 timestamps instead of `TIMESTAMPTZ`
