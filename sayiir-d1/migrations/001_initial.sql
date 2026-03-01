@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS sayiir_workflow_snapshot_history (
     created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_history_instance ON sayiir_workflow_snapshot_history (instance_id, version);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_history_instance ON sayiir_workflow_snapshot_history (instance_id, version);
 
 -- Cancel/pause signals (at most one per kind per instance).
 CREATE TABLE IF NOT EXISTS sayiir_workflow_signals (
