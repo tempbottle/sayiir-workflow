@@ -783,7 +783,10 @@ async fn run_use_existing_returns_completed() {
     let snapshot = backend.load_snapshot("inst-reuse").await.unwrap();
     let output_bytes = snapshot.state.completed_output().unwrap().clone();
     let output: u32 = JsonCodec.decode(output_bytes).unwrap();
-    assert_eq!(output, 6, "UseExisting should not re-execute; stored output should remain 6");
+    assert_eq!(
+        output, 6,
+        "UseExisting should not re-execute; stored output should remain 6"
+    );
 }
 
 #[tokio::test]
