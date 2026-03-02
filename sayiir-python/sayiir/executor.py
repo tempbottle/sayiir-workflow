@@ -54,7 +54,10 @@ def run_workflow(
     """
     if instance_id is not None:
         status = run_durable_workflow(
-            workflow, instance_id, input_data, backend=backend,
+            workflow,
+            instance_id,
+            input_data,
+            backend=backend,
             conflict_policy=conflict_policy,
         )
         if not status.is_completed():

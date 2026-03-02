@@ -275,9 +275,9 @@ If the process crashes during the 24-hour delay, calling `resume` will continue 
 
 ## Idempotency and conflict policies
 
-Every durable workflow run requires an `instance_id`. By default, calling `run` with an `instance_id` that already has a snapshot will fail — this prevents accidental overwrites of in-flight state. You can change this behaviour with a **conflict policy**:
+Every durable workflow run requires an `instance_id`. By default, calling `run` with an `instance_id` that already has a snapshot will fail — this prevents accidental overwrites of in-flight state. You can change this behavior with a **conflict policy**:
 
-| Policy | Behaviour |
+| Policy | Behavior |
 |---|---|
 | `fail` (default) | Raises an error if a snapshot already exists for this `instance_id`. |
 | `use_existing` | Returns the existing workflow status without re-running. Useful for at-least-once submission patterns where the caller may retry. |
