@@ -170,8 +170,8 @@ export interface NativeAddon {
   NapiInMemoryBackend: new () => NapiInMemoryBackend;
   NapiPostgresBackend: { connect(url: string): NapiPostgresBackend };
   NapiDurableEngine: {
-    withInMemory(backend: NapiInMemoryBackend): NapiDurableEngine;
-    withPostgres(backend: NapiPostgresBackend): NapiDurableEngine;
+    withInMemory(backend: NapiInMemoryBackend, conflictPolicy?: string): NapiDurableEngine;
+    withPostgres(backend: NapiPostgresBackend, conflictPolicy?: string): NapiDurableEngine;
   };
   NapiWorker: {
     withInMemory(

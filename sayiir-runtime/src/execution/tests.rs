@@ -555,15 +555,21 @@ async fn test_checkpointing_skipped_tasks_bypass_timeout() {
 #[tokio::test]
 async fn test_prepare_run_creates_snapshot() {
     let backend = InMemoryBackend::new();
-    let snapshot = prepare_run(
+    let outcome = prepare_run(
         "inst-1".into(),
         "hash-1".into(),
         Bytes::from("input"),
         "task-1".into(),
         &backend,
+        sayiir_core::workflow::ConflictPolicy::Fail,
     )
     .await
     .unwrap();
+
+    let snapshot = match outcome {
+        crate::execution::PrepareRunOutcome::Fresh(s) => *s,
+        _ => panic!("expected Fresh outcome"),
+    };
 
     assert_eq!(snapshot.instance_id, "inst-1");
     assert_eq!(snapshot.definition_hash, "hash-1");

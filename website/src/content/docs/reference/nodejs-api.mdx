@@ -472,12 +472,24 @@ const result = await runWorkflow(workflow, 42, {
   instanceId: "run-001",
   backend,
 });
+
+// Idempotent — safe to call multiple times
+const result = await runWorkflow(workflow, 42, {
+  instanceId: "run-001",
+  backend,
+  conflictPolicy: "useExisting",
+});
 ```
 
 **Parameters:**
 - `workflow` (Workflow\<TIn, TOut\>) — The workflow to run
 - `input` (TIn) — Input to the first task
-- `opts` (DurableRunOptions, optional) — `{ instanceId: string, backend: Backend }` for durable execution
+- `opts` (DurableRunOptions, optional) — Durable execution options
+
+**DurableRunOptions:**
+- `instanceId` (string) — Unique execution instance ID
+- `backend` (Backend) — Persistence backend
+- `conflictPolicy` (ConflictPolicy, optional) — What to do when `instanceId` already has a snapshot: `"fail"` (default), `"useExisting"`, or `"terminateExisting"`
 
 **Returns:** Promise\<TOut\> — The workflow result
 
@@ -499,7 +511,7 @@ const result = runWorkflowSync(workflow, 42);
 
 **Returns:** TOut — The workflow result
 
-### runDurableWorkflow(workflow, instanceId, input, backend)
+### runDurableWorkflow(workflow, instanceId, input, backend, conflictPolicy?)
 
 Run a workflow with checkpointing and durability. Returns `WorkflowStatus`.
 
@@ -512,6 +524,9 @@ const status = runDurableWorkflow(workflow, "run-001", 42, backend);
 if (status.status === "completed") {
   console.log(status.output); // 42
 }
+
+// Idempotent — returns existing status if already run
+const status = runDurableWorkflow(workflow, "run-001", 42, backend, "useExisting");
 ```
 
 **Parameters:**
@@ -519,6 +534,7 @@ if (status.status === "completed") {
 - `instanceId` (string) — Unique identifier for this execution
 - `input` (TIn) — Input to the first task
 - `backend` (Backend) — Persistence backend
+- `conflictPolicy` (ConflictPolicy, optional) — `"fail"` (default), `"useExisting"`, or `"terminateExisting"`
 
 **Returns:** `WorkflowStatus<TOut>`
 

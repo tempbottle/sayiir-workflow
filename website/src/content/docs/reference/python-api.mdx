@@ -450,7 +450,7 @@ print(workflow.definition_hash)   # "abc123..."
 
 ## Execution Functions
 
-### run_workflow(workflow, input_data, *, instance_id=None, backend=None)
+### run_workflow(workflow, input_data, *, instance_id=None, backend=None, conflict_policy=None)
 
 Run a workflow to completion. Without `instance_id`, runs entirely in-memory with no persistence (fastest path for prototyping). With `instance_id` and `backend`, runs with full checkpointing — but still returns the output directly. If the workflow doesn't complete (e.g., parks on a delay or signal), raises `WorkflowError`.
 
@@ -463,6 +463,10 @@ result = run_workflow(workflow, 21)
 # Production — same function, just add params
 backend = PostgresBackend("postgresql://localhost/sayiir")
 result = run_workflow(workflow, 21, instance_id="run-001", backend=backend)
+
+# Idempotent — safe to call multiple times
+result = run_workflow(workflow, 21, instance_id="run-001", backend=backend,
+                      conflict_policy="use_existing")
 ```
 
 **Parameters:**
@@ -470,12 +474,15 @@ result = run_workflow(workflow, 21, instance_id="run-001", backend=backend)
 - `input_data` (Any) — Input to the first task
 - `instance_id` (str, optional) — Unique identifier for durable execution
 - `backend` (InMemoryBackend | PostgresBackend, optional) — Persistence backend (required with `instance_id`)
+- `conflict_policy` (str, optional) — What happens when `instance_id` already exists: `"fail"` (default), `"use_existing"`, or `"terminate_existing"`
 
 **Returns:** The workflow result (Any)
 
-**Raises:** `WorkflowError` if durable workflow did not complete. Use `run_durable_workflow()` when you need the full `WorkflowStatus` object.
+**Raises:**
+- `WorkflowError` if durable workflow did not complete. Use `run_durable_workflow()` when you need the full `WorkflowStatus` object.
+- `InstanceAlreadyExistsError` if `conflict_policy` is `"fail"` (default) and the instance already exists.
 
-### run_durable_workflow(workflow, instance_id, input_data, backend=None)
+### run_durable_workflow(workflow, instance_id, input_data, backend=None, conflict_policy=None)
 
 Run a workflow with checkpointing and durability. Returns WorkflowStatus.
 
@@ -501,6 +508,7 @@ if status.is_completed():
 - `instance_id` (str) — Unique identifier for this execution instance
 - `input_data` (Any) — Input to the first task
 - `backend` (InMemoryBackend | PostgresBackend, optional) — Persistence backend (defaults to InMemoryBackend)
+- `conflict_policy` (str, optional) — What happens when `instance_id` already exists: `"fail"` (default), `"use_existing"`, or `"terminate_existing"`
 
 **Returns:** WorkflowStatus
 
@@ -845,6 +853,19 @@ try:
     backend = PostgresBackend("postgresql://invalid:url")
 except BackendError as e:
     print(f"Backend error: {e}")
+```
+
+### InstanceAlreadyExistsError
+
+Raised when running a durable workflow with an `instance_id` that already has a snapshot and `conflict_policy` is `"fail"` (the default).
+
+```python
+from sayiir import InstanceAlreadyExistsError
+
+try:
+    run_durable_workflow(workflow, "run-001", input_data, backend=backend)
+except InstanceAlreadyExistsError:
+    print("Instance already exists — use conflict_policy='use_existing' for idempotent runs")
 ```
 
 ## Type Annotations

@@ -9,8 +9,8 @@ use sayiir_core::task::BranchOutputs;
 use sayiir_core::workflow::{WorkflowBuilder, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_postgres::PostgresBackend;
-use sayiir_runtime::CheckpointingRunner;
 use sayiir_runtime::serialization::JsonCodec;
+use sayiir_runtime::{CheckpointingRunner, ConflictPolicy};
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -732,5 +732,69 @@ async fn same_task_version_allows_resume() {
         .resume(workflow_same.workflow(), "inst-same-ver")
         .await
         .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+// ─── ConflictPolicy tests ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn run_fail_policy_rejects_duplicate() {
+    let (_c, backend, _url) = setup().await;
+    let runner = CheckpointingRunner::new(backend).with_conflict_policy(ConflictPolicy::Fail);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First run succeeds
+    let status = runner.run(&workflow, "inst-dup", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // Second run with same instance_id should fail
+    let err = runner.run(&workflow, "inst-dup", 5u32).await.unwrap_err();
+    assert!(
+        err.to_string().contains("already exists"),
+        "expected InstanceAlreadyExists error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn run_use_existing_returns_completed() {
+    let (_c, backend, _url) = setup().await;
+    let runner =
+        CheckpointingRunner::new(backend).with_conflict_policy(ConflictPolicy::UseExisting);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // Run to completion
+    let status = runner.run(&workflow, "inst-reuse", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // Second run returns cached Completed status
+    let status = runner.run(&workflow, "inst-reuse", 99u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+#[tokio::test]
+async fn run_terminate_existing_restarts() {
+    let (_c, backend, _url) = setup().await;
+    let runner =
+        CheckpointingRunner::new(backend).with_conflict_policy(ConflictPolicy::TerminateExisting);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First run
+    let status = runner.run(&workflow, "inst-restart", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // Second run should succeed (old snapshot deleted, fresh execution)
+    let status = runner.run(&workflow, "inst-restart", 10u32).await.unwrap();
     assert!(matches!(status, WorkflowStatus::Completed));
 }

@@ -46,7 +46,7 @@ export {
   InMemoryBackend,
   PostgresBackend,
 } from "./executor.js";
-export type { Backend, DurableRunOptions } from "./executor.js";
+export type { Backend, ConflictPolicy, DurableRunOptions } from "./executor.js";
 
 // Telemetry
 export { initTracing, shutdownTracing } from "./telemetry.js";

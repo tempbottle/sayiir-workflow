@@ -10,11 +10,11 @@ use std::sync::Arc;
 
 use sayiir_core::context::{TaskExecutionContext, with_thread_local_task_context};
 use sayiir_core::snapshot::{SignalKind, SignalRequest};
-use sayiir_core::workflow::{WorkflowContinuation, WorkflowStatus};
+use sayiir_core::workflow::{ConflictPolicy, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_runtime::{
-    ResumeOutcome, execute_continuation_with_checkpointing, finalize_execution, prepare_resume,
-    prepare_run,
+    PrepareRunOutcome, ResumeOutcome, execute_continuation_with_checkpointing, finalize_execution,
+    prepare_resume, prepare_run,
 };
 
 use sayiir_postgres::PostgresBackend;
@@ -36,6 +36,7 @@ use crate::flow::PyWorkflow;
 pub struct PyDurableEngine {
     backend: BackendKind,
     runtime: tokio::runtime::Runtime,
+    conflict_policy: ConflictPolicy,
 }
 
 #[pymethods]
@@ -44,8 +45,13 @@ impl PyDurableEngine {
     ///
     /// Args:
     ///     backend: Either `InMemoryBackend()` or `PostgresBackend(url)`
+    ///     `conflict_policy`: What to do when an `instance_id` already exists.
+    ///         One of `"fail"` (default), `"use_existing"`, or `"terminate_existing"`.
     #[new]
-    fn new(backend: &Bound<'_, PyAny>) -> PyResult<Self> {
+    #[pyo3(signature = (backend, conflict_policy=None))]
+    fn new(backend: &Bound<'_, PyAny>, conflict_policy: Option<&str>) -> PyResult<Self> {
+        let policy = parse_conflict_policy(conflict_policy)?;
+
         if let Ok(mem) = backend.extract::<PyInMemoryBackend>() {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -55,6 +61,7 @@ impl PyDurableEngine {
             Ok(Self {
                 backend: BackendKind::InMemory(Arc::clone(&mem.inner)),
                 runtime,
+                conflict_policy: policy,
             })
         } else if let Ok(pg) = backend.extract::<PyPostgresBackend>() {
             // Create a fresh pool on the engine's own runtime to avoid
@@ -71,6 +78,7 @@ impl PyDurableEngine {
             Ok(Self {
                 backend: BackendKind::Postgres(Arc::new(fresh_backend)),
                 runtime,
+                conflict_policy: policy,
             })
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -103,18 +111,26 @@ impl PyDurableEngine {
         let workflow_id = workflow.workflow_id.clone();
         let workflow_metadata_json: Option<Arc<str>> =
             workflow.metadata_json.as_deref().map(Arc::from);
+        let conflict_policy = self.conflict_policy;
         let (status, output_bytes) = with_backend!(self, |backend| {
             let backend = Arc::clone(backend);
             py.detach(|| {
                 self.runtime.block_on(async {
-                    let mut snapshot = prepare_run(
+                    let mut snapshot = match prepare_run(
                         instance_id,
                         definition_hash,
                         input_bytes.clone(),
                         first_task_id,
                         backend.as_ref(),
+                        conflict_policy,
                     )
-                    .await?;
+                    .await?
+                    {
+                        PrepareRunOutcome::Fresh(s) => *s,
+                        PrepareRunOutcome::ExistingStatus(status) => {
+                            return Ok((status, None));
+                        }
+                    };
 
                     let snap_instance_id = snapshot.instance_id.clone();
                     let executor = make_task_executor(
@@ -311,6 +327,18 @@ impl PyDurableEngine {
     }
 }
 
+/// Parse an optional conflict policy string into a `ConflictPolicy`.
+fn parse_conflict_policy(s: Option<&str>) -> PyResult<ConflictPolicy> {
+    match s {
+        None => Ok(ConflictPolicy::default()),
+        Some(val) => val.parse::<ConflictPolicy>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid conflict_policy: {val:?} (expected \"fail\", \"use_existing\", or \"terminate_existing\")"
+            ))
+        }),
+    }
+}
+
 /// Convert a `RuntimeError` to a Python exception with proper dispatch.
 fn runtime_err_to_py(e: sayiir_runtime::RuntimeError) -> PyErr {
     match &e {
@@ -322,6 +350,9 @@ fn runtime_err_to_py(e: sayiir_runtime::RuntimeError) -> PyErr {
         }
         sayiir_runtime::RuntimeError::Task(_) => {
             PyErr::new::<exceptions::TaskError, _>(e.to_string())
+        }
+        sayiir_runtime::RuntimeError::InstanceAlreadyExists(_) => {
+            PyErr::new::<exceptions::InstanceAlreadyExistsError, _>(e.to_string())
         }
         _ => PyErr::new::<exceptions::WorkflowError, _>(e.to_string()),
     }

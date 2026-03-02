@@ -11,11 +11,13 @@ use std::sync::Arc;
 
 use sayiir_core::context::{TaskExecutionContext, with_thread_local_task_context};
 use sayiir_core::snapshot::{SignalKind, SignalRequest};
-use sayiir_core::workflow::{FlatWorkflowStatus, WorkflowContinuation, WorkflowStatus};
+use sayiir_core::workflow::{
+    ConflictPolicy, FlatWorkflowStatus, WorkflowContinuation, WorkflowStatus,
+};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_runtime::{
-    ResumeOutcome, execute_continuation_with_checkpointing, finalize_execution, prepare_resume,
-    prepare_run,
+    PrepareRunOutcome, ResumeOutcome, execute_continuation_with_checkpointing, finalize_execution,
+    prepare_resume, prepare_run,
 };
 
 use sayiir_postgres::PostgresBackend;
@@ -74,13 +76,20 @@ impl NapiWorkflowStatus {
 pub struct NapiDurableEngine {
     backend: BackendKind,
     runtime: tokio::runtime::Runtime,
+    conflict_policy: ConflictPolicy,
 }
 
 #[napi]
 impl NapiDurableEngine {
     /// Create a new durable engine with an in-memory backend.
+    ///
+    /// `conflict_policy`: `"fail"` (default), `"use_existing"`, or `"terminate_existing"`.
     #[napi(factory)]
-    pub fn with_in_memory(backend: &NapiInMemoryBackend) -> Result<Self> {
+    pub fn with_in_memory(
+        backend: &NapiInMemoryBackend,
+        conflict_policy: Option<String>,
+    ) -> Result<Self> {
+        let policy = parse_conflict_policy(conflict_policy.as_deref())?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -89,12 +98,19 @@ impl NapiDurableEngine {
         Ok(Self {
             backend: BackendKind::InMemory(Arc::clone(&backend.inner)),
             runtime,
+            conflict_policy: policy,
         })
     }
 
     /// Create a new durable engine with a Postgres backend.
+    ///
+    /// `conflict_policy`: `"fail"` (default), `"use_existing"`, or `"terminate_existing"`.
     #[napi(factory)]
-    pub fn with_postgres(backend: &NapiPostgresBackend) -> Result<Self> {
+    pub fn with_postgres(
+        backend: &NapiPostgresBackend,
+        conflict_policy: Option<String>,
+    ) -> Result<Self> {
+        let policy = parse_conflict_policy(conflict_policy.as_deref())?;
         // Create a fresh pool on the engine's own runtime to avoid
         // cross-runtime PgPool affinity issues.
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -109,6 +125,7 @@ impl NapiDurableEngine {
         Ok(Self {
             backend: BackendKind::Postgres(Arc::new(fresh_backend)),
             runtime,
+            conflict_policy: policy,
         })
     }
 
@@ -133,18 +150,26 @@ impl NapiDurableEngine {
             "starting durable workflow execution"
         );
 
+        let conflict_policy = self.conflict_policy;
         let (status, output_bytes) = with_backend!(self, |backend| {
             let backend = Arc::clone(backend);
             self.runtime
                 .block_on(async {
-                    let mut snapshot = prepare_run(
+                    let mut snapshot = match prepare_run(
                         instance_id,
                         definition_hash,
                         input_bytes.clone(),
                         first_task_id,
                         backend.as_ref(),
+                        conflict_policy,
                     )
-                    .await?;
+                    .await?
+                    {
+                        PrepareRunOutcome::Fresh(s) => *s,
+                        PrepareRunOutcome::ExistingStatus(status) => {
+                            return Ok((status, None));
+                        }
+                    };
 
                     let wf_metadata_json: Option<Arc<str>> =
                         workflow.metadata_json.as_deref().map(Arc::from);
@@ -432,4 +457,19 @@ fn make_task_executor<'a>(
             })
         },
     )
+}
+
+/// Parse an optional conflict policy string into a `ConflictPolicy`.
+fn parse_conflict_policy(s: Option<&str>) -> Result<ConflictPolicy> {
+    match s {
+        None => Ok(ConflictPolicy::default()),
+        Some(val) => val.parse::<ConflictPolicy>().map_err(|_| {
+            Error::new(
+                Status::InvalidArg,
+                format!(
+                    "invalid conflictPolicy: {val:?} (expected \"fail\", \"useExisting\", or \"terminateExisting\")"
+                ),
+            )
+        }),
+    }
 }

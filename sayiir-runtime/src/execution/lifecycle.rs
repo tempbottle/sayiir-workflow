@@ -2,19 +2,36 @@
 
 use bytes::Bytes;
 use sayiir_core::error::WorkflowError;
-use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
-use sayiir_core::workflow::WorkflowStatus;
+use sayiir_core::snapshot::{
+    ExecutionPosition, SignalKind, WorkflowSnapshot, WorkflowSnapshotState,
+};
+use sayiir_core::workflow::{ConflictPolicy, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 
 use super::helpers::ResumeParkedPosition;
 use crate::error::RuntimeError;
 
+/// Outcome of [`prepare_run`] when the conflict policy allows early return.
+#[derive(Debug)]
+pub enum PrepareRunOutcome {
+    /// A fresh snapshot was created — proceed with execution.
+    Fresh(Box<WorkflowSnapshot>),
+    /// The instance already exists and the policy says to reuse it.
+    ExistingStatus(WorkflowStatus),
+}
+
 /// Prepare a fresh workflow run: create initial snapshot and save it.
 ///
-/// Returns the snapshot and encoded input ready for execution.
+/// If a snapshot already exists for `instance_id`, the `conflict_policy`
+/// determines the behaviour:
+///
+/// - **Fail** — return [`RuntimeError::InstanceAlreadyExists`].
+/// - **`UseExisting`** — return the snapshot's current status without re-executing.
+/// - **`TerminateExisting`** — delete the old snapshot, clear signals, and proceed.
 ///
 /// # Errors
-/// Returns an error if saving the initial snapshot fails.
+/// Returns an error if saving the initial snapshot fails or the conflict policy
+/// rejects the duplicate.
 #[tracing::instrument(
     name = "lifecycle.prepare_run",
     skip(input_bytes, backend),
@@ -26,11 +43,44 @@ pub async fn prepare_run<B>(
     input_bytes: Bytes,
     first_task_id: String,
     backend: &B,
-) -> Result<WorkflowSnapshot, RuntimeError>
+    conflict_policy: ConflictPolicy,
+) -> Result<PrepareRunOutcome, RuntimeError>
 where
-    B: SnapshotStore,
+    B: SnapshotStore + SignalStore,
 {
     tracing::debug!("preparing fresh workflow run");
+
+    // Check for an existing snapshot
+    match backend.load_snapshot(&instance_id).await {
+        Ok(existing) => match conflict_policy {
+            ConflictPolicy::Fail => {
+                return Err(RuntimeError::InstanceAlreadyExists(instance_id));
+            }
+            ConflictPolicy::UseExisting => {
+                let status = if let Some(terminal) = existing.state.as_terminal_status() {
+                    terminal
+                } else {
+                    WorkflowStatus::InProgress
+                };
+                return Ok(PrepareRunOutcome::ExistingStatus(status));
+            }
+            ConflictPolicy::TerminateExisting => {
+                tracing::info!("terminating existing instance before restart");
+                backend.delete_snapshot(&instance_id).await?;
+                backend
+                    .clear_signal(&instance_id, SignalKind::Cancel)
+                    .await?;
+                backend
+                    .clear_signal(&instance_id, SignalKind::Pause)
+                    .await?;
+            }
+        },
+        Err(sayiir_persistence::BackendError::NotFound(_)) => {
+            // No existing snapshot — proceed normally
+        }
+        Err(e) => return Err(e.into()),
+    }
+
     let mut snapshot =
         WorkflowSnapshot::with_initial_input(instance_id, definition_hash, input_bytes);
     #[cfg(feature = "otel")]
@@ -41,7 +91,7 @@ where
         task_id: first_task_id,
     });
     backend.save_snapshot(&snapshot).await?;
-    Ok(snapshot)
+    Ok(PrepareRunOutcome::Fresh(Box::new(snapshot)))
 }
 
 /// Prepare to resume a workflow from a saved snapshot.

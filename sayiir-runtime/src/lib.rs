@@ -94,7 +94,7 @@ pub mod worker;
 // Re-exports
 pub use error::RuntimeError;
 pub use execution::{
-    ResumeOutcome, execute_continuation_async, execute_continuation_sync,
+    PrepareRunOutcome, ResumeOutcome, execute_continuation_async, execute_continuation_sync,
     execute_continuation_with_checkpointing, finalize_execution, prepare_resume, prepare_run,
     serialize_branch_results,
 };
@@ -109,6 +109,7 @@ pub use worker::{
 
 pub use sayiir_core::branch_key::BranchKey;
 pub use sayiir_core::task_context;
+pub use sayiir_core::workflow::ConflictPolicy;
 #[cfg(feature = "macros")]
 pub use sayiir_macros::{BranchKey, task, workflow};
 pub use sayiir_persistence as persistence;

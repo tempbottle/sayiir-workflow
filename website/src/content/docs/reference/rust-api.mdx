@@ -622,11 +622,39 @@ runner.unpause("instance-001").await?;
 
 **Methods:**
 - `new(backend)` — Create with any `PersistentBackend`
+- `with_conflict_policy(policy)` — Set the conflict policy (builder pattern). See `ConflictPolicy` below.
 - `run(workflow, instance_id, input)` — Run to completion
 - `resume(workflow, instance_id)` — Resume from checkpoint
 - `cancel(instance_id, reason, by)` — Cancel workflow
 - `pause(instance_id, reason, by)` — Pause workflow
 - `unpause(instance_id)` — Unpause workflow
+
+### ConflictPolicy
+
+Controls what happens when `run()` is called with an `instance_id` that already has a snapshot.
+
+```rust
+use sayiir_core::workflow::ConflictPolicy;
+
+// Default: fail if instance already exists
+let runner = CheckpointingRunner::new(backend.clone());
+
+// Idempotent: return existing status
+let runner = CheckpointingRunner::new(backend.clone())
+    .with_conflict_policy(ConflictPolicy::UseExisting);
+
+// Force restart: delete old snapshot, run fresh
+let runner = CheckpointingRunner::new(backend.clone())
+    .with_conflict_policy(ConflictPolicy::TerminateExisting);
+```
+
+**Variants:**
+
+| Variant | Behaviour |
+|---|---|
+| `Fail` (default) | Returns `RuntimeError::InstanceAlreadyExists` if the instance exists. |
+| `UseExisting` | Returns the existing workflow status without re-running. |
+| `TerminateExisting` | Deletes the existing snapshot and starts a fresh execution. |
 
 ### PooledWorker
 
@@ -926,6 +954,9 @@ match result {
     Err(RuntimeError::Build(e)) => eprintln!("Build error: {e}"),
     Err(RuntimeError::Backend(e)) => eprintln!("Storage error: {e}"),
     Err(RuntimeError::Task(e)) => eprintln!("Task error: {e}"),
+    Err(RuntimeError::InstanceAlreadyExists(id)) => {
+        eprintln!("Instance already exists: {id}");
+    }
     _ => {}
 }
 ```
