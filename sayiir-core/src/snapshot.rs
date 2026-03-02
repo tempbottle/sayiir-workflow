@@ -378,6 +378,54 @@ impl WorkflowSnapshotState {
         }
     }
 
+    /// Convert the snapshot state to a [`WorkflowStatus`], including parked
+    /// in-progress positions (delay, signal, fork) instead of collapsing them
+    /// to [`WorkflowStatus::InProgress`].
+    #[must_use]
+    pub fn as_status(&self) -> crate::workflow::WorkflowStatus {
+        use crate::workflow::WorkflowStatus;
+        if let Some(terminal) = self.as_terminal_status() {
+            return terminal;
+        }
+        match self {
+            Self::InProgress {
+                position:
+                    ExecutionPosition::AtDelay {
+                        wake_at, delay_id, ..
+                    },
+                ..
+            } => WorkflowStatus::Waiting {
+                wake_at: *wake_at,
+                delay_id: delay_id.clone(),
+            },
+            Self::InProgress {
+                position:
+                    ExecutionPosition::AtFork {
+                        fork_id, wake_at, ..
+                    },
+                ..
+            } => WorkflowStatus::Waiting {
+                wake_at: *wake_at,
+                delay_id: fork_id.clone(),
+            },
+            Self::InProgress {
+                position:
+                    ExecutionPosition::AtSignal {
+                        signal_id,
+                        signal_name,
+                        wake_at,
+                        ..
+                    },
+                ..
+            } => WorkflowStatus::AwaitingSignal {
+                signal_id: signal_id.clone(),
+                signal_name: signal_name.clone(),
+                wake_at: *wake_at,
+            },
+            _ => WorkflowStatus::InProgress,
+        }
+    }
+
     /// Extract the final output if in `Completed` state.
     #[must_use]
     pub fn completed_output(&self) -> Option<&Bytes> {

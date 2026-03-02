@@ -17,7 +17,63 @@ pub enum PrepareRunOutcome {
     /// A fresh snapshot was created — proceed with execution.
     Fresh(Box<WorkflowSnapshot>),
     /// The instance already exists and the policy says to reuse it.
-    ExistingStatus(WorkflowStatus),
+    ExistingStatus(WorkflowStatus, Option<Bytes>),
+}
+
+/// Check for an existing instance before encoding input.
+///
+/// For **`Fail`** and **`UseExisting`** policies, this avoids unnecessary codec
+/// work by checking the backend before the caller serialises the workflow input.
+///
+/// Returns `Ok(Some((status, output)))` when the caller should return early
+/// (instance exists and the policy says to reuse it, or the policy rejects the
+/// duplicate).  Returns `Ok(None)` when the caller should proceed to encode
+/// input and call [`prepare_run`].
+///
+/// **`TerminateExisting`** always returns `Ok(None)` — the actual cleanup is
+/// deferred to [`prepare_run`].
+///
+/// # Errors
+/// Returns [`RuntimeError::InstanceAlreadyExists`] for `Fail` when the
+/// instance already exists, [`WorkflowError::DefinitionMismatch`] when the
+/// existing snapshot has a different definition hash, or propagates backend
+/// I/O errors.
+pub async fn check_existing_instance<B>(
+    instance_id: &str,
+    definition_hash: &str,
+    backend: &B,
+    conflict_policy: ConflictPolicy,
+) -> Result<Option<(WorkflowStatus, Option<Bytes>)>, RuntimeError>
+where
+    B: SnapshotStore,
+{
+    if matches!(conflict_policy, ConflictPolicy::TerminateExisting) {
+        return Ok(None);
+    }
+    match backend.load_snapshot(instance_id).await {
+        Ok(existing) => {
+            if existing.definition_hash != definition_hash {
+                return Err(WorkflowError::DefinitionMismatch {
+                    expected: definition_hash.to_string(),
+                    found: existing.definition_hash.clone(),
+                }
+                .into());
+            }
+            match conflict_policy {
+                ConflictPolicy::Fail => {
+                    Err(RuntimeError::InstanceAlreadyExists(instance_id.to_string()))
+                }
+                ConflictPolicy::UseExisting => {
+                    let output = existing.state.completed_output().cloned();
+                    let status = existing.state.as_status();
+                    Ok(Some((status, output)))
+                }
+                ConflictPolicy::TerminateExisting => unreachable!(),
+            }
+        }
+        Err(sayiir_persistence::BackendError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Prepare a fresh workflow run: create initial snapshot and save it.
@@ -28,6 +84,10 @@ pub enum PrepareRunOutcome {
 /// - **Fail** — return [`RuntimeError::InstanceAlreadyExists`].
 /// - **`UseExisting`** — return the snapshot's current status without re-executing.
 /// - **`TerminateExisting`** — delete the old snapshot, clear signals, and proceed.
+///
+/// Callers should prefer calling [`check_existing_instance`] *before* encoding
+/// the workflow input, and only call this function when it returns `None`.
+/// This function still handles all policies internally as a safety net.
 ///
 /// # Errors
 /// Returns an error if saving the initial snapshot fails or the conflict policy
@@ -52,29 +112,35 @@ where
 
     // Check for an existing snapshot
     match backend.load_snapshot(&instance_id).await {
-        Ok(existing) => match conflict_policy {
-            ConflictPolicy::Fail => {
-                return Err(RuntimeError::InstanceAlreadyExists(instance_id));
+        Ok(existing) => {
+            if existing.definition_hash != definition_hash {
+                return Err(WorkflowError::DefinitionMismatch {
+                    expected: definition_hash,
+                    found: existing.definition_hash.clone(),
+                }
+                .into());
             }
-            ConflictPolicy::UseExisting => {
-                let status = if let Some(terminal) = existing.state.as_terminal_status() {
-                    terminal
-                } else {
-                    WorkflowStatus::InProgress
-                };
-                return Ok(PrepareRunOutcome::ExistingStatus(status));
+            match conflict_policy {
+                ConflictPolicy::Fail => {
+                    return Err(RuntimeError::InstanceAlreadyExists(instance_id));
+                }
+                ConflictPolicy::UseExisting => {
+                    let output = existing.state.completed_output().cloned();
+                    let status = existing.state.as_status();
+                    return Ok(PrepareRunOutcome::ExistingStatus(status, output));
+                }
+                ConflictPolicy::TerminateExisting => {
+                    tracing::info!("terminating existing instance before restart");
+                    backend.delete_snapshot(&instance_id).await?;
+                    backend
+                        .clear_signal(&instance_id, SignalKind::Cancel)
+                        .await?;
+                    backend
+                        .clear_signal(&instance_id, SignalKind::Pause)
+                        .await?;
+                }
             }
-            ConflictPolicy::TerminateExisting => {
-                tracing::info!("terminating existing instance before restart");
-                backend.delete_snapshot(&instance_id).await?;
-                backend
-                    .clear_signal(&instance_id, SignalKind::Cancel)
-                    .await?;
-                backend
-                    .clear_signal(&instance_id, SignalKind::Pause)
-                    .await?;
-            }
-        },
+        }
         Err(sayiir_persistence::BackendError::NotFound(_)) => {
             // No existing snapshot — proceed normally
         }

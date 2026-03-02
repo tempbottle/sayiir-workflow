@@ -13,8 +13,8 @@ use sayiir_core::snapshot::{SignalKind, SignalRequest};
 use sayiir_core::workflow::{ConflictPolicy, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_runtime::{
-    PrepareRunOutcome, ResumeOutcome, execute_continuation_with_checkpointing, finalize_execution,
-    prepare_resume, prepare_run,
+    PrepareRunOutcome, ResumeOutcome, check_existing_instance,
+    execute_continuation_with_checkpointing, finalize_execution, prepare_resume, prepare_run,
 };
 
 use sayiir_postgres::PostgresBackend;
@@ -96,7 +96,6 @@ impl PyDurableEngine {
         input: &Bound<'_, PyAny>,
         task_registry: Py<PyDict>,
     ) -> PyResult<PyWorkflowStatus> {
-        let input_bytes = encode_pyobject(py, input)?;
         let continuation = Arc::clone(&workflow.continuation);
         let definition_hash = workflow.definition_hash.clone();
         let first_task_id = continuation.first_task_id().to_string();
@@ -112,6 +111,34 @@ impl PyDurableEngine {
         let workflow_metadata_json: Option<Arc<str>> =
             workflow.metadata_json.as_deref().map(Arc::from);
         let conflict_policy = self.conflict_policy;
+
+        // Phase 1: check for an existing instance before encoding input.
+        let early_return = with_backend!(self, |backend| {
+            let backend = Arc::clone(backend);
+            py.detach(|| {
+                self.runtime.block_on(check_existing_instance(
+                    &instance_id,
+                    &definition_hash,
+                    backend.as_ref(),
+                    conflict_policy,
+                ))
+            })
+            .map_err(runtime_err_to_py)?
+        });
+        if let Some((status, output_bytes)) = early_return {
+            let mut py_status: PyWorkflowStatus = status.into();
+            if let Some(bytes) = output_bytes {
+                py_status.output = Some(decode_to_pyobject(py, &bytes)?);
+            }
+            tracing::info!(
+                status = %py_status.status,
+                "durable workflow execution finished (existing instance)"
+            );
+            return Ok(py_status);
+        }
+
+        // Phase 2: no existing instance (or TerminateExisting) — encode and run.
+        let input_bytes = encode_pyobject(py, input)?;
         let (status, output_bytes) = with_backend!(self, |backend| {
             let backend = Arc::clone(backend);
             py.detach(|| {
@@ -127,8 +154,8 @@ impl PyDurableEngine {
                     .await?
                     {
                         PrepareRunOutcome::Fresh(s) => *s,
-                        PrepareRunOutcome::ExistingStatus(status) => {
-                            return Ok((status, None));
+                        PrepareRunOutcome::ExistingStatus(status, output) => {
+                            return Ok((status, output));
                         }
                     };
 
