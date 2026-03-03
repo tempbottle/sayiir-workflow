@@ -143,9 +143,7 @@ fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
     };
 
     let priority = attrs.priority.map(|p| {
-        if !(1..=5).contains(&p) {
-            return quote! { compile_error!("priority must be between 1 and 5"); };
-        }
+        // Range validated at parse time in ParsedTask::parse.
         quote! { priority: ::sayiir_core::priority::Priority::from_u8(#p), }
     });
 
