@@ -216,7 +216,10 @@ impl TaskClaimStore for BackendKind {
         &self,
         worker_id: &str,
         limit: usize,
+        aging_interval: chrono::Duration,
     ) -> BResult<Vec<AvailableTask>> {
-        dispatch!(self, |b| b.find_available_tasks(worker_id, limit).await)
+        dispatch!(self, |b| b
+            .find_available_tasks(worker_id, limit, aging_interval)
+            .await)
     }
 }

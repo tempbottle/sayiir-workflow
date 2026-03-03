@@ -19,6 +19,7 @@ export interface TaskMetadata {
   retries?: RetryPolicyConfig;
   tags?: string[];
   version?: string;
+  priority?: number;
 }
 
 export interface BranchTask {

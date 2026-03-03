@@ -317,9 +317,9 @@ where
                     .await?;
 
                     if let Some(next_cont) = current.get_next() {
-                        snapshot.update_position(ExecutionPosition::AtTask {
-                            task_id: next_cont.first_task_id().to_string(),
-                        });
+                        let next_id = next_cont.first_task_id().to_string();
+                        snapshot.task_priority = continuation.get_task_priority(&next_id);
+                        snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
                     }
                     backend.save_snapshot(snapshot).await?;
                     check_guards(backend.as_ref(), &snapshot.instance_id, None).await?;
@@ -365,8 +365,11 @@ where
                             Ok(Some(payload)) => {
                                 snapshot.mark_task_completed(id.clone(), payload);
                                 if let Some(next_cont) = next.as_deref() {
+                                    let next_id = next_cont.first_task_id().to_string();
+                                    snapshot.task_priority =
+                                        continuation.get_task_priority(&next_id);
                                     snapshot.update_position(ExecutionPosition::AtTask {
-                                        task_id: next_cont.first_task_id().to_string(),
+                                        task_id: next_id,
                                     });
                                 }
                                 backend.save_snapshot(snapshot).await?;

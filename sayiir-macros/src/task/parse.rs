@@ -40,6 +40,10 @@ pub struct TaskAttrs {
     /// Categorization tags.
     #[darling(default, multiple)]
     pub tags: Vec<String>,
+
+    /// Execution priority (1–5). 1 = Critical, 3 = Normal, 5 = Minimal.
+    #[darling(default)]
+    pub priority: Option<u8>,
 }
 
 /// A parameter classified as either the task input or an injected dependency.

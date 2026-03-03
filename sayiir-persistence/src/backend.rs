@@ -252,10 +252,15 @@ pub trait TaskClaimStore: Send + Sync {
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Find available tasks across all workflow instances.
+    ///
+    /// `aging_interval` controls starvation prevention: lower-priority tasks
+    /// that have been waiting longer than this interval effectively gain one
+    /// priority level per interval elapsed. Pass `Duration::MAX` to disable aging.
     fn find_available_tasks(
         &self,
         worker_id: &str,
         limit: usize,
+        aging_interval: Duration,
     ) -> impl Future<Output = Result<Vec<AvailableTask>, BackendError>> + Send;
 }
 

@@ -74,6 +74,13 @@ function buildMetadata(id: string, opts?: TaskOptions): TaskMetadata {
     };
   }
 
+  if (opts?.priority != null) {
+    if (opts.priority < 1 || opts.priority > 5) {
+      throw new RangeError(`priority must be between 1 and 5, got ${opts.priority}`);
+    }
+    metadata.priority = opts.priority;
+  }
+
   return metadata;
 }
 

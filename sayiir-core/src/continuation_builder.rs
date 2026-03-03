@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::BuildError;
+use crate::priority::Priority;
 use crate::task::TaskMetadata;
 use crate::workflow::WorkflowContinuation;
 
@@ -100,6 +101,7 @@ fn build_chain(chain: &[(String, TaskMetadata)]) -> Result<Box<WorkflowContinuat
             timeout: metadata.timeout,
             retry_policy: metadata.retries.clone(),
             version: metadata.version.clone(),
+            priority: metadata.priority.map(Priority::as_u8),
             next: current.map(Box::new),
         });
     }
@@ -322,6 +324,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                 timeout: metadata.timeout,
                 retry_policy: metadata.retries.clone(),
                 version: metadata.version.clone(),
+                priority: metadata.priority.map(Priority::as_u8),
                 next: current.map(Box::new),
             },
             BuilderTask::Delay {
@@ -367,6 +370,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                     timeout: join_metadata.timeout,
                     retry_policy: join_metadata.retries.clone(),
                     version: join_metadata.version.clone(),
+                    priority: join_metadata.priority.map(Priority::as_u8),
                     next: current.map(Box::new),
                 };
 
@@ -415,6 +419,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                     timeout: body_metadata.timeout,
                     retry_policy: body_metadata.retries.clone(),
                     version: body_metadata.version.clone(),
+                    priority: body_metadata.priority.map(Priority::as_u8),
                     next: None,
                 };
                 WorkflowContinuation::Loop {

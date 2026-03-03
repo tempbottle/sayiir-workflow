@@ -142,6 +142,13 @@ fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
         Some(quote! { tags: vec![#(#tag_strs.to_string()),*], })
     };
 
+    let priority = attrs.priority.map(|p| {
+        if !(1..=5).contains(&p) {
+            return quote! { compile_error!("priority must be between 1 and 5"); };
+        }
+        quote! { priority: ::sayiir_core::priority::Priority::from_u8(#p), }
+    });
+
     quote! {
         ::sayiir_core::task::TaskMetadata {
             #display_name
@@ -149,6 +156,7 @@ fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
             #timeout
             #retries
             #tags
+            #priority
             ..::std::default::Default::default()
         }
     }
