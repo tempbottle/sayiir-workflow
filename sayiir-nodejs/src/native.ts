@@ -139,22 +139,31 @@ export interface NapiWorker {
 
 export interface NapiWorkerHandle {
   shutdown(): void;
-  cancelWorkflow(
+}
+
+export interface NapiWorkflowClient {
+  submit(
+    workflow: NapiWorkflow,
+    instanceId: string,
+    input: unknown,
+  ): NativeWorkflowStatus;
+  cancel(
     instanceId: string,
     reason?: string,
     cancelledBy?: string,
   ): void;
-  pauseWorkflow(
+  pause(
     instanceId: string,
     reason?: string,
     pausedBy?: string,
   ): void;
-  unpauseWorkflow(instanceId: string): void;
+  unpause(instanceId: string): void;
   sendSignal(
     instanceId: string,
     signalName: string,
     payloadJson: string,
   ): void;
+  status(instanceId: string): NativeWorkflowStatus;
 }
 
 export interface NativeAddon {
@@ -186,6 +195,10 @@ export interface NativeAddon {
       pollIntervalMs?: number,
       claimTtlMs?: number,
     ): NapiWorker;
+  };
+  NapiWorkflowClient: {
+    withInMemory(backend: NapiInMemoryBackend, conflictPolicy?: string): NapiWorkflowClient;
+    withPostgres(backend: NapiPostgresBackend, conflictPolicy?: string): NapiWorkflowClient;
   };
 }
 

@@ -49,7 +49,7 @@ pub struct NapiWorkflowStatus {
 }
 
 impl NapiWorkflowStatus {
-    fn from_core(status: WorkflowStatus, output: Option<Bytes>) -> Self {
+    pub(crate) fn from_core(status: WorkflowStatus, output: Option<Bytes>) -> Self {
         let output_json = output.and_then(|bytes| {
             std::str::from_utf8(&bytes)
                 .ok()
@@ -181,6 +181,7 @@ impl NapiDurableEngine {
                         first_task_id,
                         backend.as_ref(),
                         conflict_policy,
+                        true, // prechecked — check_existing_instance already ran
                     )
                     .await?
                     {

@@ -34,6 +34,7 @@ from .executor import (
 from .flow import BranchBuilder, Flow, ForkBuilder, Workflow
 from .loop_result import LoopResult, OnMax
 from .worker import Worker, WorkerHandle
+from .workflow_client import WorkflowClient
 
 __all__ = [
     "BackendError",
@@ -67,6 +68,7 @@ __all__ = [
     "task",
     "Worker",
     "WorkerHandle",
+    "WorkflowClient",
     "init_tracing",
     "shutdown_tracing",
 ]

@@ -57,3 +57,7 @@ export { parseDuration } from "./duration.js";
 // Worker
 export { Worker, WorkerHandle } from "./worker.js";
 export type { WorkerOptions } from "./worker.js";
+
+// Client
+export { WorkflowClient } from "./workflow-client.js";
+export type { WorkflowClientOptions } from "./workflow-client.js";

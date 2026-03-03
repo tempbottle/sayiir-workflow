@@ -71,6 +71,7 @@ Execution engines and worker orchestration.
 - `PooledWorker` — Distributed, multi-machine execution
 - `PooledWorkerBuilder` — Builder for `PooledWorker` with auto-generated worker IDs
 - `WorkerHandle` — Handle to a spawned worker
+- `WorkflowClient` — Client for submitting and controlling workflow instances
 - `JsonCodec` — JSON serialization codec (feature: `json`)
 - `RkyvCodec` — Binary serialization codec (feature: `rkyv`)
 - `RuntimeError` — Execution errors
@@ -99,7 +100,7 @@ use sayiir_runtime::prelude::*;
 **Re-exports:**
 - `WorkflowBuilder`, `Workflow`, `WorkflowStatus`, `WorkflowContext`
 - `TaskRegistry`
-- `CheckpointingRunner`, `InProcessRunner`, `PooledWorker`, `PooledWorkerBuilder`, `WorkerHandle`, `WorkflowRunExt`
+- `CheckpointingRunner`, `InProcessRunner`, `PooledWorker`, `PooledWorkerBuilder`, `WorkerHandle`, `WorkflowClient`, `WorkflowRunExt`
 - `InMemoryBackend`, `PersistentBackend`
 - `JsonCodec` (if `json` feature enabled)
 - `RkyvCodec` (if `rkyv` feature enabled)
@@ -713,6 +714,41 @@ let result = runner.run(workflow, input_data).await?;
 ```
 
 No persistence, no resume. Useful for testing or short-lived workflows.
+
+### WorkflowClient
+
+Client for submitting and controlling workflow instances without executing tasks. Use this with `PooledWorker` for the distributed model.
+
+```rust
+use sayiir_runtime::WorkflowClient;
+use sayiir_core::workflow::ConflictPolicy;
+
+let backend = PostgresBackend::<JsonCodec>::connect(url).await?;
+let client = WorkflowClient::new(backend)
+    .with_conflict_policy(ConflictPolicy::UseExisting);
+
+// Submit a workflow
+let (status, output) = client.submit(&workflow, "order-42", input).await?;
+
+// Lifecycle operations
+client.cancel("order-42", Some("Out of stock".into()), None).await?;
+client.pause("order-42", Some("Maintenance".into()), None).await?;
+client.unpause("order-42").await?;
+client.send_event("order-42", "signal_name", payload).await?;
+let status = client.status("order-42").await?;
+```
+
+**Methods:**
+- `new(backend)` — Create client (wraps backend in Arc)
+- `from_shared(Arc<B>)` — Create from shared backend reference
+- `with_conflict_policy(ConflictPolicy)` — Set duplicate instance policy
+- `backend()` → `&Arc<B>` — Access the backend
+- `submit(workflow, instance_id, input)` → `(WorkflowStatus, Option<Bytes>)`
+- `cancel(instance_id, reason, cancelled_by)` — Store a cancel signal
+- `pause(instance_id, reason, paused_by)` — Store a pause signal
+- `unpause(instance_id)` — Unpause a paused workflow
+- `send_event(instance_id, signal_name, payload)` — Send an external event
+- `status(instance_id)` → `WorkflowStatus` — Query current status
 
 ### WorkflowRunExt (run_once)
 

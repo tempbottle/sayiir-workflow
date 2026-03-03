@@ -150,6 +150,7 @@ impl PyDurableEngine {
                         first_task_id,
                         backend.as_ref(),
                         conflict_policy,
+                        true, // prechecked — check_existing_instance already ran
                     )
                     .await?
                     {

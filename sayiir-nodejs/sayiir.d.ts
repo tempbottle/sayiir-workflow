@@ -357,15 +357,29 @@ declare module "sayiir" {
 
   class WorkerHandle {
     shutdown(): void;
-    cancelWorkflow(
+  }
+
+  interface WorkflowClientOptions {
+    conflictPolicy?: ConflictPolicy;
+  }
+
+  class WorkflowClient {
+    constructor(backend: Backend, opts?: WorkflowClientOptions);
+    submit<TIn, TOut>(
+      workflow: Workflow<TIn, TOut>,
+      instanceId: string,
+      input: TIn,
+    ): WorkflowStatus<TOut>;
+    cancel(
       instanceId: string,
       opts?: { reason?: string; cancelledBy?: string },
     ): void;
-    pauseWorkflow(
+    pause(
       instanceId: string,
       opts?: { reason?: string; pausedBy?: string },
     ): void;
-    unpauseWorkflow(instanceId: string): void;
+    unpause(instanceId: string): void;
     sendSignal(instanceId: string, signalName: string, payload: unknown): void;
+    status<TOut = unknown>(instanceId: string): WorkflowStatus<TOut>;
   }
 }
