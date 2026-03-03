@@ -562,6 +562,7 @@ async fn test_prepare_run_creates_snapshot() {
         "task-1".into(),
         &backend,
         sayiir_core::workflow::ConflictPolicy::Fail,
+        false, // not prechecked — standalone call
     )
     .await
     .unwrap();
