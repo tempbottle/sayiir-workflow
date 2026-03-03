@@ -1,6 +1,6 @@
 ---
 title: Distributed Workers
-description: Scale out with distributed workers — claim TTL, soft worker affinity, and graceful shutdown across Python, Node.js, and Rust
+description: Scale out with distributed workers — task priority, claim TTL, soft worker affinity, and graceful shutdown across Python, Node.js, and Rust
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -408,6 +408,62 @@ let handle = worker.spawn(Duration::from_secs(1), workflows);
 </Tabs>
 
 All task functions from all workflows are merged into a single registry. Ensure task IDs are unique across workflows.
+
+## Task Priority
+
+Tasks with lower priority values are picked up first by workers. Priority ranges from 1 (Critical) to 5 (Minimal), with 3 (Normal) as the default.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+@task(priority=1)
+def charge_payment(order: dict) -> dict:
+    return process_payment(order)
+
+@task(priority=4)
+def generate_report(data: dict) -> dict:
+    return build_report(data)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+const chargePayment = task("charge-payment", processPayment, { priority: 1 });
+const generateReport = task("generate-report", buildReport, { priority: 4 });
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+#[task(id = "charge_payment", priority = 1)]
+async fn charge_payment(order: Order) -> Result<Receipt, BoxError> {
+    process_payment(order).await
+}
+
+#[task(id = "generate_report", priority = 4)]
+async fn generate_report(data: ReportData) -> Result<Report, BoxError> {
+    build_report(data).await
+}
+```
+
+</TabItem>
+</Tabs>
+
+### Priority Aging
+
+To prevent starvation, Sayiir applies aging: the longer a task waits, the more its effective priority improves. A priority-5 task waiting long enough will eventually overtake a freshly submitted priority-1 task.
+
+The formula is: `effective_priority = base_priority - (seconds_waiting / aging_interval)`. The default aging interval is 300 seconds — a priority-5 task waiting 10 minutes has an effective priority of 3.
+
+In Rust, you can configure the aging interval on the worker:
+
+```rust
+let worker = PooledWorker::new("worker-1", backend, registry)
+    .with_aging_interval(Duration::from_secs(600)); // slower aging
+```
 
 ## Soft Worker Affinity
 

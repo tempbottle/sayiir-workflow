@@ -226,6 +226,7 @@ pub struct PooledWorker<B> {
     registry: Arc<TaskRegistry>,
     claim_ttl: Option<Duration>,
     batch_size: NonZeroUsize,
+    aging_interval: Duration,
 }
 
 impl<B> PooledWorker<B>
@@ -252,6 +253,7 @@ where
             registry: Arc::new(registry),
             claim_ttl: Some(Duration::from_secs(5 * 60)), // Default 5 minutes
             batch_size: NonZeroUsize::MIN,                // Default: fetch one task at a time (1)
+            aging_interval: Duration::from_secs(300),     // Default 5 minutes
         }
     }
 
@@ -259,6 +261,22 @@ where
     #[must_use]
     pub fn with_claim_ttl(mut self, ttl: Option<Duration>) -> Self {
         self.claim_ttl = ttl;
+        self
+    }
+
+    /// Set the aging interval for priority-based scheduling.
+    ///
+    /// Lower-priority tasks that have been waiting longer than this interval
+    /// get their effective priority boosted, preventing starvation.
+    /// Default: 5 minutes (300 seconds).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `interval` is zero.
+    #[must_use]
+    pub fn with_aging_interval(mut self, interval: Duration) -> Self {
+        assert!(!interval.is_zero(), "aging interval must be non-zero");
+        self.aging_interval = interval;
         self
     }
 
@@ -451,7 +469,12 @@ where
 
             let available_tasks = self
                 .backend
-                .find_available_tasks(&self.worker_id, self.batch_size.get())
+                .find_available_tasks(
+                    &self.worker_id,
+                    self.batch_size.get(),
+                    chrono::Duration::from_std(self.aging_interval)
+                        .unwrap_or(chrono::Duration::MAX),
+                )
                 .await?;
 
             for task in available_tasks {
@@ -746,7 +769,12 @@ where
 
             let available_tasks = self
                 .backend
-                .find_available_tasks(&self.worker_id, self.batch_size.get())
+                .find_available_tasks(
+                    &self.worker_id,
+                    self.batch_size.get(),
+                    chrono::Duration::from_std(self.aging_interval)
+                        .unwrap_or(chrono::Duration::MAX),
+                )
                 .await?;
 
             for task in available_tasks {
@@ -1621,6 +1649,7 @@ where
             | WorkflowContinuation::AwaitSignal { id, next, .. } => {
                 if id == completed_task_id {
                     if let Some(next_cont) = next {
+                        snapshot.task_priority = next_cont.first_task_priority();
                         snapshot.update_position(ExecutionPosition::AtTask {
                             task_id: next_cont.first_task_id().to_string(),
                         });
@@ -1697,6 +1726,7 @@ where
             registry,
             claim_ttl: Some(Duration::from_secs(5 * 60)),
             batch_size: NonZeroUsize::MIN,
+            aging_interval: Duration::from_secs(300),
         }
     }
 
@@ -1904,6 +1934,7 @@ pub struct PooledWorkerBuilder<B> {
     registry: TaskRegistry,
     claim_ttl: Option<Duration>,
     batch_size: NonZeroUsize,
+    aging_interval: Duration,
 }
 
 impl<B> PooledWorkerBuilder<B>
@@ -1933,6 +1964,18 @@ where
         self
     }
 
+    /// Set the aging interval for priority-based scheduling (default: 300s).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `interval` is zero.
+    #[must_use]
+    pub fn aging_interval(mut self, interval: Duration) -> Self {
+        assert!(!interval.is_zero(), "aging interval must be non-zero");
+        self.aging_interval = interval;
+        self
+    }
+
     /// Build the [`PooledWorker`].
     ///
     /// If no `worker_id` was set, generates one from `{hostname}-{pid}`.
@@ -1945,6 +1988,7 @@ where
             registry: Arc::new(self.registry),
             claim_ttl: self.claim_ttl,
             batch_size: self.batch_size,
+            aging_interval: self.aging_interval,
         }
     }
 }

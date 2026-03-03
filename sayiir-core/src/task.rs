@@ -14,6 +14,7 @@
 use crate::codec::{Codec, sealed};
 use crate::error::{BoxError, CodecError, WorkflowError};
 use crate::loop_result::LoopResult;
+use crate::priority::Priority;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -44,6 +45,9 @@ pub struct TaskMetadata {
     /// bumping this value forces a new workflow version, preventing
     /// in-flight workflows from deserializing stale cached results.
     pub version: Option<String>,
+    /// Execution priority (1 = Critical … 5 = Minimal). `None` defaults to `Normal` (3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<Priority>,
 }
 
 /// Configuration for retrying failed task executions.

@@ -514,7 +514,10 @@ async fn find_available_tasks_basic() {
     });
     backend.save_snapshot(&snapshot).await.unwrap();
 
-    let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+    let tasks = backend
+        .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300))
+        .await
+        .unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].instance_id, "wf-1");
     assert_eq!(tasks[0].task_id, "task-1");
@@ -550,7 +553,10 @@ async fn find_available_tasks_skips_cancelled() {
     });
     backend.save_snapshot(&snapshot2).await.unwrap();
 
-    let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+    let tasks = backend
+        .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300))
+        .await
+        .unwrap();
     assert!(!tasks.iter().any(|t| t.instance_id == "wf-1"));
     assert!(tasks.iter().any(|t| t.instance_id == "wf-2"));
 }
@@ -563,7 +569,10 @@ async fn find_available_tasks_skips_completed() {
     snapshot.mark_completed(Bytes::from("done"));
     backend.save_snapshot(&snapshot).await.unwrap();
 
-    let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+    let tasks = backend
+        .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300))
+        .await
+        .unwrap();
     assert!(tasks.is_empty());
 }
 

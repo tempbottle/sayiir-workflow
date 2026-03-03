@@ -65,6 +65,7 @@ fn linear_chain(n: usize) -> WorkflowContinuation {
             timeout: None,
             retry_policy: None,
             version: None,
+            priority: None,
             next: chain.map(Box::new),
         });
     }
@@ -81,6 +82,7 @@ fn linear_chain_no_func(n: usize) -> WorkflowContinuation {
             timeout: None,
             retry_policy: None,
             version: None,
+            priority: None,
             next: chain.map(Box::new),
         });
     }
@@ -104,6 +106,7 @@ fn fork_join(n_branches: usize) -> WorkflowContinuation {
                 timeout: None,
                 retry_policy: None,
                 version: None,
+                priority: None,
                 next: None,
             })
         })

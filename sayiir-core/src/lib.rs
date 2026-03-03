@@ -80,6 +80,7 @@ pub mod continuation_builder;
 pub mod error;
 pub mod loop_result;
 pub mod prelude;
+pub mod priority;
 pub mod registry;
 pub mod snapshot;
 pub mod task;

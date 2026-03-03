@@ -28,6 +28,8 @@ class PyTaskMetadata:
         timeout_secs: float | None = None,
         retries: PyRetryPolicy | None = None,
         tags: list[str] | None = None,
+        version: str | None = None,
+        priority: int | None = None,
     ) -> None: ...
 
 class PyFlowBuilder:

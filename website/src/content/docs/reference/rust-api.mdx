@@ -177,6 +177,7 @@ let charge_task = ChargeTask::new(stripe);
 | `tags` | String | `tags = "io"` | Categorization tag (repeatable) |
 | `display_name` | String | `display_name = "Charge Card"` | Human-readable name |
 | `description` | String | `description = "..."` | Task description |
+| `priority` | Integer (1–5) | `priority = 1` | Execution priority (1 = Critical, 5 = Minimal) |
 
 :::caution[Always set an explicit `id` in production]
 By default, the task ID is the function name. Renaming the function silently changes the ID, which breaks in-flight workflows on resume — the engine can't find the task in the checkpoint. Always use `id = "stable_name"` for any workflow that may be running when you deploy.
@@ -700,6 +701,7 @@ let worker = PooledWorker::builder(backend, registry)
 - `builder(backend, registry)` → `PooledWorkerBuilder` — Create builder with auto-generated ID
 - `with_claim_ttl(Option<Duration>)` — Set claim timeout
 - `with_batch_size(NonZeroUsize)` — Set tasks per poll (default: 1)
+- `with_aging_interval(Duration)` — Set priority aging interval (default: 300s, must be > 0)
 - `spawn(poll_interval, workflows)` → `WorkerHandle` — Start polling
 
 ### InProcessRunner

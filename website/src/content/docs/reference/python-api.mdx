@@ -41,6 +41,7 @@ def my_task(input: dict) -> dict:
 - `retries` (int | RetryPolicy, optional) — Retry count (int shorthand with 1s/2x defaults) or full `RetryPolicy`
 - `tags` (list[str], optional) — Categorization tags
 - `description` (str, optional) — Human-readable description
+- `priority` (int, optional) — Execution priority (1–5, lower = higher priority, default: 3)
 
 The decorator attaches metadata to the function without wrapping it. The function can still be called directly for testing.
 
@@ -88,6 +89,7 @@ Metadata attached to a task.
 - `retries` (RetryPolicy | None) — Retry configuration
 - `tags` (list[str] | None) — Categorization tags
 - `version` (str | None) — Task version string
+- `priority` (int | None) — Execution priority (1–5, lower = higher priority)
 
 ```python
 @task(timeout="30s", retries=3, tags=["io"])

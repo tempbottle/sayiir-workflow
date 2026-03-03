@@ -79,6 +79,7 @@ def task(
     retries: "int | PyRetryPolicy | None" = None,
     tags: list[str] | None = None,
     description: str | None = None,
+    priority: int | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]: ...
 
 
@@ -91,6 +92,7 @@ def task(
     retries: "int | PyRetryPolicy | None" = None,
     tags: list[str] | None = None,
     description: str | None = None,
+    priority: int | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]: ...
 
 
@@ -103,6 +105,7 @@ def task(
     retries: "int | PyRetryPolicy | None" = None,
     tags: list[str] | None = None,
     description: str | None = None,
+    priority: int | None = None,
 ) -> "Callable[..., T] | Callable[[Callable[..., T]], Callable[..., T]]":
     """Annotate a function as a workflow task.
 
@@ -148,6 +151,10 @@ def task(
     # Resolve retries: int shorthand or full RetryPolicy
     resolved_retries = _resolve_retries(retries)
 
+    # Validate priority range
+    if priority is not None and not (1 <= priority <= 5):
+        raise ValueError(f"priority must be between 1 and 5, got {priority}")
+
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         task_id = name or fn.__name__
         fn._task_id = task_id  # type: ignore[attr-defined]
@@ -157,6 +164,7 @@ def task(
             timeout_secs=resolved_timeout_secs,
             retries=resolved_retries,
             tags=tags,
+            priority=priority,
         )
 
         # Store type annotations for optional Pydantic integration

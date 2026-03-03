@@ -501,6 +501,12 @@ pub struct WorkflowSnapshot {
     /// Current iteration counts for active loops (keyed by loop ID).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub loop_iterations: HashMap<String, u32>,
+    /// Execution priority of the current task (1–5).
+    ///
+    /// Set from the continuation tree when advancing to a new task. Used by
+    /// persistence backends to order `find_available_tasks` results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_priority: Option<u8>,
     /// W3C `traceparent` header for distributed trace context propagation.
     ///
     /// This is an in-memory carrier — never serialized in the snapshot blob.
@@ -534,6 +540,7 @@ impl WorkflowSnapshot {
             task_deadline: None,
             task_retries: HashMap::new(),
             loop_iterations: HashMap::new(),
+            task_priority: None,
             trace_parent: None,
         }
     }
@@ -559,6 +566,7 @@ impl WorkflowSnapshot {
             task_deadline: None,
             task_retries: HashMap::new(),
             loop_iterations: HashMap::new(),
+            task_priority: None,
             trace_parent: None,
         }
     }
@@ -869,6 +877,23 @@ impl WorkflowSnapshot {
             interrupted_at_task,
         };
         self.updated_at = Self::current_timestamp();
+    }
+
+    /// The task priority of the current task, defaulting to 3 (Normal).
+    #[must_use]
+    pub fn current_task_priority(&self) -> u8 {
+        self.task_priority.unwrap_or(3)
+    }
+
+    /// Returns `true` if the given task last failed on the specified worker.
+    ///
+    /// Used as a soft bias to prefer a different worker on retry.
+    #[must_use]
+    pub fn has_failed_on_worker(&self, task_id: &str, worker_id: &str) -> bool {
+        self.task_retries
+            .get(task_id)
+            .and_then(|rs| rs.last_failed_worker.as_deref())
+            .is_some_and(|w| w == worker_id)
     }
 
     // --- Persistence helpers (database column extraction) ---

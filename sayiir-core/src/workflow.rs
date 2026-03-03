@@ -120,6 +120,8 @@ pub enum WorkflowContinuation {
         retry_policy: Option<RetryPolicy>,
         /// Schema version string (included in definition hash).
         version: Option<String>,
+        /// Execution priority (1–5). `None` inherits the default (Normal = 3).
+        priority: Option<u8>,
         /// Next node in the chain.
         next: Option<Box<WorkflowContinuation>>,
     },
@@ -282,6 +284,25 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Get the execution priority of the first task in this continuation.
+    ///
+    /// Returns `Some(priority)` for `Task` nodes, `None` for non-task nodes
+    /// (Delay, Signal, Branch). Recurses through Fork, Loop, and `ChildWorkflow`.
+    #[must_use]
+    pub fn first_task_priority(&self) -> Option<u8> {
+        match self {
+            WorkflowContinuation::Task { priority, .. } => *priority,
+            WorkflowContinuation::Delay { .. }
+            | WorkflowContinuation::AwaitSignal { .. }
+            | WorkflowContinuation::Branch { .. } => None,
+            WorkflowContinuation::Fork { branches, .. } => {
+                branches.first().and_then(|b| b.first_task_priority())
+            }
+            WorkflowContinuation::Loop { body, .. } => body.first_task_priority(),
+            WorkflowContinuation::ChildWorkflow { child, .. } => child.first_task_priority(),
+        }
+    }
+
     /// Get the terminal task ID of this continuation chain.
     ///
     /// Follows `get_next()` pointers to the end and returns the ID of the
@@ -436,6 +457,15 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Look up the priority configured on a specific task by ID.
+    #[must_use]
+    pub fn get_task_priority(&self, task_id: &str) -> Option<u8> {
+        match self.find_task(task_id)? {
+            WorkflowContinuation::Task { priority, .. } => *priority,
+            _ => None,
+        }
+    }
+
     /// Build a [`TaskMetadata`](crate::task::TaskMetadata) from the fields
     /// available on the continuation node for the given task.
     ///
@@ -449,11 +479,13 @@ impl WorkflowContinuation {
                 timeout,
                 retry_policy,
                 version,
+                priority,
                 ..
             }) => crate::task::TaskMetadata {
                 timeout: *timeout,
                 retries: retry_policy.clone(),
                 version: version.clone(),
+                priority: priority.and_then(crate::priority::Priority::from_u8),
                 ..Default::default()
             },
             _ => crate::task::TaskMetadata::default(),
@@ -470,6 +502,7 @@ impl WorkflowContinuation {
                 timeout,
                 retry_policy,
                 version,
+                priority,
                 next,
                 ..
             } => SerializableContinuation::Task {
@@ -477,6 +510,7 @@ impl WorkflowContinuation {
                 timeout_ms: timeout.map(|d| d.as_millis() as u64),
                 retry_policy: retry_policy.clone(),
                 version: version.clone(),
+                priority: *priority,
                 next: next.as_ref().map(|n| Box::new(n.to_serializable())),
             },
             WorkflowContinuation::Fork { id, branches, join } => SerializableContinuation::Fork {
@@ -618,6 +652,9 @@ pub enum SerializableContinuation {
         /// Schema version string (included in definition hash).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<String>,
+        /// Execution priority (1–5). `None` inherits the default (Normal = 3).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<u8>,
         /// Next node in the chain.
         next: Option<Box<SerializableContinuation>>,
     },
@@ -726,6 +763,7 @@ impl SerializableContinuation {
                 timeout_ms,
                 retry_policy,
                 version,
+                priority,
                 next,
             } => {
                 let func = registry
@@ -741,6 +779,7 @@ impl SerializableContinuation {
                     timeout: timeout_ms.map(std::time::Duration::from_millis),
                     retry_policy: retry_policy.clone(),
                     version: version.clone(),
+                    priority: *priority,
                     next,
                 })
             }
@@ -939,6 +978,7 @@ impl SerializableContinuation {
                     retry_policy,
                     version,
                     next,
+                    ..
                 } => {
                     hasher.update(b"T:"); // Tag for Task
                     hasher.update(id.as_bytes());
@@ -1885,11 +1925,13 @@ mod tests {
             timeout_ms: None,
             retry_policy: None,
             version: None,
+            priority: None,
             next: Some(Box::new(SerializableContinuation::Task {
                 id: "step1".to_string(), // Duplicate!
                 timeout_ms: None,
                 retry_policy: None,
                 version: None,
+                priority: None,
                 next: None,
             })),
         };
@@ -2399,6 +2441,7 @@ mod proptests {
             timeout_ms: None,
             retry_policy: None,
             version: None,
+            priority: None,
             next: None,
         });
 
@@ -2418,6 +2461,7 @@ mod proptests {
                     timeout_ms,
                     retry_policy: None,
                     version: None,
+                    priority: None,
                     next,
                 }),
             // Fork with branches and optional join
@@ -2525,6 +2569,7 @@ mod proptests {
                 timeout_ms: None,
                 retry_policy: None,
                 version: None,
+                priority: None,
                 next: None,
             })
             .boxed();
@@ -2541,6 +2586,7 @@ mod proptests {
                 timeout_ms: None,
                 retry_policy: None,
                 version: None,
+                priority: None,
                 next,
             }),
             // Fork with 0..3 branches (each gets unique prefix) and optional join
@@ -2766,6 +2812,7 @@ mod proptests {
                 timeout_ms: *timeout_ms,
                 retry_policy: retry_policy.clone(),
                 version: version.clone(),
+                priority: None,
                 next: next.clone(),
             },
             SerializableContinuation::Fork { branches, join, .. } => {

@@ -164,12 +164,14 @@ where
         // Phase 2: encode input and prepare snapshot.
         let input_bytes = workflow.context().codec.encode(&input)?;
         let first_task_id = workflow.continuation().first_task_id().to_string();
+        let first_task_priority = workflow.continuation().first_task_priority();
 
         let mut snapshot = match prepare_run(
             instance_id,
             definition_hash,
             input_bytes.clone(),
             first_task_id,
+            first_task_priority,
             self.backend.as_ref(),
             conflict_policy,
             true, // prechecked — check_existing_instance already ran
@@ -317,9 +319,9 @@ where
                     .await?;
 
                     if let Some(next_cont) = current.get_next() {
-                        snapshot.update_position(ExecutionPosition::AtTask {
-                            task_id: next_cont.first_task_id().to_string(),
-                        });
+                        let next_id = next_cont.first_task_id().to_string();
+                        snapshot.task_priority = continuation.get_task_priority(&next_id);
+                        snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
                     }
                     backend.save_snapshot(snapshot).await?;
                     check_guards(backend.as_ref(), &snapshot.instance_id, None).await?;
@@ -340,6 +342,9 @@ where
                             delay_id: id.clone(),
                             wake_at,
                             next_task_id: next.as_deref().map(|n| n.first_task_id().to_string()),
+                            next_task_priority: next
+                                .as_deref()
+                                .and_then(WorkflowContinuation::first_task_priority),
                             passthrough: current_input.clone(),
                         })))
                     }
@@ -365,8 +370,11 @@ where
                             Ok(Some(payload)) => {
                                 snapshot.mark_task_completed(id.clone(), payload);
                                 if let Some(next_cont) = next.as_deref() {
+                                    let next_id = next_cont.first_task_id().to_string();
+                                    snapshot.task_priority =
+                                        continuation.get_task_priority(&next_id);
                                     snapshot.update_position(ExecutionPosition::AtTask {
-                                        task_id: next_cont.first_task_id().to_string(),
+                                        task_id: next_id,
                                     });
                                 }
                                 backend.save_snapshot(snapshot).await?;
@@ -383,6 +391,9 @@ where
                                     next_task_id: next
                                         .as_deref()
                                         .map(|n| n.first_task_id().to_string()),
+                                    next_task_priority: next
+                                        .as_deref()
+                                        .and_then(WorkflowContinuation::first_task_priority),
                                 },
                             ))),
                             Err(e) => Err(RuntimeError::from(e)),
@@ -793,6 +804,7 @@ where
                                 delay_id: id.clone(),
                                 wake_at,
                                 next_task_id: None,
+                                next_task_priority: None,
                                 passthrough: current_input.clone(),
                             })))
                         }
@@ -814,6 +826,7 @@ where
                                     signal_name: signal_name.clone(),
                                     timeout: wake_at,
                                     next_task_id: None,
+                                    next_task_priority: None,
                                 },
                             )))
                         }

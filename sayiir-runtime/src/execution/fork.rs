@@ -385,6 +385,7 @@ where
                         delay_id: id.clone(),
                         wake_at,
                         next_task_id: None,
+                        next_task_priority: None,
                         passthrough: current_input.clone(),
                     })))
                 }
@@ -406,6 +407,7 @@ where
                             signal_name: signal_name.clone(),
                             timeout: wake_at,
                             next_task_id: None,
+                            next_task_priority: None,
                         },
                     )))
                 }

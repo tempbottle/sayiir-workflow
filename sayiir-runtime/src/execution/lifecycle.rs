@@ -95,11 +95,13 @@ where
     skip(input_bytes, backend),
     fields(%instance_id),
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn prepare_run<B>(
     instance_id: String,
     definition_hash: String,
     input_bytes: Bytes,
     first_task_id: String,
+    first_task_priority: Option<u8>,
     backend: &B,
     conflict_policy: ConflictPolicy,
     prechecked: bool,
@@ -176,6 +178,7 @@ where
     {
         snapshot.trace_parent = crate::trace_context::current_trace_parent();
     }
+    snapshot.task_priority = first_task_priority;
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: first_task_id,
     });

@@ -142,6 +142,11 @@ fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
         Some(quote! { tags: vec![#(#tag_strs.to_string()),*], })
     };
 
+    let priority = attrs.priority.map(|p| {
+        // Range validated at parse time in ParsedTask::parse.
+        quote! { priority: ::sayiir_core::priority::Priority::from_u8(#p), }
+    });
+
     quote! {
         ::sayiir_core::task::TaskMetadata {
             #display_name
@@ -149,6 +154,7 @@ fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
             #timeout
             #retries
             #tags
+            #priority
             ..::std::default::Default::default()
         }
     }

@@ -604,6 +604,7 @@ where
     .await?;
 
     if let Some(next_cont) = params.next {
+        snapshot.task_priority = next_cont.first_task_priority();
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: next_cont.first_task_id().to_string(),
         });

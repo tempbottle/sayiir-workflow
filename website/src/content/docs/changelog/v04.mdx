@@ -138,6 +138,48 @@ This is particularly useful for:
 
 ---
 
+### Task prioritization
+
+Tasks now support a `priority` parameter (1–5) that controls execution order in distributed workers. Lower values are picked up first. The default priority is 3 (Normal).
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+@task(priority=1)  # Critical — picked up first
+def charge_payment(order: dict) -> dict:
+    return process_payment(order)
+
+@task(priority=4)  # Low — runs when higher-priority work is done
+def generate_report(data: dict) -> dict:
+    return build_report(data)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+const chargePayment = task("charge-payment", processPayment, { priority: 1 });
+const generateReport = task("generate-report", buildReport, { priority: 4 });
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+#[task(id = "charge_payment", priority = 1)]
+async fn charge_payment(order: Order) -> Result<Receipt, BoxError> {
+    process_payment(order).await
+}
+```
+
+</TabItem>
+</Tabs>
+
+**Aging** prevents starvation: the longer a task waits, the more its effective priority improves. See [Task Priority](/guides/distributed-workers/#task-priority) for details.
+
+---
+
 ## New exports
 
 **Python** — new import from `sayiir`:

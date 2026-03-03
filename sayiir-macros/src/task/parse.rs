@@ -40,6 +40,10 @@ pub struct TaskAttrs {
     /// Categorization tags.
     #[darling(default, multiple)]
     pub tags: Vec<String>,
+
+    /// Execution priority (1–5). 1 = Critical, 3 = Normal, 5 = Minimal.
+    #[darling(default)]
+    pub priority: Option<u8>,
 }
 
 /// A parameter classified as either the task input or an injected dependency.
@@ -132,6 +136,16 @@ impl ParsedTask {
         // Validation 3: extract return type — Result<T, E> or plain T
         let (output_type, return_kind) =
             extract_output_type(&item_fn.sig.output, item_fn.sig.fn_token.span)?;
+
+        // Validation 4: priority must be 1–5
+        if let Some(p) = attrs.priority
+            && !(1..=5).contains(&p)
+        {
+            return Err(err(
+                item_fn.sig.fn_token.span,
+                "#[task] priority must be between 1 and 5 (1 = Critical, 3 = Normal, 5 = Minimal)",
+            ));
+        }
 
         let fn_name = item_fn.sig.ident.clone();
         let task_id = attrs.id.clone().unwrap_or_else(|| fn_name.to_string());
