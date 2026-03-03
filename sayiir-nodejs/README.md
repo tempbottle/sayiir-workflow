@@ -357,7 +357,7 @@ Variants: `completed`, `in_progress`, `failed`, `cancelled`, `paused`, `waiting`
 
 ### WorkflowClient (distributed)
 
-- **`new WorkflowClient(backend, opts?)`** — Client for submitting and controlling workflow instances without executing tasks. Used with `Worker` for the distributed model. Options: `conflictPolicy` (`"fail"`, `"use_existing"`, `"terminate_existing"`).
+- **`new WorkflowClient(backend, opts?)`** — Client for submitting and controlling workflow instances without executing tasks. Used with `Worker` for the distributed model. Options: `conflictPolicy` (`"fail"`, `"useExisting"`, `"terminateExisting"`).
 - **`.submit(workflow, instanceId, input)`** — Submit a workflow for execution. Returns `WorkflowStatus<TOut>`.
 - **`.cancel(instanceId, opts?)`** — Cancel a workflow instance.
 - **`.pause(instanceId, opts?)`** — Pause a workflow instance.

@@ -229,11 +229,11 @@ client = WorkflowClient(backend, conflict_policy="terminate_existing")
 // "fail" (default) — throw an error
 const client = new WorkflowClient(backend);
 
-// "use_existing" — return the existing workflow's status
-const client = new WorkflowClient(backend, { conflictPolicy: "use_existing" });
+// "useExisting" — return the existing workflow's status
+const client = new WorkflowClient(backend, { conflictPolicy: "useExisting" });
 
-// "terminate_existing" — cancel and restart
-const client = new WorkflowClient(backend, { conflictPolicy: "terminate_existing" });
+// "terminateExisting" — cancel and restart
+const client = new WorkflowClient(backend, { conflictPolicy: "terminateExisting" });
 ```
 
 </TabItem>

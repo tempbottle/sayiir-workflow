@@ -829,11 +829,11 @@ Create a new workflow client.
 import { WorkflowClient, PostgresBackend } from "sayiir";
 
 const backend = PostgresBackend.connect("postgresql://localhost/sayiir");
-const client = new WorkflowClient(backend, { conflictPolicy: "use_existing" });
+const client = new WorkflowClient(backend, { conflictPolicy: "useExisting" });
 ```
 
 **WorkflowClientOptions:**
-- `conflictPolicy` (ConflictPolicy, optional) — What to do when an `instanceId` already exists: `"fail"` (default), `"use_existing"`, or `"terminate_existing"`
+- `conflictPolicy` (ConflictPolicy, optional) — What to do when an `instanceId` already exists: `"fail"` (default), `"useExisting"`, or `"terminateExisting"`
 
 #### .submit(workflow, instanceId, input)
 

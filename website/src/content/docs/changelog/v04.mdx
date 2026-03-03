@@ -88,11 +88,11 @@ let status = client.status("order-42").await?;
 
 `WorkflowClient` supports **conflict policies** that control what happens when you submit a workflow with an `instance_id` that already exists. This enables safe retries and at-most-once semantics without application-level deduplication.
 
-| Policy | Behavior |
-|--------|-----------|
-| `"fail"` (default) | Raises an error if the instance already exists |
-| `"use_existing"` | Returns the existing instance's current status — no new work is created |
-| `"terminate_existing"` | Cancels the existing instance and creates a fresh one |
+| Policy (Python/Rust) | Policy (Node.js) | Behavior |
+|----------------------|-------------------|-----------|
+| `"fail"` (default) | `"fail"` (default) | Raises an error if the instance already exists |
+| `"use_existing"` | `"useExisting"` | Returns the existing instance's current status — no new work is created |
+| `"terminate_existing"` | `"terminateExisting"` | Cancels the existing instance and creates a fresh one |
 
 <Tabs>
 <TabItem label="Python">
@@ -109,7 +109,7 @@ status = client.submit(workflow, "order-42", input)  # returns existing
 
 ```typescript
 // Safe retries — submitting the same ID twice returns the existing status
-const client = new WorkflowClient(backend, { conflictPolicy: "use_existing" });
+const client = new WorkflowClient(backend, { conflictPolicy: "useExisting" });
 const s1 = client.submit(workflow, "order-42", input); // creates
 const s2 = client.submit(workflow, "order-42", input); // returns existing
 ```
