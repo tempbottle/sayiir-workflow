@@ -29,6 +29,7 @@ declare module "sayiir" {
     retry?: RetryPolicy;
     description?: string;
     tags?: string[];
+    priority?: number;
     input?: ZodLike<TIn>;
     output?: ZodLike<TOut>;
   }
