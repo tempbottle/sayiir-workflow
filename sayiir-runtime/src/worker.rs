@@ -26,7 +26,7 @@ use sayiir_core::snapshot::{
 };
 use sayiir_core::task_claim::AvailableTask;
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
-use sayiir_persistence::{PersistentBackend, SignalStore, TaskClaimStore};
+use sayiir_persistence::{PersistentBackend, TaskClaimStore};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -127,58 +127,6 @@ impl<B> WorkerHandle<B> {
     #[must_use]
     pub fn backend(&self) -> &Arc<B> {
         &self.inner.backend
-    }
-}
-
-impl<B: SignalStore> WorkerHandle<B> {
-    /// Request cancellation of a workflow.
-    ///
-    /// This stores a cancel signal directly in the backend. The worker will
-    /// pick it up at the next guard check (task boundary).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the signal cannot be stored (workflow not found or in terminal state).
-    pub async fn cancel_workflow(
-        &self,
-        instance_id: &str,
-        reason: Option<String>,
-        cancelled_by: Option<String>,
-    ) -> Result<(), crate::error::RuntimeError> {
-        self.inner
-            .backend
-            .store_signal(
-                instance_id,
-                SignalKind::Cancel,
-                SignalRequest::new(reason, cancelled_by),
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Request pausing of a workflow.
-    ///
-    /// This stores a pause signal directly in the backend. The worker will
-    /// pick it up at the next guard check (task boundary).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the signal cannot be stored (workflow not found or in terminal/paused state).
-    pub async fn pause_workflow(
-        &self,
-        instance_id: &str,
-        reason: Option<String>,
-        paused_by: Option<String>,
-    ) -> Result<(), crate::error::RuntimeError> {
-        self.inner
-            .backend
-            .store_signal(
-                instance_id,
-                SignalKind::Pause,
-                SignalRequest::new(reason, paused_by),
-            )
-            .await?;
-        Ok(())
     }
 }
 
@@ -2046,7 +1994,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancel_via_handle() {
+    async fn test_cancel_via_client() {
         let backend = InMemoryBackend::new();
         let registry = TaskRegistry::new();
 
@@ -2057,8 +2005,10 @@ mod tests {
         let worker = PooledWorker::new("test-worker", backend, registry);
         let handle = worker.spawn(Duration::from_millis(50), EmptyWorkflows::new());
 
-        handle
-            .cancel_workflow(
+        // Cancel via WorkflowClient instead of handle
+        let client = crate::WorkflowClient::from_shared(std::sync::Arc::clone(handle.backend()));
+        client
+            .cancel(
                 "wf-1",
                 Some("test reason".to_string()),
                 Some("tester".to_string()),

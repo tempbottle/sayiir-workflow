@@ -49,32 +49,6 @@ export class WorkerHandle {
   shutdown(): void {
     this._native.shutdown();
   }
-
-  /** Cancel a workflow via the worker's backend. */
-  cancelWorkflow(
-    instanceId: string,
-    opts?: { reason?: string; cancelledBy?: string },
-  ): void {
-    this._native.cancelWorkflow(instanceId, opts?.reason, opts?.cancelledBy);
-  }
-
-  /** Pause a workflow via the worker's backend. */
-  pauseWorkflow(
-    instanceId: string,
-    opts?: { reason?: string; pausedBy?: string },
-  ): void {
-    this._native.pauseWorkflow(instanceId, opts?.reason, opts?.pausedBy);
-  }
-
-  /** Unpause a workflow via the worker's backend. */
-  unpauseWorkflow(instanceId: string): void {
-    this._native.unpauseWorkflow(instanceId);
-  }
-
-  /** Send a signal to a workflow via the worker's backend. */
-  sendSignal(instanceId: string, signalName: string, payload: unknown): void {
-    this._native.sendSignal(instanceId, signalName, JSON.stringify(payload));
-  }
 }
 
 /** Distributed workflow worker. */

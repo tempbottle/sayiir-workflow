@@ -778,32 +778,61 @@ handle.shutdown()
 handle.join()  # blocks until shutdown completes
 ```
 
-#### .cancel_workflow(instance_id, *, reason=None, cancelled_by=None)
+:::note
+Lifecycle operations (cancel, pause, unpause, send signal) have moved to [`WorkflowClient`](#workflowclient). The `WorkerHandle` is now focused on worker lifecycle only (shutdown/join).
+:::
 
-Request cancellation of a workflow instance via the worker's backend.
+## WorkflowClient
+
+Client for submitting and controlling workflow instances. Unlike `run_durable_workflow()`, the client does **not** execute tasks — it only creates initial snapshots and stores lifecycle signals. A `Worker` picks up and executes the work.
+
+### WorkflowClient(backend, *, conflict_policy=None)
+
+Create a new workflow client.
 
 ```python
-handle.cancel_workflow(
-    "order-42",
-    reason="Out of stock",
-    cancelled_by="admin@example.com",
-)
+from sayiir import WorkflowClient, PostgresBackend
+
+backend = PostgresBackend("postgresql://localhost/sayiir")
+client = WorkflowClient(backend, conflict_policy="use_existing")
 ```
 
-#### .pause_workflow(instance_id, *, reason=None, paused_by=None)
+**Parameters:**
+- `backend` (InMemoryBackend | PostgresBackend) — Shared persistence backend
+- `conflict_policy` (str, optional) — What to do when an `instance_id` already exists: `"fail"` (default), `"use_existing"`, or `"terminate_existing"`
+
+#### .submit(workflow, instance_id, input)
+
+Submit a workflow for execution. Creates an initial snapshot so a Worker can pick it up.
+
+```python
+status = client.submit(workflow, "order-42", {"items": [1, 2, 3]})
+```
+
+**Returns:** `WorkflowStatus`
+
+#### .cancel(instance_id, *, reason=None, cancelled_by=None)
+
+Request cancellation of a workflow instance.
+
+```python
+client.cancel("order-42", reason="Out of stock", cancelled_by="admin@example.com")
+```
+
+#### .pause(instance_id, *, reason=None, paused_by=None)
 
 Pause a workflow instance at the next checkpoint.
 
 ```python
-handle.pause_workflow("order-42", reason="Maintenance window")
+client.pause("order-42", reason="Maintenance window")
 ```
 
-#### .unpause_workflow(instance_id)
+#### .unpause(instance_id)
 
 Unpause a paused workflow instance.
 
 ```python
-handle.unpause_workflow("order-42")
+client.unpause("order-42")
 ```
 
 #### .send_signal(instance_id, signal_name, payload)
@@ -811,8 +840,20 @@ handle.unpause_workflow("order-42")
 Send an external signal to a workflow instance.
 
 ```python
-handle.send_signal("order-42", "manager_approval", {"approved": True})
+client.send_signal("order-42", "manager_approval", {"approved": True})
 ```
+
+#### .status(instance_id)
+
+Get the current status of a workflow instance.
+
+```python
+status = client.status("order-42")
+if status.is_completed():
+    print(status.output)
+```
+
+**Returns:** `WorkflowStatus`
 
 ## Exceptions
 

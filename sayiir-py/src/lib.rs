@@ -23,6 +23,7 @@ mod flow;
 mod task;
 mod telemetry;
 mod worker;
+mod workflow_client;
 
 /// Python module for Sayiir workflow library.
 #[pymodule]
@@ -40,6 +41,7 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<durable_engine::PyDurableEngine>()?;
     m.add_class::<worker::PyWorker>()?;
     m.add_class::<worker::PyWorkerHandle>()?;
+    m.add_class::<workflow_client::PyWorkflowClient>()?;
 
     // Telemetry
     m.add_function(wrap_pyfunction!(telemetry::init_tracing, m)?)?;

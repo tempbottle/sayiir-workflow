@@ -150,8 +150,9 @@ async fn cancel_and_resume() {
     });
     runner.backend().save_snapshot(&snapshot).await.unwrap();
 
-    // Signal cancellation
-    runner
+    // Signal cancellation via WorkflowClient
+    let client = WorkflowClient::from_shared(Arc::clone(runner.backend()));
+    client
         .cancel(
             "inst-cancel",
             Some("testing cancel".into()),
@@ -199,8 +200,9 @@ async fn pause_unpause_resume() {
     });
     runner.backend().save_snapshot(&snapshot).await.unwrap();
 
-    // Request pause
-    runner
+    // Request pause via WorkflowClient
+    let client = WorkflowClient::from_shared(Arc::clone(runner.backend()));
+    client
         .pause("inst-pause", Some("maintenance".into()), Some("ops".into()))
         .await
         .unwrap();
@@ -215,9 +217,8 @@ async fn pause_unpause_resume() {
         other => panic!("Expected Paused, got {other:?}"),
     }
 
-    // Unpause
-    let unpaused = runner.unpause("inst-pause").await.unwrap();
-    assert!(unpaused.state.is_in_progress());
+    // Unpause via WorkflowClient
+    client.unpause("inst-pause").await.unwrap();
 
     // Resume should now continue execution
     let status = runner.resume(&workflow, "inst-pause").await.unwrap();
@@ -823,4 +824,158 @@ async fn run_terminate_existing_restarts() {
         second_output, 11,
         "TerminateExisting should re-execute with new input; expected 11, got {second_output}"
     );
+}
+
+// ─── WorkflowClient tests ────────────────────────────────────────────────────
+
+use sayiir_runtime::WorkflowClient;
+
+// ─── client: submit creates snapshot ─────────────────────────────────────────
+
+#[tokio::test]
+async fn client_submit_creates_snapshot() {
+    let (_c, backend, _url) = setup().await;
+    let client = WorkflowClient::new(backend);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    let (status, output) = client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::InProgress));
+    assert!(output.is_none());
+
+    // Verify snapshot was created
+    let snapshot = client.backend().load_snapshot("inst-1").await.unwrap();
+    assert!(!snapshot.state.is_completed());
+}
+
+// ─── client: Fail policy rejects duplicate ───────────────────────────────────
+
+#[tokio::test]
+async fn client_submit_fail_policy_rejects_duplicate() {
+    let (_c, backend, _url) = setup().await;
+    let client = WorkflowClient::new(backend);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First submit succeeds
+    client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+
+    // Second submit with default Fail policy should error
+    let result = client.submit(&workflow, "inst-1", 10u32).await;
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        RuntimeError::InstanceAlreadyExists(_)
+    ));
+}
+
+// ─── client: UseExisting returns status ──────────────────────────────────────
+
+#[tokio::test]
+async fn client_submit_use_existing_returns_status() {
+    let (_c, backend, _url) = setup().await;
+    let client = WorkflowClient::new(backend).with_conflict_policy(ConflictPolicy::UseExisting);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First submit
+    client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+
+    // Second submit with UseExisting should return current status
+    let (status, _output) = client.submit(&workflow, "inst-1", 10u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::InProgress));
+}
+
+// ─── client: TerminateExisting recreates ─────────────────────────────────────
+
+#[tokio::test]
+async fn client_submit_terminate_existing_restarts() {
+    let (_c, backend, _url) = setup().await;
+    let client =
+        WorkflowClient::new(backend).with_conflict_policy(ConflictPolicy::TerminateExisting);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First submit
+    client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+
+    // Second submit with TerminateExisting should succeed (recreate)
+    let (status, _output) = client.submit(&workflow, "inst-1", 10u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::InProgress));
+}
+
+// ─── client: cancel stores signal ────────────────────────────────────────────
+
+#[tokio::test]
+async fn client_cancel_stores_signal() {
+    let (_c, backend, _url) = setup().await;
+    let client = WorkflowClient::new(backend);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // Submit first
+    client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+
+    // Cancel
+    client
+        .cancel("inst-1", Some("testing".into()), Some("admin".into()))
+        .await
+        .unwrap();
+
+    // Verify signal was stored
+    use sayiir_core::snapshot::SignalKind;
+    let req = client
+        .backend()
+        .get_signal("inst-1", SignalKind::Cancel)
+        .await
+        .unwrap();
+    assert!(req.is_some());
+    assert_eq!(req.unwrap().reason, Some("testing".into()));
+}
+
+// ─── client: submit then runner executes ─────────────────────────────────────
+
+#[tokio::test]
+async fn client_submit_then_runner_executes() {
+    let (_c, backend, _url) = setup().await;
+    let client = WorkflowClient::from_shared(Arc::new(backend));
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .then("double", |i: u32| async move { Ok(i * 2) })
+        .build()
+        .unwrap();
+
+    // Submit via client
+    let (status, _) = client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::InProgress));
+
+    // Resume via CheckpointingRunner (simulating what a worker does)
+    let runner = CheckpointingRunner::from_shared(Arc::clone(client.backend()));
+    let status = runner.resume(&workflow, "inst-1").await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // Verify output
+    let snapshot = client.backend().load_snapshot("inst-1").await.unwrap();
+    assert!(snapshot.state.is_completed());
+    let codec = Arc::new(JsonCodec);
+    let output: u32 = codec
+        .decode(snapshot.state.completed_output().unwrap().clone())
+        .unwrap();
+    assert_eq!(output, 12); // (5+1)*2
 }

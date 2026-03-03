@@ -12,8 +12,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sayiir_core::registry::TaskRegistry;
-use sayiir_core::snapshot::{SignalKind, SignalRequest};
-use sayiir_persistence::SignalStore;
 use sayiir_runtime::{
     ExternalTaskExecutor, ExternalWorkflow, PooledWorker, WorkerHandle, WorkflowIndex,
 };
@@ -22,7 +20,6 @@ use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
 
 use crate::backend::{BackendKind, NapiInMemoryBackend, NapiPostgresBackend};
-use crate::exceptions;
 use crate::flow::NapiWorkflow;
 
 /// Distributed workflow worker.
@@ -162,7 +159,7 @@ impl NapiWorker {
         let poll_interval = self.poll_interval;
 
         let (handle_tx, handle_rx) = std::sync::mpsc::sync_channel::<
-            std::result::Result<(WorkerHandle<BackendKind>, tokio::runtime::Handle), String>,
+            std::result::Result<WorkerHandle<BackendKind>, String>,
         >(1);
 
         std::thread::Builder::new()
@@ -203,11 +200,10 @@ impl NapiWorker {
                     .with_claim_ttl(Some(claim_ttl));
 
                 let _guard = runtime.enter();
-                let rt_handle = runtime.handle().clone();
                 let handle =
                     worker.spawn_with_executor(poll_interval, external_workflows, executor);
                 let join_handle = handle.clone();
-                let _ = handle_tx.send(Ok((handle, rt_handle)));
+                let _ = handle_tx.send(Ok(handle));
 
                 runtime.block_on(async {
                     let _ = join_handle.join().await;
@@ -220,7 +216,7 @@ impl NapiWorker {
                 )
             })?;
 
-        let (handle, runtime_handle) = handle_rx
+        let handle = handle_rx
             .recv()
             .map_err(|_| {
                 Error::new(
@@ -230,10 +226,7 @@ impl NapiWorker {
             })?
             .map_err(|e| Error::new(Status::GenericFailure, e))?;
 
-        Ok(NapiWorkerHandle {
-            handle,
-            runtime_handle,
-        })
+        Ok(NapiWorkerHandle { handle })
     }
 }
 
@@ -241,9 +234,6 @@ impl NapiWorker {
 #[napi]
 pub struct NapiWorkerHandle {
     handle: WorkerHandle<BackendKind>,
-    /// Handle to the worker's tokio runtime — used for backend ops that need
-    /// the same runtime that owns the `PgPool`.
-    runtime_handle: tokio::runtime::Handle,
 }
 
 #[napi]
@@ -253,98 +243,4 @@ impl NapiWorkerHandle {
     pub fn shutdown(&self) {
         self.handle.shutdown();
     }
-
-    /// Request cancellation of a workflow.
-    #[napi]
-    pub fn cancel_workflow(
-        &self,
-        instance_id: String,
-        reason: Option<String>,
-        cancelled_by: Option<String>,
-    ) -> Result<()> {
-        let backend = self.handle.backend().clone();
-        spawn_on_worker_runtime(&self.runtime_handle, async move {
-            backend
-                .store_signal(
-                    &instance_id,
-                    SignalKind::Cancel,
-                    SignalRequest::new(reason, cancelled_by),
-                )
-                .await
-        })
-        .map_err(exceptions::backend_err_to_napi)
-    }
-
-    /// Request pausing of a workflow.
-    #[napi]
-    pub fn pause_workflow(
-        &self,
-        instance_id: String,
-        reason: Option<String>,
-        paused_by: Option<String>,
-    ) -> Result<()> {
-        let backend = self.handle.backend().clone();
-        spawn_on_worker_runtime(&self.runtime_handle, async move {
-            backend
-                .store_signal(
-                    &instance_id,
-                    SignalKind::Pause,
-                    SignalRequest::new(reason, paused_by),
-                )
-                .await
-        })
-        .map_err(exceptions::backend_err_to_napi)
-    }
-
-    /// Unpause a paused workflow.
-    #[napi]
-    pub fn unpause_workflow(&self, instance_id: String) -> Result<()> {
-        let backend = self.handle.backend().clone();
-        spawn_on_worker_runtime(&self.runtime_handle, async move {
-            backend.unpause(&instance_id).await.map(|_| ())
-        })
-        .map_err(exceptions::backend_err_to_napi)
-    }
-
-    /// Send an external signal to a workflow.
-    #[napi]
-    pub fn send_signal(
-        &self,
-        instance_id: String,
-        signal_name: String,
-        payload_json: String,
-    ) -> Result<()> {
-        let payload_bytes = Bytes::from(payload_json.into_bytes());
-        let backend = self.handle.backend().clone();
-        spawn_on_worker_runtime(&self.runtime_handle, async move {
-            backend
-                .send_event(&instance_id, &signal_name, payload_bytes)
-                .await
-        })
-        .map_err(exceptions::backend_err_to_napi)
-    }
-}
-
-/// Spawn an async future on the worker's runtime and block until it completes.
-///
-/// This ensures backend operations (cancel, pause, signal) run on the same
-/// runtime that owns the `PgPool`, avoiding cross-runtime I/O driver issues.
-fn spawn_on_worker_runtime<F>(
-    handle: &tokio::runtime::Handle,
-    f: F,
-) -> std::result::Result<(), sayiir_persistence::BackendError>
-where
-    F: std::future::Future<Output = std::result::Result<(), sayiir_persistence::BackendError>>
-        + Send
-        + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    handle.spawn(async move {
-        let _ = tx.send(f.await);
-    });
-    rx.recv().map_err(|_| {
-        sayiir_persistence::BackendError::Backend(
-            "Worker runtime shut down before operation completed".to_string(),
-        )
-    })?
 }

@@ -105,8 +105,10 @@ cancelWorkflow("job-123", backend, {
 <TabItem label="Rust">
 
 ```rust
-// Cancel using the runner
-runner.cancel("job-123", Some("No longer needed".into()), Some("admin".into())).await?;
+use sayiir_runtime::WorkflowClient;
+
+let client = WorkflowClient::from_shared(runner.backend().clone());
+client.cancel("job-123", Some("No longer needed".into()), Some("admin".into())).await?;
 ```
 
 </TabItem>
@@ -147,11 +149,15 @@ unpauseWorkflow("job-123", backend);
 <TabItem label="Rust">
 
 ```rust
+use sayiir_runtime::WorkflowClient;
+
+let client = WorkflowClient::from_shared(runner.backend().clone());
+
 // Pause a running workflow
-runner.pause("job-123", Some("Maintenance window".into()), Some("ops-team".into())).await?;
+client.pause("job-123", Some("Maintenance window".into()), Some("ops-team".into())).await?;
 
 // Unpause to allow resumption
-runner.unpause("job-123").await?;
+client.unpause("job-123").await?;
 ```
 
 </TabItem>
