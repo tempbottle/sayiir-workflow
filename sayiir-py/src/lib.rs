@@ -59,5 +59,9 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "DeserializationError",
         m.py().get_type::<exceptions::DeserializationError>(),
     )?;
+    m.add(
+        "InstanceAlreadyExistsError",
+        m.py().get_type::<exceptions::InstanceAlreadyExistsError>(),
+    )?;
     Ok(())
 }

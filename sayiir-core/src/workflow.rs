@@ -1099,6 +1099,22 @@ pub struct SerializedWorkflowState {
     pub continuation: SerializableContinuation,
 }
 
+/// Policy controlling what happens when [`run()`] is called with an
+/// `instance_id` that already has a persisted snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum::EnumString, strum::Display)]
+#[strum(serialize_all = "snake_case")]
+pub enum ConflictPolicy {
+    /// Return an error if the instance already exists (default).
+    #[default]
+    Fail,
+    /// Reuse the existing snapshot: return its current status without re-executing.
+    #[strum(serialize = "use_existing", serialize = "useExisting")]
+    UseExisting,
+    /// Terminate the existing instance (delete snapshot + clear signals) and start fresh.
+    #[strum(serialize = "terminate_existing", serialize = "terminateExisting")]
+    TerminateExisting,
+}
+
 /// The status of a workflow execution.
 #[derive(Debug, strum::AsRefStr, strum::EnumDiscriminants)]
 #[strum_discriminants(name(WorkflowStatusKind))]

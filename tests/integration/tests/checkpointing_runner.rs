@@ -3,14 +3,14 @@
 mod common;
 
 use common::{ctx, setup};
-use sayiir_core::codec::Encoder;
+use sayiir_core::codec::{Decoder, Encoder};
 use sayiir_core::error::BoxError;
 use sayiir_core::task::BranchOutputs;
 use sayiir_core::workflow::{WorkflowBuilder, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_postgres::PostgresBackend;
-use sayiir_runtime::CheckpointingRunner;
 use sayiir_runtime::serialization::JsonCodec;
+use sayiir_runtime::{CheckpointingRunner, ConflictPolicy, RuntimeError};
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -733,4 +733,94 @@ async fn same_task_version_allows_resume() {
         .await
         .unwrap();
     assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+// ─── ConflictPolicy tests ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn run_fail_policy_rejects_duplicate() {
+    let (_c, backend, _url) = setup().await;
+    let runner = CheckpointingRunner::new(backend).with_conflict_policy(ConflictPolicy::Fail);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First run succeeds
+    let status = runner.run(&workflow, "inst-dup", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // Second run with same instance_id should fail
+    let err = runner.run(&workflow, "inst-dup", 5u32).await.unwrap_err();
+    assert!(
+        matches!(err, RuntimeError::InstanceAlreadyExists(ref id) if id == "inst-dup"),
+        "expected InstanceAlreadyExists error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn run_use_existing_returns_completed() {
+    let (_c, backend, _url) = setup().await;
+    let backend = backend.clone();
+    let runner =
+        CheckpointingRunner::new(backend.clone()).with_conflict_policy(ConflictPolicy::UseExisting);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First run: 5 + 1 = 6
+    let status = runner.run(&workflow, "inst-reuse", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // Second run with different input — UseExisting should NOT re-execute
+    let status = runner.run(&workflow, "inst-reuse", 99u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // The stored output should still be 6 (from the first run), not 100
+    let snapshot = backend.load_snapshot("inst-reuse").await.unwrap();
+    let output_bytes = snapshot.state.completed_output().unwrap().clone();
+    let output: u32 = JsonCodec.decode(output_bytes).unwrap();
+    assert_eq!(
+        output, 6,
+        "UseExisting should not re-execute; stored output should remain 6"
+    );
+}
+
+#[tokio::test]
+async fn run_terminate_existing_restarts() {
+    let (_c, backend, _url) = setup().await;
+    let backend = backend.clone();
+    let runner = CheckpointingRunner::new(backend.clone())
+        .with_conflict_policy(ConflictPolicy::TerminateExisting);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First run: 5 + 1 = 6
+    let status = runner.run(&workflow, "inst-restart", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    let snapshot = backend.load_snapshot("inst-restart").await.unwrap();
+    let first_output: u32 = JsonCodec
+        .decode(snapshot.state.completed_output().unwrap().clone())
+        .unwrap();
+    assert_eq!(first_output, 6);
+
+    // Second run with different input — TerminateExisting should re-execute: 10 + 1 = 11
+    let status = runner.run(&workflow, "inst-restart", 10u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    let snapshot = backend.load_snapshot("inst-restart").await.unwrap();
+    let second_output: u32 = JsonCodec
+        .decode(snapshot.state.completed_output().unwrap().clone())
+        .unwrap();
+    assert_eq!(
+        second_output, 11,
+        "TerminateExisting should re-execute with new input; expected 11, got {second_output}"
+    );
 }

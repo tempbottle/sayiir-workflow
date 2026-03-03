@@ -262,6 +262,7 @@ declare module "sayiir" {
     instanceId: string,
     input: TIn,
     backend: Backend,
+    conflictPolicy?: ConflictPolicy,
   ): WorkflowStatus<TOut>;
 
   /** Resume a workflow from its last checkpoint. */
@@ -296,9 +297,14 @@ declare module "sayiir" {
     backend: Backend,
   ): void;
 
+  /** Conflict policy when an `instanceId` already exists. */
+  type ConflictPolicy = "fail" | "useExisting" | "terminateExisting";
+
   interface DurableRunOptions {
     instanceId: string;
     backend: Backend;
+    /** What to do when `instanceId` already has a snapshot. Default: `"fail"`. */
+    conflictPolicy?: ConflictPolicy;
   }
 
   // ── Backends ──

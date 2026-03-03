@@ -128,7 +128,11 @@ class PyPostgresBackend:
 class PyDurableEngine:
     """Durable workflow engine with checkpointing, cancellation, and resume."""
 
-    def __init__(self, backend: PyInMemoryBackend | PyPostgresBackend) -> None: ...
+    def __init__(
+        self,
+        backend: PyInMemoryBackend | PyPostgresBackend,
+        conflict_policy: str | None = None,
+    ) -> None: ...
     def run(
         self,
         workflow: PyWorkflow,
@@ -251,5 +255,10 @@ class TaskError(WorkflowError):
 
 class BackendError(WorkflowError):
     """A persistence backend operation failed."""
+
+    ...
+
+class InstanceAlreadyExistsError(WorkflowError):
+    """A workflow instance with this ID already exists."""
 
     ...

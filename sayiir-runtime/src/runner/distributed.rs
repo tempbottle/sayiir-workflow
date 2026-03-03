@@ -19,7 +19,7 @@ use sayiir_core::codec::{Codec, EnvelopeCodec};
 use sayiir_core::context::WorkflowContext;
 use sayiir_core::error::WorkflowError;
 use sayiir_core::snapshot::{ExecutionPosition, SignalKind, SignalRequest, WorkflowSnapshot};
-use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
+use sayiir_core::workflow::{ConflictPolicy, Workflow, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
 
 use crate::error::RuntimeError;
@@ -75,6 +75,7 @@ use crate::execution::{
 /// ```
 pub struct CheckpointingRunner<B> {
     backend: Arc<B>,
+    conflict_policy: ConflictPolicy,
 }
 
 impl<B> CheckpointingRunner<B>
@@ -85,7 +86,15 @@ where
     pub fn new(backend: B) -> Self {
         Self {
             backend: Arc::new(backend),
+            conflict_policy: ConflictPolicy::default(),
         }
+    }
+
+    /// Set the conflict policy for duplicate instance IDs.
+    #[must_use]
+    pub fn with_conflict_policy(mut self, policy: ConflictPolicy) -> Self {
+        self.conflict_policy = policy;
+        self
     }
 
     /// Request cancellation of a workflow.
@@ -168,12 +177,13 @@ where
     /// Run a workflow from the beginning, saving checkpoints after each task.
     ///
     /// The `instance_id` uniquely identifies this workflow execution instance.
-    /// If a snapshot with this ID already exists, it will be overwritten.
+    /// The [`ConflictPolicy`] (set via [`with_conflict_policy`](Self::with_conflict_policy))
+    /// controls behaviour when a snapshot with this ID already exists.
     ///
     /// # Errors
     ///
-    /// Returns an error if the workflow cannot be executed or if snapshot
-    /// operations fail.
+    /// Returns an error if the workflow cannot be executed, if snapshot
+    /// operations fail, or if the conflict policy rejects a duplicate.
     pub async fn run<C, Input, M>(
         &self,
         workflow: &Workflow<C, Input, M>,
@@ -194,6 +204,33 @@ where
 
         // Encode initial input
         let input_bytes = workflow.context().codec.encode(&input)?;
+
+        // Check for existing snapshot according to conflict policy
+        match self.backend.load_snapshot(&instance_id).await {
+            Ok(existing) => match self.conflict_policy {
+                ConflictPolicy::Fail => {
+                    return Err(RuntimeError::InstanceAlreadyExists(instance_id));
+                }
+                ConflictPolicy::UseExisting => {
+                    return Ok(existing
+                        .state
+                        .as_terminal_status()
+                        .unwrap_or(WorkflowStatus::InProgress));
+                }
+                ConflictPolicy::TerminateExisting => {
+                    tracing::info!(%instance_id, "terminating existing instance before restart");
+                    self.backend.delete_snapshot(&instance_id).await?;
+                    self.backend
+                        .clear_signal(&instance_id, SignalKind::Cancel)
+                        .await?;
+                    self.backend
+                        .clear_signal(&instance_id, SignalKind::Pause)
+                        .await?;
+                }
+            },
+            Err(sayiir_persistence::BackendError::NotFound(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
 
         // Create initial snapshot with input
         let mut snapshot = WorkflowSnapshot::with_initial_input(
