@@ -10,11 +10,12 @@ use sayiir_core::workflow::{WorkflowBuilder, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
-use sayiir_runtime::{CheckpointingRunner, ConflictPolicy, RuntimeError};
+use sayiir_runtime::{
+    CheckpointingRunner, ConflictPolicy, PooledWorker, RuntimeError, WorkflowClient,
+};
 use sqlx::PgPool;
 use std::sync::Arc;
-
-// ─── 1. run_single_task ──────────────────────────────────────────────────────
+use std::time::Duration;
 
 #[tokio::test]
 async fn run_single_task() {
@@ -32,8 +33,6 @@ async fn run_single_task() {
     let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
     assert!(snapshot.state.is_completed());
 }
-
-// ─── 2. run_chained_tasks ────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn run_chained_tasks() {
@@ -57,8 +56,6 @@ async fn run_chained_tasks() {
     assert!(snapshot.final_output_bytes().is_some());
 }
 
-// ─── 3. resume_completed_is_noop ─────────────────────────────────────────────
-
 #[tokio::test]
 async fn resume_completed_is_noop() {
     let (_c, backend, _url) = setup().await;
@@ -77,8 +74,6 @@ async fn resume_completed_is_noop() {
     let status = runner.resume(&workflow, "inst-1").await.unwrap();
     assert!(matches!(status, WorkflowStatus::Completed));
 }
-
-// ─── 4. resume_after_simulated_crash ─────────────────────────────────────────
 
 #[tokio::test]
 async fn resume_after_simulated_crash() {
@@ -121,8 +116,6 @@ async fn resume_after_simulated_crash() {
         "Expected Completed after crash-resume, got {status:?}"
     );
 }
-
-// ─── 5. cancel_and_resume ────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn cancel_and_resume() {
@@ -175,8 +168,6 @@ async fn cancel_and_resume() {
     }
 }
 
-// ─── 6. pause_unpause_resume ─────────────────────────────────────────────────
-
 #[tokio::test]
 async fn pause_unpause_resume() {
     let (_c, backend, _url) = setup().await;
@@ -228,8 +219,6 @@ async fn pause_unpause_resume() {
     );
 }
 
-// ─── 7. delay_returns_waiting_then_completes ─────────────────────────────────
-
 #[tokio::test]
 async fn delay_returns_waiting_then_completes() {
     let (_c, backend, _url) = setup().await;
@@ -269,8 +258,6 @@ async fn delay_returns_waiting_then_completes() {
     assert!(snapshot.state.is_completed());
 }
 
-// ─── 8. fork_join ────────────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn fork_join() {
     let (_c, backend, _url) = setup().await;
@@ -298,8 +285,6 @@ async fn fork_join() {
     assert!(snapshot.state.is_completed());
     assert!(snapshot.final_output_bytes().is_some());
 }
-
-// ─── 9. task_failure_persists ────────────────────────────────────────────────
 
 #[tokio::test]
 async fn task_failure_persists() {
@@ -828,8 +813,6 @@ async fn run_terminate_existing_restarts() {
 
 // ─── WorkflowClient tests ────────────────────────────────────────────────────
 
-use sayiir_runtime::WorkflowClient;
-
 // ─── client: submit creates snapshot ─────────────────────────────────────────
 
 #[tokio::test]
@@ -978,4 +961,113 @@ async fn client_submit_then_runner_executes() {
         .decode(snapshot.state.completed_output().unwrap().clone())
         .unwrap();
     assert_eq!(output, 12); // (5+1)*2
+}
+
+// ─── multi-worker: two workers collaborate on workflow instances ──────────────
+
+/// Two PooledWorkers running in parallel against the same Postgres backend,
+/// collaboratively processing multiple workflow instances submitted via
+/// WorkflowClient.
+#[tokio::test]
+async fn two_workers_collaborate_on_workflows() {
+    let (_c, _backend, url) = setup().await;
+
+    // Each worker needs its own backend connection (just like production).
+    let backend_w1 = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+    let backend_w2 = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+    let backend_client = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("step_a", |i: u32| async move { Ok(i + 1) })
+        .then("step_b", |i: u32| async move { Ok(i * 2) })
+        .then("step_c", |i: u32| async move { Ok(i + 10) })
+        .build()
+        .unwrap();
+
+    let wf = Arc::new(workflow);
+    let def_hash = wf.definition_hash().to_string();
+
+    // Submit 6 workflow instances via the client.
+    let client = WorkflowClient::new(backend_client);
+    for i in 0u32..6 {
+        let (status, _) = client
+            .submit(wf.as_ref(), format!("inst-{i}"), i)
+            .await
+            .unwrap();
+        assert!(matches!(status, WorkflowStatus::InProgress));
+    }
+
+    // Spawn two workers with short poll intervals.
+    let registry1 = sayiir_core::registry::TaskRegistry::new();
+    let registry2 = sayiir_core::registry::TaskRegistry::new();
+
+    let workflows1 = vec![(def_hash.clone(), Arc::clone(&wf))];
+    let workflows2 = vec![(def_hash.clone(), Arc::clone(&wf))];
+
+    let worker1 = PooledWorker::new("worker-1", backend_w1, registry1)
+        .with_claim_ttl(Some(Duration::from_secs(30)));
+    let worker2 = PooledWorker::new("worker-2", backend_w2, registry2)
+        .with_claim_ttl(Some(Duration::from_secs(30)));
+
+    let handle1 = worker1.spawn(Duration::from_millis(100), workflows1);
+    let handle2 = worker2.spawn(Duration::from_millis(100), workflows2);
+
+    // Poll until all instances are completed (or timeout).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            panic!("Timed out waiting for all workflow instances to complete");
+        }
+
+        let mut all_done = true;
+        for i in 0u32..6 {
+            let snapshot = client
+                .backend()
+                .load_snapshot(&format!("inst-{i}"))
+                .await
+                .unwrap();
+            if !snapshot.state.is_completed() {
+                all_done = false;
+                break;
+            }
+        }
+        if all_done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Verify outputs: input i → (i+1)*2+10
+    let codec = Arc::new(JsonCodec);
+    for i in 0u32..6 {
+        let snapshot = client
+            .backend()
+            .load_snapshot(&format!("inst-{i}"))
+            .await
+            .unwrap();
+        assert!(
+            snapshot.state.is_completed(),
+            "inst-{i} should be completed"
+        );
+        let output: u32 = codec
+            .decode(snapshot.state.completed_output().unwrap().clone())
+            .unwrap();
+        let expected = (i + 1) * 2 + 10;
+        assert_eq!(
+            output, expected,
+            "inst-{i}: expected {expected}, got {output}"
+        );
+    }
+
+    // Shutdown both workers.
+    handle1.shutdown();
+    handle2.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), handle1.join())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), handle2.join())
+        .await
+        .unwrap()
+        .unwrap();
 }
