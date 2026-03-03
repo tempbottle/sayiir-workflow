@@ -565,6 +565,9 @@ where
                         delay_id: id.clone(),
                         wake_at,
                         next_task_id: next.as_deref().map(|n| n.first_task_id().to_string()),
+                        next_task_priority: next
+                            .as_deref()
+                            .and_then(WorkflowContinuation::first_task_priority),
                         passthrough: current_input.clone(),
                     })))
                 }
@@ -591,6 +594,7 @@ where
                         Ok(Some(payload)) => {
                             snapshot.mark_task_completed(id.clone(), payload);
                             if let Some(next_cont) = next.as_deref() {
+                                snapshot.task_priority = next_cont.first_task_priority();
                                 snapshot.update_position(ExecutionPosition::AtTask {
                                     task_id: next_cont.first_task_id().to_string(),
                                 });
@@ -609,6 +613,9 @@ where
                                 next_task_id: next
                                     .as_deref()
                                     .map(|n| n.first_task_id().to_string()),
+                                next_task_priority: next
+                                    .as_deref()
+                                    .and_then(WorkflowContinuation::first_task_priority),
                             },
                         ))),
                         Err(e) => Err(RuntimeError::from(e)),

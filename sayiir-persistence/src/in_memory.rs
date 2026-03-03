@@ -623,8 +623,9 @@ impl TaskClaimStore for InMemoryBackend {
         // Sort by (worker_bias, effective_priority). Worker bias is primary
         // (avoid re-executing on the same worker that failed), then by effective
         // priority with aging. Lower effective priority = higher urgency.
+        // Clamp to a minimum of 1s to prevent division by zero.
         #[allow(clippy::cast_sign_loss, clippy::cast_precision_loss)]
-        let aging_secs = aging_interval.num_milliseconds() as f64 / 1000.0;
+        let aging_secs = (aging_interval.num_milliseconds() as f64 / 1000.0).max(1.0);
         #[allow(clippy::cast_sign_loss, clippy::cast_precision_loss)]
         let now_ts = Utc::now().timestamp() as f64;
         available.sort_by(|a, b| {
@@ -638,12 +639,7 @@ impl TaskClaimStore for InMemoryBackend {
                 let base = snap.map_or(3.0, |s| f64::from(s.current_task_priority()));
                 let updated = snap.map_or(now_ts, |s| s.updated_at as f64);
                 let wait = now_ts - updated;
-                let aging_bonus = if aging_secs > 0.0 {
-                    wait / aging_secs
-                } else {
-                    0.0
-                };
-                base - aging_bonus
+                base - wait / aging_secs
             };
             let ba = worker_bias(a);
             let bb = worker_bias(b);
@@ -1906,6 +1902,111 @@ mod tests {
             loaded.state.is_completed(),
             "workflow should be completed when delay is last node and expired"
         );
+    }
+
+    // ── Priority ordering & aging ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_available_tasks_returns_higher_priority_first() {
+        let backend = InMemoryBackend::new();
+        let input = bytes::Bytes::from("input");
+
+        // Create three workflows with different priorities:
+        // wf-low (priority 5), wf-normal (priority 3), wf-high (priority 1)
+        for (id, priority) in [("wf-low", 5u8), ("wf-normal", 3), ("wf-high", 1)] {
+            let mut snapshot = WorkflowSnapshot::with_initial_input(
+                id.to_string(),
+                "hash".to_string(),
+                input.clone(),
+            );
+            snapshot.task_priority = Some(priority);
+            snapshot.update_position(ExecutionPosition::AtTask {
+                task_id: "task-a".to_string(),
+            });
+            backend.save_snapshot(&snapshot).await.unwrap();
+        }
+
+        let tasks = backend
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300))
+            .await
+            .unwrap();
+
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].instance_id, "wf-high");
+        assert_eq!(tasks[1].instance_id, "wf-normal");
+        assert_eq!(tasks[2].instance_id, "wf-low");
+    }
+
+    #[tokio::test]
+    async fn test_find_available_tasks_aging_promotes_low_priority() {
+        let backend = InMemoryBackend::new();
+        let input = bytes::Bytes::from("input");
+
+        // Fresh high-priority workflow (priority 1).
+        let mut high = WorkflowSnapshot::with_initial_input(
+            "wf-high".to_string(),
+            "hash".to_string(),
+            input.clone(),
+        );
+        high.task_priority = Some(1);
+        high.update_position(ExecutionPosition::AtTask {
+            task_id: "task-a".to_string(),
+        });
+        // updated_at stays at "now"
+        backend.save_snapshot(&high).await.unwrap();
+
+        // Low-priority workflow (priority 5) that has been waiting a long time.
+        let mut low = WorkflowSnapshot::with_initial_input(
+            "wf-low".to_string(),
+            "hash".to_string(),
+            input.clone(),
+        );
+        low.task_priority = Some(5);
+        low.update_position(ExecutionPosition::AtTask {
+            task_id: "task-a".to_string(),
+        });
+        // Simulate long wait: push updated_at 10 minutes into the past.
+        low.updated_at = (chrono::Utc::now().timestamp() - 600) as u64;
+        backend.save_snapshot(&low).await.unwrap();
+
+        // With a 60s aging interval, the low-priority task's effective priority:
+        //   5 - (600 / 60) = 5 - 10 = -5
+        // The high-priority task's effective priority:
+        //   1 - (~0 / 60) ≈ 1
+        // So the aged low-priority task should come first.
+        let tasks = backend
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(60))
+            .await
+            .unwrap();
+
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(
+            tasks[0].instance_id, "wf-low",
+            "aged low-priority task should be promoted ahead of fresh high-priority task"
+        );
+        assert_eq!(tasks[1].instance_id, "wf-high");
+    }
+
+    #[tokio::test]
+    async fn test_find_available_tasks_zero_aging_interval_no_panic() {
+        let backend = InMemoryBackend::new();
+        let input = bytes::Bytes::from("input");
+
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("wf-1".to_string(), "hash".to_string(), input);
+        snapshot.task_priority = Some(3);
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "task-a".to_string(),
+        });
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Zero aging interval should not panic or divide by zero.
+        let tasks = backend
+            .find_available_tasks("worker-1", 10, chrono::Duration::zero())
+            .await
+            .unwrap();
+
+        assert_eq!(tasks.len(), 1);
     }
 
     // ── Event queue (send_event / consume_event) ────────────────────────

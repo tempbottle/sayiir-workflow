@@ -284,6 +284,25 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Get the execution priority of the first task in this continuation.
+    ///
+    /// Returns `Some(priority)` for `Task` nodes, `None` for non-task nodes
+    /// (Delay, Signal, Branch). Recurses through Fork, Loop, and `ChildWorkflow`.
+    #[must_use]
+    pub fn first_task_priority(&self) -> Option<u8> {
+        match self {
+            WorkflowContinuation::Task { priority, .. } => *priority,
+            WorkflowContinuation::Delay { .. }
+            | WorkflowContinuation::AwaitSignal { .. }
+            | WorkflowContinuation::Branch { .. } => None,
+            WorkflowContinuation::Fork { branches, .. } => {
+                branches.first().and_then(|b| b.first_task_priority())
+            }
+            WorkflowContinuation::Loop { body, .. } => body.first_task_priority(),
+            WorkflowContinuation::ChildWorkflow { child, .. } => child.first_task_priority(),
+        }
+    }
+
     /// Get the terminal task ID of this continuation chain.
     ///
     /// Follows `get_next()` pointers to the end and returns the ID of the

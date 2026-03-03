@@ -1649,6 +1649,7 @@ where
             | WorkflowContinuation::AwaitSignal { id, next, .. } => {
                 if id == completed_task_id {
                     if let Some(next_cont) = next {
+                        snapshot.task_priority = next_cont.first_task_priority();
                         snapshot.update_position(ExecutionPosition::AtTask {
                             task_id: next_cont.first_task_id().to_string(),
                         });

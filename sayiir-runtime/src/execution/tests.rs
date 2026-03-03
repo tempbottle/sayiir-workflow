@@ -572,6 +572,7 @@ async fn test_prepare_run_creates_snapshot() {
         "hash-1".into(),
         Bytes::from("input"),
         "task-1".into(),
+        None, // no task priority
         &backend,
         sayiir_core::workflow::ConflictPolicy::Fail,
         false, // not prechecked — standalone call

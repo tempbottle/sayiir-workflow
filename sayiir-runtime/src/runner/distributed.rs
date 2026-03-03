@@ -164,12 +164,14 @@ where
         // Phase 2: encode input and prepare snapshot.
         let input_bytes = workflow.context().codec.encode(&input)?;
         let first_task_id = workflow.continuation().first_task_id().to_string();
+        let first_task_priority = workflow.continuation().first_task_priority();
 
         let mut snapshot = match prepare_run(
             instance_id,
             definition_hash,
             input_bytes.clone(),
             first_task_id,
+            first_task_priority,
             self.backend.as_ref(),
             conflict_policy,
             true, // prechecked — check_existing_instance already ran
@@ -340,6 +342,9 @@ where
                             delay_id: id.clone(),
                             wake_at,
                             next_task_id: next.as_deref().map(|n| n.first_task_id().to_string()),
+                            next_task_priority: next
+                                .as_deref()
+                                .and_then(WorkflowContinuation::first_task_priority),
                             passthrough: current_input.clone(),
                         })))
                     }
@@ -386,6 +391,9 @@ where
                                     next_task_id: next
                                         .as_deref()
                                         .map(|n| n.first_task_id().to_string()),
+                                    next_task_priority: next
+                                        .as_deref()
+                                        .and_then(WorkflowContinuation::first_task_priority),
                                 },
                             ))),
                             Err(e) => Err(RuntimeError::from(e)),
@@ -796,6 +804,7 @@ where
                                 delay_id: id.clone(),
                                 wake_at,
                                 next_task_id: None,
+                                next_task_priority: None,
                                 passthrough: current_input.clone(),
                             })))
                         }
@@ -817,6 +826,7 @@ where
                                     signal_name: signal_name.clone(),
                                     timeout: wake_at,
                                     next_task_id: None,
+                                    next_task_priority: None,
                                 },
                             )))
                         }

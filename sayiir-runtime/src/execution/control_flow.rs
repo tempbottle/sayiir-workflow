@@ -21,6 +21,8 @@ pub(crate) enum ParkReason {
         delay_id: String,
         wake_at: DateTime<Utc>,
         next_task_id: Option<String>,
+        /// Priority of the next task (pre-set so persistence-layer advancement inherits it).
+        next_task_priority: Option<u8>,
         /// Pass-through value stored as the delay's "result".
         passthrough: Bytes,
     },
@@ -30,6 +32,8 @@ pub(crate) enum ParkReason {
         signal_name: String,
         timeout: Option<DateTime<Utc>>,
         next_task_id: Option<String>,
+        /// Priority of the next task (pre-set so persistence-layer advancement inherits it).
+        next_task_priority: Option<u8>,
     },
 }
 
@@ -85,8 +89,10 @@ pub(crate) async fn save_park_checkpoint<B: SnapshotStore>(
             delay_id,
             wake_at,
             next_task_id,
+            next_task_priority,
             passthrough,
         } => {
+            snapshot.task_priority = next_task_priority;
             let now = Utc::now();
             snapshot.update_position(ExecutionPosition::AtDelay {
                 delay_id: delay_id.clone(),
@@ -105,7 +111,9 @@ pub(crate) async fn save_park_checkpoint<B: SnapshotStore>(
             signal_name,
             timeout,
             next_task_id,
+            next_task_priority,
         } => {
+            snapshot.task_priority = next_task_priority;
             snapshot.update_position(ExecutionPosition::AtSignal {
                 signal_id: signal_id.clone(),
                 signal_name: signal_name.clone(),

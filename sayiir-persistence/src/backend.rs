@@ -256,6 +256,14 @@ pub trait TaskClaimStore: Send + Sync {
     /// `aging_interval` controls starvation prevention: lower-priority tasks
     /// that have been waiting longer than this interval effectively gain one
     /// priority level per interval elapsed. Pass `Duration::MAX` to disable aging.
+    ///
+    /// # Constraints
+    ///
+    /// `aging_interval` **must be positive** (non-zero). Implementations may
+    /// divide by this value; passing zero or a negative duration can cause
+    /// division-by-zero or nonsensical ordering. Implementations should
+    /// defensively clamp to a minimum of 1 second, but callers must not rely
+    /// on this.
     fn find_available_tasks(
         &self,
         worker_id: &str,

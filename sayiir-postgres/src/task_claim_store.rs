@@ -185,7 +185,8 @@ where
 
         // Step 2: Fetch candidate workflows ordered by effective priority with aging.
         // effective_priority = task_priority - (seconds_waiting / aging_interval)
-        let aging_secs = aging_interval.num_milliseconds() as f64 / 1000.0;
+        // Clamp to a minimum of 1s to prevent division by zero in the SQL expression.
+        let aging_secs = (aging_interval.num_milliseconds() as f64 / 1000.0).max(1.0);
         let rows = sqlx::query(
             "SELECT s.instance_id, s.data, s.trace_parent
              FROM sayiir_workflow_snapshots s

@@ -127,12 +127,14 @@ where
         // Phase 2: encode input and create snapshot.
         let input_bytes = workflow.context().codec.encode(&input)?;
         let first_task_id = workflow.continuation().first_task_id().to_string();
+        let first_task_priority = workflow.continuation().first_task_priority();
 
         match prepare_run(
             instance_id,
             definition_hash,
             input_bytes,
             first_task_id,
+            first_task_priority,
             self.backend.as_ref(),
             conflict_policy,
             true, // prechecked — check_existing_instance already ran
