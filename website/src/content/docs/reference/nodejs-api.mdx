@@ -41,6 +41,7 @@ const configured = task("configured-task", (input: string) => {
 - `retry` (RetryPolicy, optional) — Full retry configuration
 - `tags` (string[], optional) — Categorization tags
 - `description` (string, optional) — Human-readable description
+- `priority` (number, optional) — Execution priority (1–5, lower = higher priority, default: 3)
 - `input` (ZodLike, optional) — Zod schema for input validation
 - `output` (ZodLike, optional) — Zod schema for output validation
 
@@ -94,6 +95,7 @@ interface TaskMetadata {
   };
   tags?: string[];
   version?: string;
+  priority?: number;
 }
 ```
 
