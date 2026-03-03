@@ -1,6 +1,6 @@
 ---
 title: What's New in v0.4
-description: User-facing changes in Sayiir v0.4 — WorkflowClient for idempotent submission and centralised lifecycle control, breaking changes to WorkerHandle and CheckpointingRunner.
+description: User-facing changes in Sayiir v0.4 — WorkflowClient for idempotent submission and centralized lifecycle control, breaking changes to WorkerHandle and CheckpointingRunner.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -15,7 +15,7 @@ Sayiir v0.4 includes **breaking changes**. The `WorkerHandle` no longer provides
 
 ### WorkflowClient
 
-A new `WorkflowClient` centralises all workflow lifecycle operations — submit, cancel, pause, unpause, send signal, and status — in a single, standalone class. Unlike `run_durable_workflow()` or `CheckpointingRunner.run()`, the client does **not** execute tasks. It only creates snapshots and stores signals. A `Worker` (or `CheckpointingRunner.resume()`) picks up the work.
+A new `WorkflowClient` centralizes all workflow lifecycle operations — submit, cancel, pause, unpause, send signal, and status — in a single, standalone class. Unlike `run_durable_workflow()` or `CheckpointingRunner.run()`, the client does **not** execute tasks. It only creates snapshots and stores signals. A `Worker` (or `CheckpointingRunner.resume()`) picks up the work.
 
 This is the recommended API for the distributed model where submissions and lifecycle control happen in a different process from execution (e.g. a web server submitting workflows that workers execute).
 
@@ -88,7 +88,7 @@ let status = client.status("order-42").await?;
 
 `WorkflowClient` supports **conflict policies** that control what happens when you submit a workflow with an `instance_id` that already exists. This enables safe retries and at-most-once semantics without application-level deduplication.
 
-| Policy | Behaviour |
+| Policy | Behavior |
 |--------|-----------|
 | `"fail"` (default) | Raises an error if the instance already exists |
 | `"use_existing"` | Returns the existing instance's current status — no new work is created |

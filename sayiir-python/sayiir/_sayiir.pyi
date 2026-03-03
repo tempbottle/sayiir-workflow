@@ -188,25 +188,42 @@ class PyWorkerHandle:
 
     def shutdown(self) -> None: ...
     def join(self) -> None: ...
-    def cancel_workflow(
+    def __repr__(self) -> str: ...
+
+class PyWorkflowClient:
+    """Client for submitting and controlling workflow instances."""
+
+    def __new__(
+        cls,
+        backend: PyInMemoryBackend | PyPostgresBackend,
+        conflict_policy: str | None = None,
+    ) -> PyWorkflowClient: ...
+    def submit(
+        self,
+        workflow: Any,
+        instance_id: str,
+        input: Any,
+    ) -> PyWorkflowStatus: ...
+    def cancel(
         self,
         instance_id: str,
         reason: str | None = None,
         cancelled_by: str | None = None,
     ) -> None: ...
-    def pause_workflow(
+    def pause(
         self,
         instance_id: str,
         reason: str | None = None,
         paused_by: str | None = None,
     ) -> None: ...
-    def unpause_workflow(self, instance_id: str) -> None: ...
+    def unpause(self, instance_id: str) -> None: ...
     def send_signal(
         self,
         instance_id: str,
         signal_name: str,
         payload: Any,
     ) -> None: ...
+    def status(self, instance_id: str) -> PyWorkflowStatus: ...
     def __repr__(self) -> str: ...
 
 class PyTaskExecutionContext:
