@@ -4,9 +4,9 @@ import functools
 import json as _json
 from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
-from ._sayiir import PyFlowBuilder, PyNodeInfo, PyTaskMetadata
+from ._sayiir import PyFlowBuilder, NodeInfo, PyTaskMetadata
 
 if TYPE_CHECKING:
     from ._sayiir import PyWorkflow
@@ -91,8 +91,7 @@ def _register_task(
     return task_id, metadata
 
 
-NodeInfo: TypeAlias = PyNodeInfo
-"""Metadata about a single node in the workflow DAG.
+NodeInfo.__doc__ = """Metadata about a single node in the workflow DAG.
 
 Attributes:
     id: Unique node identifier.
@@ -140,8 +139,7 @@ class Workflow:
     def iter_nodes(self) -> list[NodeInfo]:
         """Return all nodes in topological (execution) order.
 
-        Each :class:`NodeInfo` carries the node's ID, kind, predecessor,
-        and any configured timeout / retry / priority metadata.
+        Each :class:`NodeInfo` carries the node's ID, kind, predecessor ..
         Useful for introspection, UI visualisation, and documentation.
         """
         return self._inner.iter_nodes()

@@ -89,6 +89,15 @@ class WorkflowClient:
         """Send an external signal to a workflow instance."""
         self._inner.send_signal(instance_id, signal_name, payload)
 
+    def get_task_result(self, instance_id: str, task_id: str) -> Any | None:
+        """Get a single task result from a workflow instance.
+
+        Returns the deserialized task output, or ``None`` if the task was
+        never executed.  For completed/failed workflows the result is
+        recovered from the backend's history or cache.
+        """
+        return self._inner.get_task_result(instance_id, task_id)
+
     def status(self, instance_id: str) -> Any:
         """Get the current status of a workflow instance.
 

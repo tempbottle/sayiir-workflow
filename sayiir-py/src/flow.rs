@@ -44,7 +44,6 @@ impl PyNodeInfo {
     }
 }
 
-
 /// A Python-exposed workflow.
 #[pyclass]
 pub struct PyWorkflow {
@@ -73,8 +72,7 @@ impl PyWorkflow {
 
     /// Return all nodes in topological (execution) order.
     ///
-    /// Each :class:`NodeInfo` carries the node's ID, kind, predecessor,
-    /// and any configured timeout / retry / version / priority metadata.
+    /// Each :class:`NodeInfo` carries the node's ID, kind, predecessor ..
     fn iter_nodes(&self) -> Vec<PyNodeInfo> {
         self.continuation
             .iter_nodes()
