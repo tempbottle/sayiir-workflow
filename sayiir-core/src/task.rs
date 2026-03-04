@@ -207,6 +207,19 @@ impl<C: Codec> BranchOutputs<C> {
 /// extract the task ID, output type, and metadata from the type itself —
 /// eliminating stringly-typed wiring.
 ///
+/// Lightweight trait that only provides the task's unique string identifier.
+///
+/// Unlike [`RegisterableTask`], this does **not** require [`CoreTask`] and is
+/// therefore usable in contexts that only need to *refer* to a task by ID
+/// (e.g. [`WorkflowClient::get_task_result_of`](https://docs.rs/sayiir-runtime))
+/// without pulling in the task implementation.
+///
+/// The `#[task]` proc-macro implements this automatically.
+pub trait TaskIdentifier {
+    /// The unique string identifier for this task type.
+    fn task_id() -> &'static str;
+}
+
 /// # Implementing
 ///
 /// The `#[task]` proc-macro generates this impl automatically.
@@ -228,6 +241,18 @@ where
     fn task_id() -> &'static str;
     /// Static metadata (timeout, retries, display name, …).
     fn metadata() -> TaskMetadata;
+}
+
+impl<T> TaskIdentifier for T
+where
+    T: RegisterableTask,
+    T::Input: Send + 'static,
+    T::Output: Send + 'static,
+    T::Future: Send + 'static,
+{
+    fn task_id() -> &'static str {
+        <T as RegisterableTask>::task_id()
+    }
 }
 
 /// A core task is a task that can be run by the workflow runtime.

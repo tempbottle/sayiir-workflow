@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use sayiir_core::snapshot::{SignalKind, SignalRequest};
 use sayiir_core::workflow::ConflictPolicy;
-use sayiir_persistence::{SignalStore, SnapshotStore};
+use sayiir_persistence::{SignalStore, SnapshotStore, TaskResultStore};
 use sayiir_runtime::{PrepareRunOutcome, check_existing_instance, prepare_run};
 
 use sayiir_postgres::PostgresBackend;
@@ -233,6 +233,28 @@ impl PyWorkflowClient {
             py_status.output = Some(decode_to_pyobject(py, &bytes)?);
         }
         Ok(py_status)
+    }
+
+    /// Get a single task result from a workflow instance.
+    ///
+    /// Returns the deserialized task output, or `None` if the task was never
+    /// executed. For completed/failed workflows, the result is recovered from
+    /// the backend's history or cache.
+    fn get_task_result(
+        &self,
+        py: Python<'_>,
+        instance_id: String,
+        task_id: String,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let bytes = with_backend!(self, |backend| {
+            self.runtime
+                .block_on(backend.load_task_result(&instance_id, &task_id))
+                .map_err(backend_err_to_py)?
+        });
+        match bytes {
+            Some(b) => Ok(Some(decode_to_pyobject(py, &b)?)),
+            None => Ok(None),
+        }
     }
 
     fn __repr__(&self) -> String {

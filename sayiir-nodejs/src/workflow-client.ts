@@ -78,6 +78,17 @@ export class WorkflowClient {
     this._native.sendSignal(instanceId, signalName, JSON.stringify(payload));
   }
 
+  /**
+   * Get a single task result from a workflow instance.
+   *
+   * Returns the JSON-encoded task output, or `null` if the task was never
+   * executed. For completed or failed workflows, the result is recovered
+   * from the backend's history or cache.
+   */
+  getTaskResult(instanceId: string, taskId: string): string | null {
+    return this._native.getTaskResult(instanceId, taskId);
+  }
+
   /** Get the current status of a workflow instance. */
   status<TOut = unknown>(instanceId: string): WorkflowStatus<TOut> {
     const raw = this._native.status(instanceId);

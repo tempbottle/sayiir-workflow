@@ -34,6 +34,7 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(task::get_task_context, m)?)?;
     m.add_class::<flow::PyFlowBuilder>()?;
     m.add_class::<flow::PyWorkflow>()?;
+    m.add_class::<flow::PyNodeInfo>()?;
     m.add_class::<engine::PyWorkflowEngine>()?;
     m.add_class::<engine::PyWorkflowStatus>()?;
     m.add_class::<backend::PyInMemoryBackend>()?;

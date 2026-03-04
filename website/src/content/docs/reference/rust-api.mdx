@@ -738,6 +738,12 @@ client.pause("order-42", Some("Maintenance".into()), None).await?;
 client.unpause("order-42").await?;
 client.send_event("order-42", "signal_name", payload).await?;
 let status = client.status("order-42").await?;
+
+// Retrieve a single task result (requires TaskResultStore)
+let result = client.get_task_result("order-42", "validate_order").await?;
+
+// Type-safe variant using #[task]-generated struct
+let result = client.get_task_result_of::<ValidateOrderTask>("order-42").await?;
 ```
 
 **Methods:**
@@ -751,6 +757,8 @@ let status = client.status("order-42").await?;
 - `unpause(instance_id)` — Unpause a paused workflow
 - `send_event(instance_id, signal_name, payload)` — Send an external event
 - `status(instance_id)` → `WorkflowStatus` — Query current status
+- `get_task_result(instance_id, task_id)` → `Option<Bytes>` — Get a single task result (requires `B: TaskResultStore`)
+- `get_task_result_of::<T>(instance_id)` → `Option<Bytes>` — Type-safe variant that derives task ID from a `TaskIdentifier` impl (e.g. `#[task]`-generated struct)
 
 ### WorkflowRunExt (run_once)
 
@@ -815,6 +823,18 @@ pub trait CoreTask: Send + Sync + 'static {
 ```
 
 Usually implemented via the `#[task]` macro, but can be implemented manually if needed.
+
+### TaskIdentifier
+
+Lightweight trait that only provides the task's unique string identifier. Unlike `RegisterableTask`, it does **not** require `CoreTask` — making it usable in client-only contexts that refer to tasks by ID without pulling in the task implementation.
+
+```rust
+pub trait TaskIdentifier {
+    fn task_id() -> &'static str;
+}
+```
+
+Automatically implemented for all `RegisterableTask` types (including `#[task]`-generated structs). Used by `WorkflowClient::get_task_result_of::<T>()` for type-safe task result retrieval.
 
 ### BranchKey
 
