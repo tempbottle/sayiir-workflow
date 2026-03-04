@@ -222,8 +222,11 @@ impl<'a> Iterator for NodeIter<'a> {
                 if let Some(d) = default {
                     self.stack.push((d, Some(id)));
                 }
-                for b in branches.values() {
-                    self.stack.push((b, Some(id)));
+                // stable sort for deterministic iteration
+                let mut keys: Vec<&String> = branches.keys().collect();
+                keys.sort();
+                for k in keys.into_iter().rev() {
+                    self.stack.push((&branches[k], Some(id)));
                 }
             }
             WorkflowContinuation::Loop { id, body, next, .. } => {
