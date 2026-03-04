@@ -1743,6 +1743,7 @@ where
             claim_ttl: Some(Duration::from_secs(5 * 60)),
             batch_size: NonZeroUsize::MIN,
             aging_interval: Duration::from_secs(300),
+            tags: vec![],
         }
     }
 
@@ -1951,6 +1952,7 @@ pub struct PooledWorkerBuilder<B> {
     claim_ttl: Option<Duration>,
     batch_size: NonZeroUsize,
     aging_interval: Duration,
+    tags: Vec<String>,
 }
 
 impl<B> PooledWorkerBuilder<B>
@@ -1992,6 +1994,17 @@ where
         self
     }
 
+    /// Set affinity tags for this worker.
+    ///
+    /// When tags are set, the worker only picks up tasks whose tags are a
+    /// subset of the worker's tags (or tasks with no tags). When no tags are
+    /// set (the default), the worker accepts all tasks.
+    #[must_use]
+    pub fn tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
     /// Build the [`PooledWorker`].
     ///
     /// If no `worker_id` was set, generates one from `{hostname}-{pid}`.
@@ -2005,7 +2018,7 @@ where
             claim_ttl: self.claim_ttl,
             batch_size: self.batch_size,
             aging_interval: self.aging_interval,
-            tags: vec![],
+            tags: self.tags,
         }
     }
 }

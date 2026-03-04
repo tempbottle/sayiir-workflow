@@ -90,9 +90,7 @@ pub(crate) async fn save_park_checkpoint<B: SnapshotStore>(
             passthrough,
         } => {
             let next_task_id = next_task.as_ref().map(|h| h.id.clone());
-            if let Some(hint) = &next_task {
-                snapshot.set_task_hint(hint);
-            }
+            snapshot.set_task_hint(next_task.as_ref().unwrap_or(&TaskHint::default()));
             let now = Utc::now();
             snapshot.update_position(ExecutionPosition::AtDelay {
                 delay_id: delay_id.clone(),
@@ -113,9 +111,7 @@ pub(crate) async fn save_park_checkpoint<B: SnapshotStore>(
             next_task,
         } => {
             let next_task_id = next_task.as_ref().map(|h| h.id.clone());
-            if let Some(hint) = &next_task {
-                snapshot.set_task_hint(hint);
-            }
+            snapshot.set_task_hint(next_task.as_ref().unwrap_or(&TaskHint::default()));
             snapshot.update_position(ExecutionPosition::AtSignal {
                 signal_id: signal_id.clone(),
                 signal_name: signal_name.clone(),

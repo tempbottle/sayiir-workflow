@@ -191,11 +191,12 @@ where
         let worker_tags_vec: Vec<&str> = worker_tags.iter().map(String::as_str).collect();
 
         // When worker has tags, add filter: task_tags must be a subset of
-        // worker_tags (or empty). The `<@` operator checks array containment.
+        // worker_tags. The `<@` operator checks array containment; an empty
+        // array is a subset of every array, so untagged tasks always pass.
         let tag_filter = if worker_tags.is_empty() {
             ""
         } else {
-            "AND (s.task_tags <@ $3 OR s.task_tags = '{}')"
+            "AND s.task_tags <@ $3"
         };
 
         let query = format!(
