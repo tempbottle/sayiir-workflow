@@ -597,6 +597,27 @@ impl WorkflowSnapshot {
         self.get_task_result(task_id).map(|r| r.output.clone())
     }
 
+    /// Get all completed task results, if the state carries them.
+    ///
+    /// Returns `Some` for `InProgress`, `Cancelled`, and `Paused` states (which
+    /// retain `completed_tasks`), and `None` for `Completed` and `Failed` states
+    /// (where task results have been discarded).
+    #[must_use]
+    pub fn get_all_task_results(&self) -> Option<&HashMap<String, TaskResult>> {
+        match &self.state {
+            WorkflowSnapshotState::InProgress {
+                completed_tasks, ..
+            }
+            | WorkflowSnapshotState::Cancelled {
+                completed_tasks, ..
+            }
+            | WorkflowSnapshotState::Paused {
+                completed_tasks, ..
+            } => Some(completed_tasks),
+            WorkflowSnapshotState::Completed { .. } | WorkflowSnapshotState::Failed { .. } => None,
+        }
+    }
+
     /// Mark a task as completed and store its result.
     pub fn mark_task_completed(&mut self, task_id: String, output: Bytes) {
         if let WorkflowSnapshotState::InProgress {
@@ -1131,6 +1152,60 @@ mod tests {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         snapshot.mark_failed("err".into());
         assert!(snapshot.get_task_result("task-1").is_none());
+    }
+
+    #[test]
+    fn test_get_all_task_results_in_progress() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_task_completed("task-2".into(), Bytes::from("out2"));
+
+        let results = snapshot.get_all_task_results();
+        assert!(results.is_some());
+        let results = results.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results["task-1"].output, Bytes::from("out1"));
+        assert_eq!(results["task-2"].output, Bytes::from("out2"));
+    }
+
+    #[test]
+    fn test_get_all_task_results_cancelled() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_cancelled(Some("reason".into()), None, Some("task-2".into()));
+
+        let results = snapshot.get_all_task_results();
+        assert!(results.is_some());
+        assert_eq!(results.unwrap().len(), 1);
+        assert_eq!(results.unwrap()["task-1"].output, Bytes::from("out1"));
+    }
+
+    #[test]
+    fn test_get_all_task_results_paused() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        let request = PauseRequest::new(Some("maintenance".into()), None);
+        snapshot.mark_paused(&request);
+
+        let results = snapshot.get_all_task_results();
+        assert!(results.is_some());
+        assert_eq!(results.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_get_all_task_results_completed() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_completed(Bytes::from("final"));
+        assert!(snapshot.get_all_task_results().is_none());
+    }
+
+    #[test]
+    fn test_get_all_task_results_failed() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_failed("error".into());
+        assert!(snapshot.get_all_task_results().is_none());
     }
 
     #[test]

@@ -3,10 +3,10 @@
 //! This is a simple implementation that stores snapshots in a HashMap.
 //! Useful for testing and as a reference implementation.
 
-use crate::backend::{BackendError, SignalStore, SnapshotStore, TaskClaimStore};
+use crate::backend::{BackendError, SignalStore, SnapshotStore, TaskClaimStore, TaskResultStore};
 use chrono::{Duration, Utc};
 use sayiir_core::snapshot::{
-    ExecutionPosition, PauseRequest, SignalKind, SignalRequest, WorkflowSnapshot,
+    ExecutionPosition, PauseRequest, SignalKind, SignalRequest, TaskResult, WorkflowSnapshot,
     WorkflowSnapshotState,
 };
 use sayiir_core::task_claim::{AvailableTask, TaskClaim};
@@ -26,6 +26,9 @@ pub struct InMemoryBackend {
     /// Buffered external events per `(instance_id, signal_name)`, FIFO order.
     #[allow(clippy::type_complexity)]
     events: Arc<RwLock<HashMap<(String, String), VecDeque<bytes::Bytes>>>>,
+    /// Cached task results for workflows that have transitioned to terminal states
+    /// (Completed/Failed), where `completed_tasks` is no longer in the snapshot.
+    task_results_cache: Arc<RwLock<HashMap<String, HashMap<String, TaskResult>>>>,
 }
 
 impl InMemoryBackend {
@@ -51,6 +54,18 @@ impl InMemoryBackend {
 impl SnapshotStore for InMemoryBackend {
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
+
+        // When transitioning to Completed/Failed, cache the previous snapshot's
+        // completed_tasks so they can still be retrieved via TaskResultStore.
+        if (snapshot.state.is_completed() || snapshot.state.is_failed())
+            && let Some(prev) = snapshots.get(&snapshot.instance_id)
+            && let Some(tasks) = prev.get_all_task_results()
+            && !tasks.is_empty()
+        {
+            let mut cache = self.task_results_cache.write().map_err(Self::lock_error)?;
+            cache.insert(snapshot.instance_id.clone(), tasks.clone());
+        }
+
         snapshots.insert(snapshot.instance_id.clone(), snapshot.clone());
         Ok(())
     }
@@ -83,13 +98,49 @@ impl SnapshotStore for InMemoryBackend {
         let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
         snapshots
             .remove(instance_id)
-            .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))
-            .map(|_| ())
+            .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+        // Clean up the task results cache for this instance.
+        if let Ok(mut cache) = self.task_results_cache.write() {
+            cache.remove(instance_id);
+        }
+        Ok(())
     }
 
     async fn list_snapshots(&self) -> Result<Vec<String>, BackendError> {
         let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
         Ok(snapshots.keys().cloned().collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TaskResultStore
+// ---------------------------------------------------------------------------
+
+impl TaskResultStore for InMemoryBackend {
+    async fn load_task_result(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+    ) -> Result<Option<bytes::Bytes>, BackendError> {
+        let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
+        let snapshot = snapshots
+            .get(instance_id)
+            .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+
+        // Try the current snapshot first (works for InProgress/Cancelled/Paused).
+        if let Some(result) = snapshot.get_task_result_bytes(task_id) {
+            return Ok(Some(result));
+        }
+
+        // For terminal states (Completed/Failed), fall back to the cache.
+        if snapshot.state.is_completed() || snapshot.state.is_failed() {
+            let cache = self.task_results_cache.read().map_err(Self::lock_error)?;
+            if let Some(tasks) = cache.get(instance_id) {
+                return Ok(tasks.get(task_id).map(|r| r.output.clone()));
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -2063,5 +2114,89 @@ mod tests {
 
         let b = backend.consume_event("wf-1", "sig_b").await.unwrap();
         assert_eq!(b.as_deref(), Some(b"b_payload".as_slice()));
+    }
+
+    // ─── TaskResultStore ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_load_task_result_in_progress() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash".into());
+        snapshot.mark_task_completed("task-1".into(), bytes::Bytes::from("out1"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.load_task_result("wf-1", "task-1").await.unwrap();
+        assert_eq!(result, Some(bytes::Bytes::from("out1")));
+    }
+
+    #[tokio::test]
+    async fn test_load_task_result_not_found() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("wf-1".into(), "hash".into());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend
+            .load_task_result("wf-1", "no-such-task")
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_load_task_result_nonexistent_instance() {
+        let backend = InMemoryBackend::new();
+        let result = backend.load_task_result("no-such-wf", "task-1").await;
+        assert!(matches!(result, Err(BackendError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_load_task_result_after_completion() {
+        let backend = InMemoryBackend::new();
+
+        // Create workflow with a completed task
+        let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash".into());
+        snapshot.mark_task_completed("task-1".into(), bytes::Bytes::from("out1"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Complete the workflow — save_snapshot caches the task results
+        snapshot.mark_completed(bytes::Bytes::from("final"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Task result should still be accessible from cache
+        let result = backend.load_task_result("wf-1", "task-1").await.unwrap();
+        assert_eq!(result, Some(bytes::Bytes::from("out1")));
+    }
+
+    #[tokio::test]
+    async fn test_load_task_result_after_failure() {
+        let backend = InMemoryBackend::new();
+
+        let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash".into());
+        snapshot.mark_task_completed("task-1".into(), bytes::Bytes::from("out1"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        snapshot.mark_failed("boom".into());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.load_task_result("wf-1", "task-1").await.unwrap();
+        assert_eq!(result, Some(bytes::Bytes::from("out1")));
+    }
+
+    #[tokio::test]
+    async fn test_delete_cleans_task_results_cache() {
+        let backend = InMemoryBackend::new();
+
+        let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash".into());
+        snapshot.mark_task_completed("task-1".into(), bytes::Bytes::from("out1"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        snapshot.mark_completed(bytes::Bytes::from("final"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Delete should clean both snapshot and cache
+        backend.delete_snapshot("wf-1").await.unwrap();
+
+        let result = backend.load_task_result("wf-1", "task-1").await;
+        assert!(matches!(result, Err(BackendError::NotFound(_))));
     }
 }

@@ -381,5 +381,6 @@ declare module "sayiir" {
     unpause(instanceId: string): void;
     sendSignal(instanceId: string, signalName: string, payload: unknown): void;
     status<TOut = unknown>(instanceId: string): WorkflowStatus<TOut>;
+    getTaskResult(instanceId: string, taskId: string): string | null;
   }
 }

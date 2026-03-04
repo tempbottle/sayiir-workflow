@@ -273,6 +273,32 @@ pub trait TaskClaimStore: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// TaskResultStore — opt-in, like TaskClaimStore
+// ---------------------------------------------------------------------------
+
+/// Read-only access to individual task results from a workflow instance.
+///
+/// This trait allows retrieving completed task outputs (intermediate step
+/// results) without loading the full snapshot. For in-progress, cancelled, or
+/// paused workflows the results come straight from the current snapshot. For
+/// completed or failed workflows the results are recovered from history (e.g.
+/// the Postgres snapshot history table) or from an in-memory cache.
+///
+/// Implementations must also implement [`SnapshotStore`] because the current
+/// snapshot is the primary source of truth for non-terminal states.
+pub trait TaskResultStore: SnapshotStore {
+    /// Load a single task result by task ID.
+    ///
+    /// Returns `Ok(Some(bytes))` if the task completed, `Ok(None)` if the task
+    /// was never executed or is not found, and `Err` on I/O failure.
+    fn load_task_result(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+    ) -> impl Future<Output = Result<Option<bytes::Bytes>, BackendError>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // PersistentBackend — supertrait + blanket impl
 // ---------------------------------------------------------------------------
 
