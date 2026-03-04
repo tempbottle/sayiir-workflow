@@ -411,6 +411,7 @@ impl TaskClaimStore for InMemoryBackend {
         worker_id: &str,
         limit: usize,
         aging_interval: chrono::Duration,
+        worker_tags: &[String],
     ) -> Result<Vec<AvailableTask>, BackendError> {
         // Clean up expired claims first
         {
@@ -595,6 +596,17 @@ impl TaskClaimStore for InMemoryBackend {
                         && Utc::now() < rs.next_retry_at
                     {
                         continue;
+                    }
+
+                    // Tag-based filtering: if worker has tags, only accept tasks
+                    // whose tags are a subset of the worker's tags (or untagged).
+                    if !worker_tags.is_empty() {
+                        let task_tags = snapshot.current_task_tags();
+                        if !task_tags.is_empty()
+                            && !task_tags.iter().all(|t| worker_tags.contains(t))
+                        {
+                            continue;
+                        }
                     }
 
                     let input = if completed_tasks.is_empty() {
@@ -1346,7 +1358,7 @@ mod tests {
             .unwrap();
 
         let tasks = backend
-            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300))
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
             .await
             .unwrap();
 
@@ -1706,7 +1718,7 @@ mod tests {
             .unwrap();
 
         let tasks = backend
-            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300))
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
             .await
             .unwrap();
 
@@ -1813,7 +1825,7 @@ mod tests {
         backend.save_snapshot(&snapshot).await.unwrap();
 
         let tasks = backend
-            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300))
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
             .await
             .unwrap();
         assert!(
@@ -1843,7 +1855,7 @@ mod tests {
         backend.save_snapshot(&snapshot).await.unwrap();
 
         let tasks = backend
-            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300))
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
             .await
             .unwrap();
 
@@ -1886,7 +1898,7 @@ mod tests {
         backend.save_snapshot(&snapshot).await.unwrap();
 
         let tasks = backend
-            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300))
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
             .await
             .unwrap();
 
@@ -1927,7 +1939,7 @@ mod tests {
         }
 
         let tasks = backend
-            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300))
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
             .await
             .unwrap();
 
@@ -1975,7 +1987,7 @@ mod tests {
         //   1 - (~0 / 60) ≈ 1
         // So the aged low-priority task should come first.
         let tasks = backend
-            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(60))
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(60), &[])
             .await
             .unwrap();
 
@@ -2002,11 +2014,107 @@ mod tests {
 
         // Zero aging interval should not panic or divide by zero.
         let tasks = backend
-            .find_available_tasks("worker-1", 10, chrono::Duration::zero())
+            .find_available_tasks("worker-1", 10, chrono::Duration::zero(), &[])
             .await
             .unwrap();
 
         assert_eq!(tasks.len(), 1);
+    }
+
+    // ── Worker tag filtering ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_available_tasks_filters_by_worker_tags() {
+        let backend = InMemoryBackend::new();
+
+        // Task tagged ["gpu"]
+        let mut snap1 = WorkflowSnapshot::with_initial_input(
+            "wf-gpu".into(),
+            "h1".into(),
+            bytes::Bytes::from("1"),
+        );
+        snap1.update_position(ExecutionPosition::AtTask {
+            task_id: "t1".into(),
+        });
+        snap1.task_tags = vec!["gpu".into()];
+        backend.save_snapshot(&snap1).await.unwrap();
+
+        // Task tagged ["cpu"]
+        let mut snap2 = WorkflowSnapshot::with_initial_input(
+            "wf-cpu".into(),
+            "h1".into(),
+            bytes::Bytes::from("2"),
+        );
+        snap2.update_position(ExecutionPosition::AtTask {
+            task_id: "t2".into(),
+        });
+        snap2.task_tags = vec!["cpu".into()];
+        backend.save_snapshot(&snap2).await.unwrap();
+
+        // Worker with ["gpu"] should only see the gpu task
+        let tasks = backend
+            .find_available_tasks("w1", 10, chrono::Duration::seconds(300), &["gpu".into()])
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].instance_id, "wf-gpu");
+    }
+
+    #[tokio::test]
+    async fn test_find_available_tasks_untagged_worker_accepts_all() {
+        let backend = InMemoryBackend::new();
+
+        let mut snap1 = WorkflowSnapshot::with_initial_input(
+            "wf-tagged".into(),
+            "h1".into(),
+            bytes::Bytes::from("1"),
+        );
+        snap1.update_position(ExecutionPosition::AtTask {
+            task_id: "t1".into(),
+        });
+        snap1.task_tags = vec!["gpu".into()];
+        backend.save_snapshot(&snap1).await.unwrap();
+
+        let mut snap2 = WorkflowSnapshot::with_initial_input(
+            "wf-plain".into(),
+            "h1".into(),
+            bytes::Bytes::from("2"),
+        );
+        snap2.update_position(ExecutionPosition::AtTask {
+            task_id: "t2".into(),
+        });
+        backend.save_snapshot(&snap2).await.unwrap();
+
+        // Untagged worker should see both
+        let tasks = backend
+            .find_available_tasks("w1", 10, chrono::Duration::seconds(300), &[])
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_find_available_tasks_untagged_tasks_accepted_by_tagged_worker() {
+        let backend = InMemoryBackend::new();
+
+        // Untagged task
+        let mut snap = WorkflowSnapshot::with_initial_input(
+            "wf-plain".into(),
+            "h1".into(),
+            bytes::Bytes::from("1"),
+        );
+        snap.update_position(ExecutionPosition::AtTask {
+            task_id: "t1".into(),
+        });
+        backend.save_snapshot(&snap).await.unwrap();
+
+        // Tagged worker should still pick up untagged tasks
+        let tasks = backend
+            .find_available_tasks("w1", 10, chrono::Duration::seconds(300), &["gpu".into()])
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].instance_id, "wf-plain");
     }
 
     // ── Event queue (send_event / consume_event) ────────────────────────

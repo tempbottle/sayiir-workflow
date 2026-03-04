@@ -43,6 +43,8 @@ where
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next,
     }
 }
@@ -56,6 +58,8 @@ fn stub_node(id: &str, next: Option<Box<WorkflowContinuation>>) -> WorkflowConti
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next,
     }
 }
@@ -79,6 +83,8 @@ where
         retry_policy: Some(retry_policy),
         version: None,
         priority: None,
+
+        tags: vec![],
         next,
     }
 }
@@ -103,6 +109,8 @@ where
         retry_policy: Some(retry_policy),
         version: None,
         priority: None,
+
+        tags: vec![],
         next,
     }
 }
@@ -120,6 +128,8 @@ fn stub_node_with_retry(
         retry_policy: Some(retry_policy),
         version: None,
         priority: None,
+
+        tags: vec![],
         next,
     }
 }
@@ -138,6 +148,8 @@ fn stub_node_with_timeout_and_retry(
         retry_policy: Some(retry_policy),
         version: None,
         priority: None,
+
+        tags: vec![],
         next,
     }
 }
@@ -370,6 +382,8 @@ async fn test_async_task_no_implementation() {
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next: None,
     };
 
@@ -413,6 +427,8 @@ async fn test_async_task_completes_within_timeout() {
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next: None,
     };
 
@@ -440,6 +456,7 @@ async fn test_async_task_exceeds_timeout() {
         retry_policy: None,
         version: None,
         priority: None,
+        tags: vec![],
         next: None,
     };
 
@@ -467,6 +484,7 @@ async fn test_async_task_no_timeout_unlimited() {
         retry_policy: None,
         version: None,
         priority: None,
+        tags: vec![],
         next: None,
     };
 
@@ -486,6 +504,8 @@ async fn test_checkpointing_task_timeout() {
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next: None,
     };
 
@@ -528,6 +548,8 @@ async fn test_checkpointing_skipped_tasks_bypass_timeout() {
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next: None,
     };
 
@@ -571,8 +593,10 @@ async fn test_prepare_run_creates_snapshot() {
         "inst-1".into(),
         "hash-1".into(),
         Bytes::from("input"),
-        "task-1".into(),
-        None, // no task priority
+        sayiir_core::snapshot::TaskHint {
+            id: "task-1".into(),
+            ..Default::default()
+        },
         &backend,
         sayiir_core::workflow::ConflictPolicy::Fail,
         false, // not prechecked — standalone call
@@ -2165,6 +2189,7 @@ async fn test_async_timeout_mid_chain_fails() {
         retry_policy: None,
         version: None,
         priority: None,
+        tags: vec![],
         next: None,
     };
     let fast_task = task_node(
@@ -2194,6 +2219,8 @@ async fn test_async_timeout_passes_in_chain() {
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next: None,
     };
     let first = WorkflowContinuation::Task {
@@ -2207,6 +2234,8 @@ async fn test_async_timeout_passes_in_chain() {
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next: Some(Box::new(second)),
     };
 
@@ -2235,6 +2264,8 @@ async fn test_checkpointing_timeout_mid_chain() {
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next: None,
     };
     let fast_task = WorkflowContinuation::Task {
@@ -2244,6 +2275,8 @@ async fn test_checkpointing_timeout_mid_chain() {
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next: Some(Box::new(slow_task)),
     };
 
@@ -2781,6 +2814,8 @@ fn loop_body_task(
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next: None,
     }
 }
@@ -3126,6 +3161,8 @@ async fn test_async_loop_inside_fork_branch() {
         retry_policy: None,
         version: None,
         priority: None,
+
+        tags: vec![],
         next: None,
     };
 

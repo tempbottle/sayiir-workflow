@@ -38,6 +38,11 @@ where
         let wake_at = snapshot.delay_wake_at();
 
         let task_priority = i16::from(snapshot.current_task_priority());
+        let task_tags: Vec<&str> = snapshot
+            .current_task_tags()
+            .iter()
+            .map(String::as_str)
+            .collect();
 
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
@@ -46,8 +51,8 @@ where
             "INSERT INTO sayiir_workflow_snapshots
                 (instance_id, status, definition_hash, current_task_id,
                  completed_task_count, data, error, position_kind, delay_wake_at,
-                 trace_parent, task_priority, completed_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $9, $10, $11, $12,
+                 trace_parent, task_priority, task_tags, completed_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $9, $10, $11, $12, $13,
                      CASE WHEN $8 THEN now() ELSE NULL END, now())
              ON CONFLICT (instance_id) DO UPDATE SET
                 status = $2,
@@ -60,6 +65,7 @@ where
                 delay_wake_at = $10,
                 trace_parent = $11,
                 task_priority = $12,
+                task_tags = $13,
                 completed_at = CASE WHEN $8 THEN now() ELSE sayiir_workflow_snapshots.completed_at END,
                 updated_at = now()",
         )
@@ -75,6 +81,7 @@ where
         .bind(wake_at) // $10
         .bind(snapshot.trace_parent.as_deref()) // $11
         .bind(task_priority) // $12
+        .bind(&task_tags) // $13
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;

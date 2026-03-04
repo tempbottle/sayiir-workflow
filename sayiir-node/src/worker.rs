@@ -30,6 +30,7 @@ pub struct NapiWorker {
     postgres_url: Option<String>,
     poll_interval: Duration,
     claim_ttl: Duration,
+    tags: Vec<String>,
 }
 
 #[napi]
@@ -41,6 +42,7 @@ impl NapiWorker {
         backend: &NapiInMemoryBackend,
         poll_interval_ms: Option<f64>,
         claim_ttl_ms: Option<f64>,
+        tags: Option<Vec<String>>,
     ) -> Self {
         Self {
             worker_id,
@@ -58,6 +60,7 @@ impl NapiWorker {
                     claim_ttl_ms.unwrap_or(300_000.0) as u64
                 },
             ),
+            tags: tags.unwrap_or_default(),
         }
     }
 
@@ -68,6 +71,7 @@ impl NapiWorker {
         backend: &NapiPostgresBackend,
         poll_interval_ms: Option<f64>,
         claim_ttl_ms: Option<f64>,
+        tags: Option<Vec<String>>,
     ) -> Self {
         Self {
             worker_id,
@@ -85,6 +89,7 @@ impl NapiWorker {
                     claim_ttl_ms.unwrap_or(300_000.0) as u64
                 },
             ),
+            tags: tags.unwrap_or_default(),
         }
     }
 
@@ -157,6 +162,7 @@ impl NapiWorker {
         let worker_id = self.worker_id.clone();
         let claim_ttl = self.claim_ttl;
         let poll_interval = self.poll_interval;
+        let tags = self.tags.clone();
 
         let (handle_tx, handle_rx) = std::sync::mpsc::sync_channel::<
             std::result::Result<WorkerHandle<BackendKind>, String>,
@@ -197,7 +203,8 @@ impl NapiWorker {
                 };
 
                 let worker = PooledWorker::new(&worker_id, backend_kind, TaskRegistry::default())
-                    .with_claim_ttl(Some(claim_ttl));
+                    .with_claim_ttl(Some(claim_ttl))
+                    .with_tags(tags);
 
                 let _guard = runtime.enter();
                 let handle =

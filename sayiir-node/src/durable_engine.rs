@@ -141,8 +141,7 @@ impl NapiDurableEngine {
     ) -> Result<NapiWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
         let definition_hash = workflow.definition_hash.clone();
-        let first_task_id = continuation.first_task_id().to_string();
-        let first_task_priority = continuation.first_task_priority();
+        let first_task = continuation.first_task_hint();
 
         tracing::info!(
             workflow_id = %workflow.workflow_id,
@@ -179,8 +178,7 @@ impl NapiDurableEngine {
                         instance_id,
                         definition_hash,
                         input_bytes.clone(),
-                        first_task_id,
-                        first_task_priority,
+                        first_task,
                         backend.as_ref(),
                         conflict_policy,
                         true, // prechecked — check_existing_instance already ran

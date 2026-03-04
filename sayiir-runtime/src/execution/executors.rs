@@ -564,10 +564,7 @@ where
                     Ok(ControlFlow::Break(StepOutcome::Park(ParkReason::Delay {
                         delay_id: id.clone(),
                         wake_at,
-                        next_task_id: next.as_deref().map(|n| n.first_task_id().to_string()),
-                        next_task_priority: next
-                            .as_deref()
-                            .and_then(WorkflowContinuation::first_task_priority),
+                        next_task: next.as_deref().map(WorkflowContinuation::first_task_hint),
                         passthrough: current_input.clone(),
                     })))
                 }
@@ -594,10 +591,11 @@ where
                         Ok(Some(payload)) => {
                             snapshot.mark_task_completed(id.clone(), payload);
                             if let Some(next_cont) = next.as_deref() {
-                                snapshot.task_priority = next_cont.first_task_priority();
+                                let hint = next_cont.first_task_hint();
                                 snapshot.update_position(ExecutionPosition::AtTask {
-                                    task_id: next_cont.first_task_id().to_string(),
+                                    task_id: hint.id.clone(),
                                 });
+                                snapshot.set_task_hint(&hint);
                             }
                             backend.save_snapshot(snapshot).await?;
                             let output = snapshot
@@ -610,12 +608,9 @@ where
                                 signal_id: id.clone(),
                                 signal_name: signal_name.clone(),
                                 timeout: compute_signal_timeout(timeout.as_ref()),
-                                next_task_id: next
+                                next_task: next
                                     .as_deref()
-                                    .map(|n| n.first_task_id().to_string()),
-                                next_task_priority: next
-                                    .as_deref()
-                                    .and_then(WorkflowContinuation::first_task_priority),
+                                    .map(WorkflowContinuation::first_task_hint),
                             },
                         ))),
                         Err(e) => Err(RuntimeError::from(e)),

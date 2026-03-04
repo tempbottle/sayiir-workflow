@@ -458,6 +458,7 @@ where
             retry_policy: None,
             version: None,
             priority: None,
+            tags: Vec::new(),
             next: None,
         };
 
@@ -569,6 +570,7 @@ where
             retry_policy: None,
             version: None,
             priority: None,
+            tags: Vec::new(),
             next: None,
         };
 
@@ -677,6 +679,7 @@ where
         let untyped = wrap_core_task(id, task, codec);
         let timeout = metadata.timeout;
         let retry_policy = metadata.retries;
+        let tags = metadata.tags;
         let version = metadata.version;
         let priority = metadata.priority.map(Priority::as_u8);
 
@@ -687,6 +690,7 @@ where
             retry_policy,
             version,
             priority,
+            tags,
             next: None,
         };
 
@@ -780,6 +784,7 @@ where
         let untyped = wrap_core_loop_task(id, task, codec);
         let timeout = metadata.timeout;
         let retry_policy = metadata.retries;
+        let tags = metadata.tags;
         let version = metadata.version;
         let priority = metadata.priority.map(Priority::as_u8);
 
@@ -793,6 +798,7 @@ where
             retry_policy,
             version,
             priority,
+            tags,
             next: None,
         };
 
@@ -1075,6 +1081,11 @@ where
             .registry
             .get_metadata(id)
             .and_then(|m| m.priority.map(Priority::as_u8));
+        let tags = self
+            .registry
+            .get_metadata(id)
+            .map(|m| m.tags.clone())
+            .unwrap_or_default();
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
@@ -1083,6 +1094,7 @@ where
             retry_policy,
             version,
             priority,
+            tags,
             next: None,
         };
 
@@ -1141,6 +1153,11 @@ where
             .registry
             .get_metadata(body_task_id)
             .and_then(|m| m.priority.map(Priority::as_u8));
+        let tags = self
+            .registry
+            .get_metadata(body_task_id)
+            .map(|m| m.tags.clone())
+            .unwrap_or_default();
 
         let body = WorkflowContinuation::Task {
             id: body_task_id.to_string(),
@@ -1149,6 +1166,7 @@ where
             retry_policy,
             version,
             priority,
+            tags,
             next: None,
         };
 
@@ -1599,6 +1617,7 @@ where
                     retry_policy: None,
                     version: None,
                     priority: None,
+                    tags: Vec::new(),
                     next: None,
                 })
             })
@@ -1613,6 +1632,7 @@ where
             retry_policy: None,
             version: None,
             priority: None,
+            tags: Vec::new(),
             next: None,
         };
 
@@ -1710,6 +1730,11 @@ where
                     .registry
                     .get_metadata(&b.id)
                     .and_then(|m| m.priority.map(Priority::as_u8));
+                let tags = self
+                    .registry
+                    .get_metadata(&b.id)
+                    .map(|m| m.tags.clone())
+                    .unwrap_or_default();
                 Arc::new(WorkflowContinuation::Task {
                     id: b.id,
                     func: Some(b.task),
@@ -1717,6 +1742,7 @@ where
                     retry_policy,
                     version,
                     priority,
+                    tags,
                     next: None,
                 })
             })
@@ -1734,6 +1760,11 @@ where
             .registry
             .get_metadata(id)
             .and_then(|m| m.priority.map(Priority::as_u8));
+        let join_tags = self
+            .registry
+            .get_metadata(id)
+            .map(|m| m.tags.clone())
+            .unwrap_or_default();
         let join_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: join_task_fn,
@@ -1741,6 +1772,7 @@ where
             retry_policy: join_retry_policy,
             version: join_version,
             priority: join_priority,
+            tags: join_tags,
             next: None,
         };
 
@@ -1816,6 +1848,7 @@ where
             retry_policy: None,
             version: None,
             priority: None,
+            tags: Vec::new(),
             next: None,
         };
 
@@ -2089,6 +2122,10 @@ where
             let priority = registry
                 .get_metadata(id)
                 .and_then(|m| m.priority.map(Priority::as_u8));
+            let tags = registry
+                .get_metadata(id)
+                .map(|m| m.tags.clone())
+                .unwrap_or_default();
             current = Some(WorkflowContinuation::Task {
                 id: (*id).to_string(),
                 func,
@@ -2096,6 +2133,7 @@ where
                 retry_policy,
                 version,
                 priority,
+                tags,
                 next: current.map(Box::new),
             });
         }

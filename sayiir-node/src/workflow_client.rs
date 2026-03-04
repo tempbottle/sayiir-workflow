@@ -87,8 +87,7 @@ impl NapiWorkflowClient {
         input: Unknown,
     ) -> Result<NapiWorkflowStatus> {
         let definition_hash = workflow.definition_hash.clone();
-        let first_task_id = workflow.continuation.first_task_id().to_string();
-        let first_task_priority = workflow.continuation.first_task_priority();
+        let first_task = workflow.continuation.first_task_hint();
         let conflict_policy = self.conflict_policy;
 
         // Phase 1: check for existing instance before encoding input.
@@ -117,8 +116,7 @@ impl NapiWorkflowClient {
                         instance_id,
                         definition_hash,
                         input_bytes,
-                        first_task_id,
-                        first_task_priority,
+                        first_task,
                         backend.as_ref(),
                         conflict_policy,
                         true, // prechecked — check_existing_instance already ran
