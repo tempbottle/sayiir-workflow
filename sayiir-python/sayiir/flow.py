@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from ._sayiir import PyFlowBuilder, NodeInfo, PyTaskMetadata
+from ._sayiir import NodeInfo, PyFlowBuilder, PyTaskMetadata
 
 if TYPE_CHECKING:
     from ._sayiir import PyWorkflow
