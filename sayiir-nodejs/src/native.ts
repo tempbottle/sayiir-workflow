@@ -179,6 +179,7 @@ export interface NapiWorkflowClient {
     payloadJson: string,
   ): void;
   status(instanceId: string): NativeWorkflowStatus;
+  getTaskResult(instanceId: string, taskId: string): string | null;
 }
 
 export interface NativeAddon {
