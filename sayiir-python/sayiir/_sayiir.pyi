@@ -71,6 +71,18 @@ class PyFlowBuilder:
     ) -> None: ...
     def build(self) -> PyWorkflow: ...
 
+class PyNodeInfo:
+    """Metadata about a single node in the workflow DAG."""
+
+    id: str
+    kind: str
+    predecessor_id: str | None
+    timeout_secs: float | None
+    retry_policy: PyRetryPolicy | None
+    priority: int | None
+
+    def __repr__(self) -> str: ...
+
 class PyWorkflow:
     """Compiled workflow definition."""
 
@@ -80,6 +92,7 @@ class PyWorkflow:
     def definition_hash(self) -> str: ...
     @property
     def metadata_json(self) -> str | None: ...
+    def iter_nodes(self) -> list[PyNodeInfo]: ...
 
 class PyWorkflowStatus:
     """Workflow execution status."""

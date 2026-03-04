@@ -8,6 +8,8 @@
 export type {
   Duration,
   LoopOptions,
+  NodeKind,
+  NodeInfo,
   RetryPolicy,
   TaskCallback,
   TaskOptions,
