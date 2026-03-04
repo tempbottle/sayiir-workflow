@@ -857,6 +857,24 @@ if status.is_completed():
 
 **Returns:** `WorkflowStatus`
 
+#### .get_task_result(instance_id, task_id)
+
+Get a single task result from a workflow instance.
+
+Returns the decoded task output, or `None` if the task was never executed. For completed or failed workflows, the result is recovered from the backend's history or cache.
+
+```python
+result = client.get_task_result("order-42", "validate_order")
+if result is not None:
+    print(result)
+```
+
+**Parameters:**
+- `instance_id` (str) — The workflow instance ID
+- `task_id` (str) — The task ID to retrieve the result for
+
+**Returns:** `Any | None`
+
 ## Exceptions
 
 ### WorkflowError

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use sayiir_core::snapshot::{SignalKind, SignalRequest};
 use sayiir_core::workflow::ConflictPolicy;
-use sayiir_persistence::{SignalStore, SnapshotStore};
+use sayiir_persistence::{SignalStore, SnapshotStore, TaskResultStore};
 use sayiir_runtime::{PrepareRunOutcome, check_existing_instance, prepare_run};
 
 use sayiir_postgres::PostgresBackend;
@@ -198,6 +198,21 @@ impl NapiWorkflowClient {
                 .block_on(backend.send_event(&instance_id, &signal_name, payload_bytes))
                 .map_err(exceptions::backend_err_to_napi)
         })
+    }
+
+    /// Get a single task result from a workflow instance.
+    ///
+    /// Returns the JSON-encoded task output, or `null` if the task was never
+    /// executed. For completed/failed workflows, the result is recovered from
+    /// the backend's history or cache.
+    #[napi(js_name = "getTaskResult")]
+    pub fn get_task_result(&self, instance_id: String, task_id: String) -> Result<Option<String>> {
+        let bytes = with_backend!(self, |backend| {
+            self.runtime
+                .block_on(backend.load_task_result(&instance_id, &task_id))
+                .map_err(exceptions::backend_err_to_napi)?
+        });
+        Ok(bytes.map(|b| String::from_utf8_lossy(&b).into_owned()))
     }
 
     /// Get the current status of a workflow instance.

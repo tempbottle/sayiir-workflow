@@ -15,8 +15,9 @@ use bytes::Bytes;
 use sayiir_core::codec::sealed;
 use sayiir_core::codec::{Codec, EnvelopeCodec};
 use sayiir_core::snapshot::{SignalKind, SignalRequest};
+use sayiir_core::task::TaskIdentifier;
 use sayiir_core::workflow::{ConflictPolicy, Workflow, WorkflowStatus};
-use sayiir_persistence::{SignalStore, SnapshotStore};
+use sayiir_persistence::{SignalStore, SnapshotStore, TaskResultStore};
 
 use crate::error::RuntimeError;
 use crate::{PrepareRunOutcome, check_existing_instance, prepare_run};
@@ -229,5 +230,45 @@ where
     pub async fn status(&self, instance_id: &str) -> Result<WorkflowStatus, RuntimeError> {
         let snapshot = self.backend.load_snapshot(instance_id).await?;
         Ok(snapshot.state.as_status())
+    }
+}
+
+impl<B> WorkflowClient<B>
+where
+    B: SnapshotStore + SignalStore + TaskResultStore,
+{
+    /// Get a single task result from a workflow instance.
+    ///
+    /// Returns `Ok(Some(bytes))` if the task has completed, `Ok(None)` if the
+    /// task was never executed. For completed/failed workflows, the result is
+    /// recovered from the backend's history or cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be loaded.
+    pub async fn get_task_result(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+    ) -> Result<Option<Bytes>, RuntimeError> {
+        Ok(self.backend.load_task_result(instance_id, task_id).await?)
+    }
+
+    /// Type-safe variant of [`get_task_result`](Self::get_task_result) that
+    /// derives the `task_id` from a [`TaskIdentifier`] implementor (e.g. a
+    /// `#[task]`-generated struct).
+    ///
+    /// ```rust,ignore
+    /// let result = client.get_task_result_of::<ValidateOrderTask>("order-42").await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be loaded.
+    pub async fn get_task_result_of<T: TaskIdentifier>(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<Bytes>, RuntimeError> {
+        self.get_task_result(instance_id, T::task_id()).await
     }
 }

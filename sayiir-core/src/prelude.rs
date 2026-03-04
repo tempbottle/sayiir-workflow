@@ -17,6 +17,7 @@ pub use crate::error::{BoxError, BuildError, BuildErrors, CodecError, WorkflowEr
 pub use crate::priority::Priority;
 pub use crate::registry::TaskRegistry;
 pub use crate::task::{
-    BranchEnvelope, BranchOutputs, CoreTask, RegisterableTask, TaskMetadata, fn_task,
+    BranchEnvelope, BranchOutputs, CoreTask, RegisterableTask, TaskIdentifier, TaskMetadata,
+    fn_task,
 };
 pub use crate::workflow::{SerializableWorkflow, Workflow, WorkflowBuilder, key_fn_id};

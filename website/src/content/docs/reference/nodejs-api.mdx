@@ -910,6 +910,26 @@ if (status.status === "completed") {
 
 **Returns:** `WorkflowStatus<TOut>`
 
+#### .getTaskResult(instanceId, taskId)
+
+Get a single task result from a workflow instance.
+
+Returns the JSON-encoded task output, or `null` if the task was never executed. For completed or failed workflows, the result is recovered from the backend's history or cache.
+
+```typescript
+const result = client.getTaskResult("order-42", "validate_order");
+if (result !== null) {
+  const parsed = JSON.parse(result);
+  console.log(parsed);
+}
+```
+
+**Parameters:**
+- `instanceId` (string) — The workflow instance ID
+- `taskId` (string) — The task ID to retrieve the result for
+
+**Returns:** `string | null`
+
 ## Exceptions
 
 ### WorkflowError

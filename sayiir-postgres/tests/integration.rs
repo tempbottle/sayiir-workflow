@@ -3,7 +3,9 @@
 use bytes::Bytes;
 use chrono::Duration;
 use sayiir_core::snapshot::{ExecutionPosition, SignalKind, SignalRequest, WorkflowSnapshot};
-use sayiir_persistence::{BackendError, SignalStore, SnapshotStore, TaskClaimStore};
+use sayiir_persistence::{
+    BackendError, SignalStore, SnapshotStore, TaskClaimStore, TaskResultStore,
+};
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
 use sqlx::PgPool;
@@ -748,6 +750,57 @@ async fn find_available_tasks_disjoint_tags_no_match() {
         .await
         .unwrap();
     assert!(tasks.is_empty());
+}
+
+// ─── TaskResultStore ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn load_task_result_in_progress() {
+    let (_c, backend) = setup().await;
+    let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    snapshot.mark_task_completed("task-1".into(), Bytes::from(r#""out1""#));
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let result = backend.load_task_result("wf-1", "task-1").await.unwrap();
+    assert_eq!(result, Some(Bytes::from(r#""out1""#)));
+}
+
+#[tokio::test]
+async fn load_task_result_not_found() {
+    let (_c, backend) = setup().await;
+    let snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let result = backend
+        .load_task_result("wf-1", "no-such-task")
+        .await
+        .unwrap();
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn load_task_result_nonexistent_instance() {
+    let (_c, backend) = setup().await;
+    let result = backend.load_task_result("no-such-wf", "task-1").await;
+    assert!(matches!(result, Err(BackendError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn load_task_result_after_completion() {
+    let (_c, backend) = setup().await;
+
+    // Create workflow with a completed task
+    let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    snapshot.mark_task_completed("task-1".into(), Bytes::from(r#""out1""#));
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    // Complete the workflow
+    snapshot.mark_completed(Bytes::from(r#""final""#));
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    // Task result should still be accessible from history
+    let result = backend.load_task_result("wf-1", "task-1").await.unwrap();
+    assert_eq!(result, Some(Bytes::from(r#""out1""#)));
 }
 
 // ─── Minimum Postgres version ────────────────────────────────────────────────

@@ -5,7 +5,7 @@
  * The actual native module is loaded at runtime.
  */
 
-import type { NativeWorkflowStatus, TaskCallback } from "./types.js";
+import type { NodeKind, NativeWorkflowStatus, TaskCallback } from "./types.js";
 
 export interface NapiRetryPolicy {
   maxRetries: number;
@@ -70,10 +70,25 @@ export interface NapiFlowBuilder {
   build(): NapiWorkflow;
 }
 
+export interface NapiNodeInfo {
+  id: string;
+  kind: NodeKind;
+  predecessorId?: string;
+  timeoutSecs?: number;
+  retryPolicy?: {
+    maxRetries: number;
+    initialDelaySecs: number;
+    backoffMultiplier: number;
+    maxDelaySecs?: number;
+  };
+  priority?: number;
+}
+
 export interface NapiWorkflow {
   workflowId: string;
   definitionHash: string;
   metadataJson?: string;
+  iterNodes(): NapiNodeInfo[];
 }
 
 export interface NapiWorkflowEngine {
@@ -164,6 +179,7 @@ export interface NapiWorkflowClient {
     payloadJson: string,
   ): void;
   status(instanceId: string): NativeWorkflowStatus;
+  getTaskResult(instanceId: string, taskId: string): string | null;
 }
 
 export interface NativeAddon {
