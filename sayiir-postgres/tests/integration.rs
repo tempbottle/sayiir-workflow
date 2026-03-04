@@ -576,6 +576,195 @@ async fn find_available_tasks_skips_completed() {
     assert!(tasks.is_empty());
 }
 
+// ─── Worker affinity (task tags) ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn find_available_tasks_filters_by_worker_tags() {
+    let (_c, backend) = setup().await;
+
+    // Task tagged ["gpu"]
+    let mut snap1 = WorkflowSnapshot::with_initial_input(
+        "wf-gpu".into(),
+        "h1".into(),
+        Bytes::from(r#""1""#),
+    );
+    snap1.update_position(ExecutionPosition::AtTask {
+        task_id: "t1".into(),
+    });
+    snap1.task_tags = vec!["gpu".into()];
+    backend.save_snapshot(&snap1).await.unwrap();
+
+    // Task tagged ["cpu"]
+    let mut snap2 = WorkflowSnapshot::with_initial_input(
+        "wf-cpu".into(),
+        "h1".into(),
+        Bytes::from(r#""2""#),
+    );
+    snap2.update_position(ExecutionPosition::AtTask {
+        task_id: "t2".into(),
+    });
+    snap2.task_tags = vec!["cpu".into()];
+    backend.save_snapshot(&snap2).await.unwrap();
+
+    // Worker with ["gpu"] should only see the gpu task
+    let tasks = backend
+        .find_available_tasks("w1", 10, Duration::seconds(300), &["gpu".into()])
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].instance_id, "wf-gpu");
+}
+
+#[tokio::test]
+async fn find_available_tasks_untagged_worker_accepts_all() {
+    let (_c, backend) = setup().await;
+
+    let mut snap1 = WorkflowSnapshot::with_initial_input(
+        "wf-tagged".into(),
+        "h1".into(),
+        Bytes::from(r#""1""#),
+    );
+    snap1.update_position(ExecutionPosition::AtTask {
+        task_id: "t1".into(),
+    });
+    snap1.task_tags = vec!["gpu".into()];
+    backend.save_snapshot(&snap1).await.unwrap();
+
+    let mut snap2 = WorkflowSnapshot::with_initial_input(
+        "wf-plain".into(),
+        "h1".into(),
+        Bytes::from(r#""2""#),
+    );
+    snap2.update_position(ExecutionPosition::AtTask {
+        task_id: "t2".into(),
+    });
+    backend.save_snapshot(&snap2).await.unwrap();
+
+    // Untagged worker should see both
+    let tasks = backend
+        .find_available_tasks("w1", 10, Duration::seconds(300), &[])
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 2);
+}
+
+#[tokio::test]
+async fn find_available_tasks_untagged_tasks_accepted_by_tagged_worker() {
+    let (_c, backend) = setup().await;
+
+    // Untagged task
+    let mut snap = WorkflowSnapshot::with_initial_input(
+        "wf-plain".into(),
+        "h1".into(),
+        Bytes::from(r#""1""#),
+    );
+    snap.update_position(ExecutionPosition::AtTask {
+        task_id: "t1".into(),
+    });
+    backend.save_snapshot(&snap).await.unwrap();
+
+    // Tagged worker should still pick up untagged tasks
+    let tasks = backend
+        .find_available_tasks("w1", 10, Duration::seconds(300), &["gpu".into()])
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].instance_id, "wf-plain");
+}
+
+#[tokio::test]
+async fn find_available_tasks_multi_tag_subset() {
+    let (_c, backend) = setup().await;
+
+    // Task requiring ["gpu", "cuda"]
+    let mut snap1 = WorkflowSnapshot::with_initial_input(
+        "wf-multi".into(),
+        "h1".into(),
+        Bytes::from(r#""1""#),
+    );
+    snap1.update_position(ExecutionPosition::AtTask {
+        task_id: "t1".into(),
+    });
+    snap1.task_tags = vec!["gpu".into(), "cuda".into()];
+    backend.save_snapshot(&snap1).await.unwrap();
+
+    // Task requiring only ["gpu"]
+    let mut snap2 = WorkflowSnapshot::with_initial_input(
+        "wf-single".into(),
+        "h1".into(),
+        Bytes::from(r#""2""#),
+    );
+    snap2.update_position(ExecutionPosition::AtTask {
+        task_id: "t2".into(),
+    });
+    snap2.task_tags = vec!["gpu".into()];
+    backend.save_snapshot(&snap2).await.unwrap();
+
+    // Worker with ["gpu"] cannot run ["gpu","cuda"] (not a superset), but can run ["gpu"]
+    let tasks = backend
+        .find_available_tasks("w1", 10, Duration::seconds(300), &["gpu".into()])
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].instance_id, "wf-single");
+
+    // Worker with ["gpu","cuda","fast"] can run both (superset of both)
+    let tasks = backend
+        .find_available_tasks(
+            "w2",
+            10,
+            Duration::seconds(300),
+            &["gpu".into(), "cuda".into(), "fast".into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 2);
+}
+
+#[tokio::test]
+async fn find_available_tasks_tags_persist_through_save_load() {
+    let (_c, backend) = setup().await;
+
+    let mut snap = WorkflowSnapshot::with_initial_input(
+        "wf-persist".into(),
+        "h1".into(),
+        Bytes::from(r#""1""#),
+    );
+    snap.update_position(ExecutionPosition::AtTask {
+        task_id: "t1".into(),
+    });
+    snap.task_tags = vec!["gpu".into(), "cuda".into()];
+    backend.save_snapshot(&snap).await.unwrap();
+
+    // Load and verify tags survived the roundtrip
+    let loaded = backend.load_snapshot("wf-persist").await.unwrap();
+    assert_eq!(loaded.task_tags, vec!["gpu".to_string(), "cuda".to_string()]);
+}
+
+#[tokio::test]
+async fn find_available_tasks_disjoint_tags_no_match() {
+    let (_c, backend) = setup().await;
+
+    // Task tagged ["cpu"]
+    let mut snap = WorkflowSnapshot::with_initial_input(
+        "wf-cpu".into(),
+        "h1".into(),
+        Bytes::from(r#""1""#),
+    );
+    snap.update_position(ExecutionPosition::AtTask {
+        task_id: "t1".into(),
+    });
+    snap.task_tags = vec!["cpu".into()];
+    backend.save_snapshot(&snap).await.unwrap();
+
+    // Worker with ["gpu"] should not see cpu tasks
+    let tasks = backend
+        .find_available_tasks("w1", 10, Duration::seconds(300), &["gpu".into()])
+        .await
+        .unwrap();
+    assert!(tasks.is_empty());
+}
+
 // ─── Minimum Postgres version ────────────────────────────────────────────────
 
 /// Verify that migrations and core operations work on the minimum supported
