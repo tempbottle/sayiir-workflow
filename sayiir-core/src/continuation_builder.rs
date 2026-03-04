@@ -102,6 +102,7 @@ fn build_chain(chain: &[(String, TaskMetadata)]) -> Result<Box<WorkflowContinuat
             retry_policy: metadata.retries.clone(),
             version: metadata.version.clone(),
             priority: metadata.priority.map(Priority::as_u8),
+            tags: metadata.tags.clone(),
             next: current.map(Box::new),
         });
     }
@@ -325,6 +326,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                 retry_policy: metadata.retries.clone(),
                 version: metadata.version.clone(),
                 priority: metadata.priority.map(Priority::as_u8),
+                tags: metadata.tags.clone(),
                 next: current.map(Box::new),
             },
             BuilderTask::Delay {
@@ -371,6 +373,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                     retry_policy: join_metadata.retries.clone(),
                     version: join_metadata.version.clone(),
                     priority: join_metadata.priority.map(Priority::as_u8),
+                    tags: join_metadata.tags.clone(),
                     next: current.map(Box::new),
                 };
 
@@ -420,6 +423,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                     retry_policy: body_metadata.retries.clone(),
                     version: body_metadata.version.clone(),
                     priority: body_metadata.priority.map(Priority::as_u8),
+                    tags: body_metadata.tags.clone(),
                     next: None,
                 };
                 WorkflowContinuation::Loop {

@@ -204,12 +204,14 @@ export interface NativeAddon {
       backend: NapiInMemoryBackend,
       pollIntervalMs?: number,
       claimTtlMs?: number,
+      tags?: string[],
     ): NapiWorker;
     withPostgres(
       workerId: string,
       backend: NapiPostgresBackend,
       pollIntervalMs?: number,
       claimTtlMs?: number,
+      tags?: string[],
     ): NapiWorker;
   };
   NapiWorkflowClient: {

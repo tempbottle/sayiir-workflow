@@ -191,6 +191,7 @@ class PyWorker:
         backend: PyInMemoryBackend | PyPostgresBackend,
         poll_interval_secs: float = 5.0,
         claim_ttl_secs: float = 300.0,
+        tags: list[str] | None = None,
     ) -> None: ...
     def start(
         self,

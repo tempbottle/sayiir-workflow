@@ -11,6 +11,20 @@ use std::collections::HashMap;
 
 use crate::task::RetryPolicy;
 
+/// Pre-computed metadata about the next task to execute.
+///
+/// Carried through `ParkReason` and `prepare_run` so that persistence-layer
+/// advancement inherits priority and tags without re-reading the continuation.
+#[derive(Debug, Clone, Default)]
+pub struct TaskHint {
+    /// The task identifier.
+    pub id: String,
+    /// Optional execution priority (lower = higher priority).
+    pub priority: Option<u8>,
+    /// Affinity tags for worker routing.
+    pub tags: Vec<String>,
+}
+
 /// A persisted deadline for a running task.
 ///
 /// When a task with a timeout starts, the absolute wall-clock deadline is
@@ -507,6 +521,12 @@ pub struct WorkflowSnapshot {
     /// persistence backends to order `find_available_tasks` results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_priority: Option<u8>,
+    /// Affinity tags of the current task.
+    ///
+    /// Set from the continuation tree when advancing to a new task. Used by
+    /// persistence backends to filter `find_available_tasks` results by worker tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_tags: Vec<String>,
     /// W3C `traceparent` header for distributed trace context propagation.
     ///
     /// This is an in-memory carrier — never serialized in the snapshot blob.
@@ -516,6 +536,12 @@ pub struct WorkflowSnapshot {
 }
 
 impl WorkflowSnapshot {
+    /// Apply a [`TaskHint`] to this snapshot, setting priority and tags.
+    pub fn set_task_hint(&mut self, hint: &TaskHint) {
+        self.task_priority = hint.priority;
+        self.task_tags.clone_from(&hint.tags);
+    }
+
     /// Get the current Unix timestamp.
     #[allow(clippy::cast_sign_loss)] // Timestamps are always positive
     fn current_timestamp() -> u64 {
@@ -541,6 +567,7 @@ impl WorkflowSnapshot {
             task_retries: HashMap::new(),
             loop_iterations: HashMap::new(),
             task_priority: None,
+            task_tags: vec![],
             trace_parent: None,
         }
     }
@@ -567,6 +594,7 @@ impl WorkflowSnapshot {
             task_retries: HashMap::new(),
             loop_iterations: HashMap::new(),
             task_priority: None,
+            task_tags: vec![],
             trace_parent: None,
         }
     }
@@ -904,6 +932,12 @@ impl WorkflowSnapshot {
     #[must_use]
     pub fn current_task_priority(&self) -> u8 {
         self.task_priority.unwrap_or(3)
+    }
+
+    /// The affinity tags of the current task.
+    #[must_use]
+    pub fn current_task_tags(&self) -> &[String] {
+        &self.task_tags
     }
 
     /// Returns `true` if the given task last failed on the specified worker.

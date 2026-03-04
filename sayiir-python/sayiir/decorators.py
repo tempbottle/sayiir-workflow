@@ -155,6 +155,16 @@ def task(
     if priority is not None and not (1 <= priority <= 5):
         raise ValueError(f"priority must be between 1 and 5, got {priority}")
 
+    # Validate tags
+    if tags is not None:
+        if len(tags) > 20:
+            raise ValueError(f"too many tags: {len(tags)} (max 20)")
+        for tag in tags:
+            if not tag:
+                raise ValueError("tags must not contain empty strings")
+            if len(tag) > 64:
+                raise ValueError(f"tag too long: '{tag}' ({len(tag)} chars, max 64)")
+
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         task_id = name or fn.__name__
         fn._task_id = task_id  # type: ignore[attr-defined]

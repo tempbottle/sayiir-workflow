@@ -269,6 +269,7 @@ pub trait TaskClaimStore: Send + Sync {
         worker_id: &str,
         limit: usize,
         aging_interval: Duration,
+        worker_tags: &[String],
     ) -> impl Future<Output = Result<Vec<AvailableTask>, BackendError>> + Send;
 }
 

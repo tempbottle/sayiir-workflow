@@ -227,6 +227,7 @@ pub struct PooledWorker<B> {
     claim_ttl: Option<Duration>,
     batch_size: NonZeroUsize,
     aging_interval: Duration,
+    tags: Vec<String>,
 }
 
 impl<B> PooledWorker<B>
@@ -254,6 +255,7 @@ where
             claim_ttl: Some(Duration::from_secs(5 * 60)), // Default 5 minutes
             batch_size: NonZeroUsize::MIN,                // Default: fetch one task at a time (1)
             aging_interval: Duration::from_secs(300),     // Default 5 minutes
+            tags: vec![],
         }
     }
 
@@ -290,6 +292,17 @@ where
     #[must_use]
     pub fn with_batch_size(mut self, size: NonZeroUsize) -> Self {
         self.batch_size = size;
+        self
+    }
+
+    /// Set affinity tags for this worker.
+    ///
+    /// When tags are set, the worker only picks up tasks whose tags are a
+    /// subset of the worker's tags (or tasks with no tags). When no tags are
+    /// set (the default), the worker accepts all tasks.
+    #[must_use]
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
         self
     }
 
@@ -474,6 +487,7 @@ where
                     self.batch_size.get(),
                     chrono::Duration::from_std(self.aging_interval)
                         .unwrap_or(chrono::Duration::MAX),
+                    &self.tags,
                 )
                 .await?;
 
@@ -774,6 +788,7 @@ where
                     self.batch_size.get(),
                     chrono::Duration::from_std(self.aging_interval)
                         .unwrap_or(chrono::Duration::MAX),
+                    &self.tags,
                 )
                 .await?;
 
@@ -1649,10 +1664,11 @@ where
             | WorkflowContinuation::AwaitSignal { id, next, .. } => {
                 if id == completed_task_id {
                     if let Some(next_cont) = next {
-                        snapshot.task_priority = next_cont.first_task_priority();
+                        let hint = next_cont.first_task_hint();
                         snapshot.update_position(ExecutionPosition::AtTask {
-                            task_id: next_cont.first_task_id().to_string(),
+                            task_id: hint.id.clone(),
                         });
+                        snapshot.set_task_hint(&hint);
                     }
                 } else if let Some(next_cont) = next {
                     Self::update_position_after_task(next_cont, completed_task_id, snapshot);
@@ -1727,6 +1743,7 @@ where
             claim_ttl: Some(Duration::from_secs(5 * 60)),
             batch_size: NonZeroUsize::MIN,
             aging_interval: Duration::from_secs(300),
+            tags: vec![],
         }
     }
 
@@ -1935,6 +1952,7 @@ pub struct PooledWorkerBuilder<B> {
     claim_ttl: Option<Duration>,
     batch_size: NonZeroUsize,
     aging_interval: Duration,
+    tags: Vec<String>,
 }
 
 impl<B> PooledWorkerBuilder<B>
@@ -1976,6 +1994,17 @@ where
         self
     }
 
+    /// Set affinity tags for this worker.
+    ///
+    /// When tags are set, the worker only picks up tasks whose tags are a
+    /// subset of the worker's tags (or tasks with no tags). When no tags are
+    /// set (the default), the worker accepts all tasks.
+    #[must_use]
+    pub fn tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
     /// Build the [`PooledWorker`].
     ///
     /// If no `worker_id` was set, generates one from `{hostname}-{pid}`.
@@ -1989,6 +2018,7 @@ where
             claim_ttl: self.claim_ttl,
             batch_size: self.batch_size,
             aging_interval: self.aging_interval,
+            tags: self.tags,
         }
     }
 }

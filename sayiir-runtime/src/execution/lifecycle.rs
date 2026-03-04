@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use sayiir_core::error::WorkflowError;
 use sayiir_core::snapshot::{
-    ExecutionPosition, SignalKind, WorkflowSnapshot, WorkflowSnapshotState,
+    ExecutionPosition, SignalKind, TaskHint, WorkflowSnapshot, WorkflowSnapshotState,
 };
 use sayiir_core::workflow::{ConflictPolicy, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
@@ -95,13 +95,11 @@ where
     skip(input_bytes, backend),
     fields(%instance_id),
 )]
-#[allow(clippy::too_many_arguments)]
 pub async fn prepare_run<B>(
     instance_id: String,
     definition_hash: String,
     input_bytes: Bytes,
-    first_task_id: String,
-    first_task_priority: Option<u8>,
+    first_task: TaskHint,
     backend: &B,
     conflict_policy: ConflictPolicy,
     prechecked: bool,
@@ -178,10 +176,10 @@ where
     {
         snapshot.trace_parent = crate::trace_context::current_trace_parent();
     }
-    snapshot.task_priority = first_task_priority;
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: first_task_id,
+        task_id: first_task.id.clone(),
     });
+    snapshot.set_task_hint(&first_task);
     backend.save_snapshot(&snapshot).await?;
     Ok(PrepareRunOutcome::Fresh(Box::new(snapshot)))
 }

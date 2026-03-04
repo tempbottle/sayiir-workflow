@@ -273,6 +273,8 @@ pub enum WorkflowContinuation {
         version: Option<String>,
         /// Execution priority (1–5). `None` inherits the default (Normal = 3).
         priority: Option<u8>,
+        /// Affinity tags for worker routing.
+        tags: Vec<String>,
         /// Next node in the chain.
         next: Option<Box<WorkflowContinuation>>,
     },
@@ -454,6 +456,39 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Get the affinity tags of the first task in this continuation.
+    ///
+    /// Returns the tags for `Task` nodes, empty for non-task nodes
+    /// (Delay, Signal, Branch). Recurses through Fork, Loop, and `ChildWorkflow`.
+    #[must_use]
+    pub fn first_task_tags(&self) -> Vec<String> {
+        match self {
+            WorkflowContinuation::Task { tags, .. } => tags.clone(),
+            WorkflowContinuation::Delay { .. }
+            | WorkflowContinuation::AwaitSignal { .. }
+            | WorkflowContinuation::Branch { .. } => vec![],
+            WorkflowContinuation::Fork { branches, .. } => branches
+                .first()
+                .map(|b| b.first_task_tags())
+                .unwrap_or_default(),
+            WorkflowContinuation::Loop { body, .. } => body.first_task_tags(),
+            WorkflowContinuation::ChildWorkflow { child, .. } => child.first_task_tags(),
+        }
+    }
+
+    /// Build a [`TaskHint`] from the first task in this continuation.
+    ///
+    /// Combines [`first_task_id`], [`first_task_priority`], and [`first_task_tags`]
+    /// into a single struct for passing through `prepare_run` and `ParkReason`.
+    #[must_use]
+    pub fn first_task_hint(&self) -> crate::snapshot::TaskHint {
+        crate::snapshot::TaskHint {
+            id: self.first_task_id().to_string(),
+            priority: self.first_task_priority(),
+            tags: self.first_task_tags(),
+        }
+    }
+
     /// Get the terminal task ID of this continuation chain.
     ///
     /// Follows `get_next()` pointers to the end and returns the ID of the
@@ -617,11 +652,27 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Look up the affinity tags configured on a specific task by ID.
+    #[must_use]
+    pub fn get_task_tags(&self, task_id: &str) -> Vec<String> {
+        match self.find_task(task_id) {
+            Some(WorkflowContinuation::Task { tags, .. }) => tags.clone(),
+            _ => vec![],
+        }
+    }
+
+    /// Set the affinity tags on a specific task node found by ID.
+    pub fn set_task_tags(&mut self, target_id: &str, new_tags: Vec<String>) {
+        if let Some(WorkflowContinuation::Task { tags, .. }) = self.find_task_mut(target_id) {
+            *tags = new_tags;
+        }
+    }
+
     /// Build a [`TaskMetadata`](crate::task::TaskMetadata) from the fields
     /// available on the continuation node for the given task.
     ///
-    /// Only `timeout`, `retries`, and `version` are populated — display name,
-    /// description, and tags are left as defaults since they are not stored in
+    /// Only `timeout`, `retries`, `version`, and `tags` are populated — display
+    /// name and description are left as defaults since they are not stored in
     /// the continuation tree.
     #[must_use]
     pub fn build_task_metadata(&self, task_id: &str) -> crate::task::TaskMetadata {
@@ -631,12 +682,14 @@ impl WorkflowContinuation {
                 retry_policy,
                 version,
                 priority,
+                tags,
                 ..
             }) => crate::task::TaskMetadata {
                 timeout: *timeout,
                 retries: retry_policy.clone(),
                 version: version.clone(),
                 priority: priority.and_then(crate::priority::Priority::from_u8),
+                tags: tags.clone(),
                 ..Default::default()
             },
             _ => crate::task::TaskMetadata::default(),
@@ -669,6 +722,7 @@ impl WorkflowContinuation {
                 retry_policy,
                 version,
                 priority,
+                tags,
                 next,
                 ..
             } => SerializableContinuation::Task {
@@ -677,6 +731,7 @@ impl WorkflowContinuation {
                 retry_policy: retry_policy.clone(),
                 version: version.clone(),
                 priority: *priority,
+                tags: tags.clone(),
                 next: next.as_ref().map(|n| Box::new(n.to_serializable())),
             },
             WorkflowContinuation::Fork { id, branches, join } => SerializableContinuation::Fork {
@@ -821,6 +876,9 @@ pub enum SerializableContinuation {
         /// Execution priority (1–5). `None` inherits the default (Normal = 3).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         priority: Option<u8>,
+        /// Affinity tags for worker routing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
         /// Next node in the chain.
         next: Option<Box<SerializableContinuation>>,
     },
@@ -930,6 +988,7 @@ impl SerializableContinuation {
                 retry_policy,
                 version,
                 priority,
+                tags,
                 next,
             } => {
                 let func = registry
@@ -946,6 +1005,7 @@ impl SerializableContinuation {
                     retry_policy: retry_policy.clone(),
                     version: version.clone(),
                     priority: *priority,
+                    tags: tags.clone(),
                     next,
                 })
             }
@@ -1119,7 +1179,7 @@ impl SerializableContinuation {
                 }
             }
         }
-        let mut ids = Vec::new();
+        let mut ids = vec![];
         collect(self, &mut ids);
         ids
     }
@@ -1754,7 +1814,7 @@ mod tests {
         // Verify the continuation chain structure
         // Tasks should be linked in order: first -> second -> third
         let mut current = workflow.continuation();
-        let mut task_ids = Vec::new();
+        let mut task_ids = vec![];
 
         loop {
             match current {
@@ -2100,12 +2160,16 @@ mod tests {
             retry_policy: None,
             version: None,
             priority: None,
+
+            tags: vec![],
             next: Some(Box::new(SerializableContinuation::Task {
                 id: "step1".to_string(), // Duplicate!
                 timeout_ms: None,
                 retry_policy: None,
                 version: None,
                 priority: None,
+
+                tags: vec![],
                 next: None,
             })),
         };
@@ -2138,7 +2202,7 @@ mod tests {
             .unwrap();
 
         // Verify the chain structure: Task -> Delay -> Task
-        let mut ids = Vec::new();
+        let mut ids = vec![];
         let mut current = workflow.continuation();
         loop {
             match current {
@@ -2805,6 +2869,8 @@ mod proptests {
             retry_policy: None,
             version: None,
             priority: None,
+
+            tags: vec![],
             next: None,
         });
 
@@ -2825,6 +2891,8 @@ mod proptests {
                     retry_policy: None,
                     version: None,
                     priority: None,
+
+                    tags: vec![],
                     next,
                 }),
             // Fork with branches and optional join
@@ -2933,6 +3001,8 @@ mod proptests {
                 retry_policy: None,
                 version: None,
                 priority: None,
+
+                tags: vec![],
                 next: None,
             })
             .boxed();
@@ -2950,6 +3020,8 @@ mod proptests {
                 retry_policy: None,
                 version: None,
                 priority: None,
+
+                tags: vec![],
                 next,
             }),
             // Fork with 0..3 branches (each gets unique prefix) and optional join
@@ -3104,7 +3176,7 @@ mod proptests {
 
     /// Collect all IDs in a continuation tree.
     fn collect_ids(cont: &SerializableContinuation) -> Vec<String> {
-        let mut ids = Vec::new();
+        let mut ids = vec![];
         fn walk(c: &SerializableContinuation, out: &mut Vec<String>) {
             match c {
                 SerializableContinuation::Task { id, next, .. }
@@ -3176,6 +3248,7 @@ mod proptests {
                 retry_policy: retry_policy.clone(),
                 version: version.clone(),
                 priority: None,
+                tags: vec![],
                 next: next.clone(),
             },
             SerializableContinuation::Fork { branches, join, .. } => {

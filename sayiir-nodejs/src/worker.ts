@@ -33,6 +33,8 @@ import { parseDuration } from "./duration.js";
 export interface WorkerOptions {
   pollInterval?: Duration;
   claimTtl?: Duration;
+  /** Affinity tags for this worker. When set, the worker only picks up tasks whose tags are a subset of these tags. */
+  tags?: string[];
 }
 
 /** Handle for controlling a running worker. */
@@ -119,12 +121,15 @@ export class Worker {
       ? parseDuration(this.options.claimTtl)
       : undefined;
 
+    const tags = this.options.tags;
+
     if (this.backend instanceof InMemoryBackend) {
       return native.NapiWorker.withInMemory(
         this.workerId,
         this.backend._inner,
         pollMs,
         claimMs,
+        tags,
       );
     }
 
@@ -134,6 +139,7 @@ export class Worker {
         this.backend._inner,
         pollMs,
         claimMs,
+        tags,
       );
     }
 

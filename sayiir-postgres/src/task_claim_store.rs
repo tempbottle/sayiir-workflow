@@ -168,12 +168,13 @@ where
         fields(db.system = "postgresql"),
         err(level = tracing::Level::ERROR),
     )]
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     async fn find_available_tasks(
         &self,
         worker_id: &str,
         limit: usize,
         aging_interval: Duration,
+        worker_tags: &[String],
     ) -> Result<Vec<AvailableTask>, BackendError> {
         // Step 1: Clean expired claims
         sqlx::query(
@@ -187,7 +188,18 @@ where
         // effective_priority = task_priority - (seconds_waiting / aging_interval)
         // Clamp to a minimum of 1s to prevent division by zero in the SQL expression.
         let aging_secs = (aging_interval.num_milliseconds() as f64 / 1000.0).max(1.0);
-        let rows = sqlx::query(
+        let worker_tags_vec: Vec<&str> = worker_tags.iter().map(String::as_str).collect();
+
+        // When worker has tags, add filter: task_tags must be a subset of
+        // worker_tags. The `<@` operator checks array containment; an empty
+        // array is a subset of every array, so untagged tasks always pass.
+        let tag_filter = if worker_tags.is_empty() {
+            ""
+        } else {
+            "AND s.task_tags <@ $3"
+        };
+
+        let query = format!(
             "SELECT s.instance_id, s.data, s.trace_parent
              FROM sayiir_workflow_snapshots s
              WHERE s.status = 'InProgress'
@@ -201,16 +213,20 @@ where
                    SELECT 1 FROM sayiir_workflow_signals sig
                    WHERE sig.instance_id = s.instance_id
                )
+               {tag_filter}
              ORDER BY
                (s.task_priority - EXTRACT(EPOCH FROM (now() - s.updated_at)) / $2) ASC,
                s.updated_at ASC
-             LIMIT $1",
-        )
-        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-        .bind(aging_secs)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(PgError)?;
+             LIMIT $1"
+        );
+
+        let mut q = sqlx::query(&query)
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+            .bind(aging_secs);
+        if !worker_tags.is_empty() {
+            q = q.bind(&worker_tags_vec);
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(PgError)?;
 
         // Step 3: App-level evaluation per candidate.
         // Collect (worker_failed_here, task) pairs so we can stable-sort by
