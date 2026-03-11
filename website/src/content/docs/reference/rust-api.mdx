@@ -338,6 +338,74 @@ Each branch arm uses `[task, task]` syntax for task chains. The `_` arm is the o
 
 A `Result<SerializableWorkflow<C, Input, ()>, BuildError>` expression.
 
+## TaskRegistry
+
+Name → factory map for registering task implementations. Used by workers and for workflow deserialization — only task IDs and structure are serialized, implementations are looked up from the registry at runtime.
+
+### Basic Usage
+
+```rust
+use sayiir_runtime::prelude::*;
+use std::sync::Arc;
+
+let codec = Arc::new(JsonCodec);
+let mut registry = TaskRegistry::new();
+
+// Register a struct implementing CoreTask
+registry.register("double", codec.clone(), DoubleTask);
+
+// Register a closure
+registry.register_fn("add_ten", codec.clone(), |i: u32| async move { Ok(i + 10) });
+```
+
+### Builder Pattern
+
+```rust
+let registry = TaskRegistry::with_codec(codec)
+    .register_fn("double", |i: u32| async move { Ok(i * 2) })
+    .register_fn("add_ten", |i: u32| async move { Ok(i + 10) })
+    .build();
+```
+
+### merge(other)
+
+Merge all entries from another registry. Existing entries are **not** overwritten — the parent's registrations take precedence on ID collision.
+
+The `#[task]` macro generates a `register()` method on each struct, so building reusable libraries is straightforward:
+
+```rust
+// billing_tasks crate — each #[task] gets a register() method
+pub fn billing_tasks(codec: Arc<JsonCodec>, stripe: Arc<StripeClient>) -> TaskRegistry {
+    let mut reg = TaskRegistry::new();
+    ChargeTask::register(&mut reg, codec.clone(), ChargeTask::new(stripe.clone()));
+    RefundTask::register(&mut reg, codec.clone(), RefundTask::new(stripe));
+    reg
+}
+
+// application — merge libraries into a single registry
+let mut registry = TaskRegistry::new();
+registry.merge(billing_tasks(codec.clone(), stripe));
+registry.merge(notification_tasks(codec.clone(), mailer));
+```
+
+### Key Methods
+
+| Method | Description |
+|--------|-------------|
+| `new()` | Create an empty registry |
+| `register(id, codec, task)` | Register a `CoreTask` implementation |
+| `register_with_metadata(id, codec, task, metadata)` | Register with metadata |
+| `register_fn(id, codec, closure)` | Register a closure as a task |
+| `register_fn_with_metadata(id, codec, closure, metadata)` | Register closure with metadata |
+| `register_join(id, codec, closure)` | Register a fork/join combiner |
+| `merge(other)` | Merge another registry (parent wins on collision) |
+| `with_codec(codec)` → `RegistryBuilder` | Start a builder with shared codec |
+| `get(id)` → `Option<UntypedCoreTask>` | Look up a task by ID |
+| `get_metadata(id)` → `Option<&TaskMetadata>` | Get task metadata |
+| `contains(id)` → `bool` | Check if a task ID is registered |
+| `len()` / `is_empty()` | Registry size |
+| `task_ids()` → `impl Iterator<Item = &str>` | Iterate registered IDs |
+
 ## WorkflowBuilder
 
 Fluent builder for constructing workflows programmatically (alternative to the `workflow!` macro).
