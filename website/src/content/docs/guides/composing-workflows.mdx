@@ -226,3 +226,70 @@ Workflow composition is useful when:
 :::tip[Keep task IDs unique across parent and child]
 The engine checks for duplicate task IDs across the merged workflow tree. If a parent and child both define a task with the same ID, the build will fail. Use distinct task IDs or namespace them (e.g., `billing.validate` vs `order.validate`).
 :::
+
+## Reusable Task Libraries
+
+Beyond inlining child workflows, you can build standalone **task libraries** — reusable collections of tasks that you merge into any workflow or worker. This is useful when multiple workflows share the same tasks but don't share the same pipeline structure.
+
+The `#[task]` macro generates a `register()` method on each task struct, so building a library is just a function that populates a `TaskRegistry`:
+
+```rust
+use sayiir_runtime::prelude::*;
+use std::sync::Arc;
+
+// billing_tasks crate — define tasks with the macro
+#[task(id = "charge", retries = 2, timeout = "30s")]
+async fn charge(
+    order: Order,
+    #[inject] stripe: Arc<StripeClient>,
+) -> Result<Receipt, BoxError> {
+    stripe.charge(&order).await
+}
+
+#[task(id = "refund", retries = 2, timeout = "30s")]
+async fn refund(
+    order: Order,
+    #[inject] stripe: Arc<StripeClient>,
+) -> Result<Refund, BoxError> {
+    stripe.refund(&order).await
+}
+
+/// Build a registry containing all billing tasks.
+pub fn billing_tasks(codec: Arc<JsonCodec>, stripe: Arc<StripeClient>) -> TaskRegistry {
+    let mut reg = TaskRegistry::new();
+    ChargeTask::register(&mut reg, codec.clone(), ChargeTask::new(stripe.clone()));
+    RefundTask::register(&mut reg, codec.clone(), RefundTask::new(stripe));
+    reg
+}
+```
+
+```rust
+// notification_tasks crate
+#[task(id = "send_email", retries = 3, timeout = "10s")]
+async fn send_email(
+    data: EmailPayload,
+    #[inject] mailer: Arc<Mailer>,
+) -> Result<EmailResult, BoxError> {
+    mailer.send(&data).await
+}
+
+pub fn notification_tasks(codec: Arc<JsonCodec>, mailer: Arc<Mailer>) -> TaskRegistry {
+    let mut reg = TaskRegistry::new();
+    SendEmailTask::register(&mut reg, codec.clone(), SendEmailTask::new(mailer));
+    reg
+}
+```
+
+Then in your application, merge libraries into a single registry:
+
+```rust
+// application — combine libraries for a worker
+let codec = Arc::new(JsonCodec);
+let mut registry = TaskRegistry::new();
+registry.merge(billing_tasks(codec.clone(), stripe));
+registry.merge(notification_tasks(codec.clone(), mailer));
+
+let worker = PooledWorker::new("worker-1", backend, registry);
+```
+
+On ID collisions, the parent registry wins — existing entries are not overwritten. This lets you layer overrides on top of library defaults.
