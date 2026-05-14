@@ -25,7 +25,7 @@ sqlx = { version = "0.8"}
 
 # D1
 sqlx-d1 = { version = "0.3", optional = true }
-worker = { version = "*", optional = true }  # version by sqlx-d1
+worker = { version = "0.7", features = ["d1"], optional = true }  # pinned to match sqlx-d1
 
 [features]
 default = ["d1"]

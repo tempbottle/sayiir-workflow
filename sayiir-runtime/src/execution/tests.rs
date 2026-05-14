@@ -606,7 +606,9 @@ async fn test_prepare_run_creates_snapshot() {
 
     let snapshot = match outcome {
         crate::execution::PrepareRunOutcome::Fresh(s) => *s,
-        _ => panic!("expected Fresh outcome"),
+        crate::execution::PrepareRunOutcome::ExistingStatus(..) => {
+            panic!("expected Fresh outcome")
+        }
     };
 
     assert_eq!(snapshot.instance_id, "inst-1");

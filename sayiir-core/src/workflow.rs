@@ -1737,7 +1737,8 @@ impl<C, Input, M> Deref for SerializableWorkflow<C, Input, M> {
     clippy::uninlined_format_args,
     clippy::manual_let_else,
     clippy::too_many_lines,
-    clippy::items_after_statements
+    clippy::items_after_statements,
+    clippy::indexing_slicing
 )]
 mod tests {
     use crate::codec::{Decoder, Encoder, sealed};
