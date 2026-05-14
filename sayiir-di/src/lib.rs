@@ -135,6 +135,19 @@ impl Deps {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+
+    /// Move every entry from `other` into `self`. For any type present in both
+    /// containers, the entry from `other` wins.
+    ///
+    /// Use this to layer service containers — e.g. start from a base
+    /// container provided by a library, then merge in application-specific
+    /// services before passing the result to `workflow! { deps: … }`.
+    ///
+    /// Merging does not retroactively affect tasks that were already
+    /// constructed from this container (they hold their own clones).
+    pub fn merge(&mut self, other: Self) {
+        self.map.extend(other.map);
+    }
 }
 
 impl fmt::Debug for Deps {
@@ -161,6 +174,17 @@ impl DepsBuilder {
         T: Clone + Send + Sync + 'static,
     {
         self.inner.map.insert(TypeId::of::<T>(), Box::new(dep));
+        self
+    }
+
+    /// Merge every entry from `other` into the builder. For any type present
+    /// in both, the entry from `other` wins.
+    ///
+    /// Useful for layering: start from a pre-built library container and
+    /// extend it with application-specific services before calling `build`.
+    #[must_use]
+    pub fn merge(mut self, other: Deps) -> Self {
+        self.inner.merge(other);
         self
     }
 
@@ -310,5 +334,67 @@ mod tests {
         deps = Deps::builder().insert(ServiceA(0)).build();
         assert!(!deps.is_empty());
         assert_eq!(deps.len(), 1);
+    }
+
+    #[test]
+    fn merge_non_overlapping() {
+        let mut base = Deps::builder().insert(ServiceA(1)).build();
+        let extra = Deps::builder().insert(ServiceB("x")).build();
+        base.merge(extra);
+
+        assert_eq!(base.len(), 2);
+        assert_eq!(base.get::<ServiceA>(), Some(ServiceA(1)));
+        assert_eq!(base.get::<ServiceB>(), Some(ServiceB("x")));
+    }
+
+    #[test]
+    fn merge_overlap_other_wins() {
+        let mut base = Deps::builder().insert(ServiceA(1)).build();
+        let extra = Deps::builder().insert(ServiceA(99)).build();
+        base.merge(extra);
+
+        assert_eq!(base.len(), 1);
+        assert_eq!(base.get::<ServiceA>(), Some(ServiceA(99)));
+    }
+
+    #[test]
+    fn merge_empty_into_populated() {
+        let mut base = Deps::builder().insert(ServiceA(1)).build();
+        base.merge(Deps::new());
+        assert_eq!(base.len(), 1);
+        assert_eq!(base.get::<ServiceA>(), Some(ServiceA(1)));
+    }
+
+    #[test]
+    fn merge_populated_into_empty() {
+        let mut base = Deps::new();
+        let extra = Deps::builder().insert(ServiceA(7)).build();
+        base.merge(extra);
+        assert_eq!(base.len(), 1);
+        assert_eq!(base.get::<ServiceA>(), Some(ServiceA(7)));
+    }
+
+    #[test]
+    fn builder_merge_layers_containers() {
+        let library = Deps::builder().insert(ServiceA(1)).build();
+        let combined = Deps::builder()
+            .insert(ServiceB("local"))
+            .merge(library)
+            .build();
+
+        assert_eq!(combined.len(), 2);
+        assert_eq!(combined.get::<ServiceA>(), Some(ServiceA(1)));
+        assert_eq!(combined.get::<ServiceB>(), Some(ServiceB("local")));
+    }
+
+    #[test]
+    fn builder_merge_other_wins_on_overlap() {
+        let library = Deps::builder().insert(ServiceA(2)).build();
+        let combined = Deps::builder()
+            .insert(ServiceA(1))
+            .merge(library)
+            .build();
+
+        assert_eq!(combined.get::<ServiceA>(), Some(ServiceA(2)));
     }
 }

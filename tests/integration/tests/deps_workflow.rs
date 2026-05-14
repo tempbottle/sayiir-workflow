@@ -5,6 +5,7 @@
 
 use sayiir_core::deps::Deps;
 use sayiir_core::error::{BoxError, BuildError, BuildErrors};
+use sayiir_core::registry::TaskRegistry;
 use sayiir_core::task::CoreTask;
 use sayiir_core::workflow::SerializableWorkflow;
 use sayiir_macros::{task, workflow};
@@ -272,4 +273,98 @@ async fn workflow_with_deps_executes_in_process() {
         status,
         sayiir_core::workflow::WorkflowStatus::Completed
     ));
+}
+
+// ─── 6. register_from_deps for hand-rolled task libraries / workers ─────────
+
+#[test]
+fn register_from_deps_populates_registry() {
+    let codec = Arc::new(JsonCodec);
+    let deps = Deps::builder()
+        .insert(Arc::new(HttpClient {
+            base_url: "x".into(),
+        }))
+        .insert(Arc::new(Counter { factor: 4 }))
+        .build();
+
+    let mut registry = TaskRegistry::new();
+    DepsFetchTask::register_from_deps(&mut registry, codec.clone(), &deps).unwrap();
+    DepsMultiplyTask::register_from_deps(&mut registry, codec.clone(), &deps).unwrap();
+    DepsPlainTask::register_from_deps(&mut registry, codec, &deps).unwrap();
+
+    assert_eq!(registry.len(), 3);
+    assert!(registry.contains("deps_fetch"));
+    assert!(registry.contains("deps_multiply"));
+    assert!(registry.contains("deps_plain"));
+}
+
+#[test]
+fn register_from_deps_reports_missing() {
+    let codec = Arc::new(JsonCodec);
+    let deps = Deps::new(); // empty
+    let mut registry = TaskRegistry::new();
+
+    let err = DepsFetchTask::register_from_deps(&mut registry, codec, &deps)
+        .expect_err("missing HttpClient should be reported");
+    assert_eq!(err.len(), 1);
+    assert!(err[0].type_name.contains("HttpClient"));
+    // Registry must not be partially populated.
+    assert!(registry.is_empty());
+}
+
+#[test]
+fn register_from_deps_no_inject_task_succeeds_with_empty_deps() {
+    let codec = Arc::new(JsonCodec);
+    let deps = Deps::new();
+    let mut registry = TaskRegistry::new();
+
+    DepsPlainTask::register_from_deps(&mut registry, codec, &deps).unwrap();
+    assert!(registry.contains("deps_plain"));
+}
+
+#[test]
+fn merged_deps_used_by_workflow_macro() {
+    // Library-provided base container.
+    let base = Deps::builder()
+        .insert(Arc::new(HttpClient {
+            base_url: "https://api".into(),
+        }))
+        .build();
+
+    // Application layers on the Counter service before passing to workflow!.
+    let mut deps = base;
+    deps.merge(Deps::builder().insert(Arc::new(Counter { factor: 9 })).build());
+
+    let wf: BuildResult = workflow! {
+        name: "merged",
+        codec: JsonCodec,
+        deps: &deps,
+        steps: [deps_fetch, deps_multiply]
+    };
+    assert!(wf.is_ok(), "merged Deps should satisfy both inject types");
+}
+
+#[test]
+fn task_library_pattern() {
+    // Demonstrate the documented "task library" pattern: a function that
+    // returns a populated registry from a Deps container.
+    fn billing_tasks(
+        codec: Arc<JsonCodec>,
+        deps: &Deps,
+    ) -> Result<TaskRegistry, Vec<sayiir_core::deps::MissingDep>> {
+        let mut reg = TaskRegistry::new();
+        DepsFetchTask::register_from_deps(&mut reg, codec.clone(), deps)?;
+        DepsMultiplyTask::register_from_deps(&mut reg, codec, deps)?;
+        Ok(reg)
+    }
+
+    let deps = Deps::builder()
+        .insert(Arc::new(HttpClient {
+            base_url: "x".into(),
+        }))
+        .insert(Arc::new(Counter { factor: 1 }))
+        .build();
+
+    let reg = billing_tasks(Arc::new(JsonCodec), &deps).unwrap();
+    assert_eq!(reg.len(), 2);
 }

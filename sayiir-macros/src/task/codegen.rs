@@ -96,6 +96,38 @@ fn gen_impl(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
             {
                 registry.register_with_metadata(#task_id, codec, task, Self::metadata());
             }
+
+            /// Build the task from a `Deps` container and register it into a
+            /// `TaskRegistry`.
+            ///
+            /// Calls [`Self::verify_deps`] first so missing dependencies
+            /// surface as `Err(Vec<MissingDep>)` instead of panicking inside
+            /// `from_deps`. Use this when populating a registry for a
+            /// `PooledWorker` or a hand-rolled task library where the
+            /// `workflow!` macro is not the entry point.
+            ///
+            /// # Errors
+            ///
+            /// Returns the list of missing dependency types if the container
+            /// does not satisfy this task's `#[inject]` parameters.
+            pub fn register_from_deps<C>(
+                registry: &mut ::sayiir_core::registry::TaskRegistry,
+                codec: ::std::sync::Arc<C>,
+                deps: &::sayiir_core::deps::Deps,
+            ) -> ::std::result::Result<(), ::std::vec::Vec<::sayiir_core::deps::MissingDep>>
+            where
+                C: ::sayiir_core::codec::Codec
+                    + ::sayiir_core::codec::sealed::DecodeValue<#input_ty>
+                    + ::sayiir_core::codec::sealed::EncodeValue<#output_ty>
+                    + 'static,
+            {
+                let missing = Self::verify_deps(deps);
+                if !missing.is_empty() {
+                    return ::std::result::Result::Err(missing);
+                }
+                Self::register(registry, codec, Self::from_deps(deps));
+                ::std::result::Result::Ok(())
+            }
         }
     }
 }
