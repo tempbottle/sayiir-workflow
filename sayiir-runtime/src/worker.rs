@@ -252,9 +252,9 @@ where
             worker_id: worker_id.into(),
             backend: Arc::new(backend),
             registry: Arc::new(registry),
-            claim_ttl: Some(Duration::from_secs(5 * 60)), // Default 5 minutes
-            batch_size: NonZeroUsize::MIN,                // Default: fetch one task at a time (1)
-            aging_interval: Duration::from_secs(300),     // Default 5 minutes
+            claim_ttl: Some(Duration::from_mins(5)), // Default 5 minutes
+            batch_size: NonZeroUsize::MIN,           // Default: fetch one task at a time (1)
+            aging_interval: Duration::from_mins(5),  // Default 5 minutes
             tags: vec![],
         }
     }
@@ -1740,9 +1740,9 @@ where
             worker_id: None,
             backend,
             registry,
-            claim_ttl: Some(Duration::from_secs(5 * 60)),
+            claim_ttl: Some(Duration::from_mins(5)),
             batch_size: NonZeroUsize::MIN,
-            aging_interval: Duration::from_secs(300),
+            aging_interval: Duration::from_mins(5),
             tags: vec![],
         }
     }
