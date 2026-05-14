@@ -12,6 +12,48 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     generate(&def)
 }
 
+enum BuildMode<'a> {
+    New,
+    FromDeps(&'a syn::Expr),
+}
+
+impl BuildMode<'_> {
+    fn instance(&self, name: &syn::Ident) -> TokenStream {
+        match self {
+            Self::New => quote::quote! { #name::new() },
+            Self::FromDeps(_) => quote::quote! { #name::from_deps(__deps) },
+        }
+    }
+
+    /// Emit a verify-deps preamble. Returns empty when running in `New` mode.
+    ///
+    /// Runs *before* any task instance is constructed so missing deps surface
+    /// as `BuildErrors::MissingDep` rather than panicking at first invocation.
+    fn verify_block(&self, names: &[&syn::Ident]) -> TokenStream {
+        let Self::FromDeps(deps_expr) = self else {
+            return TokenStream::new();
+        };
+        let verify_stmts = names.iter().map(|name| {
+            quote::quote! {
+                for __m in #name::verify_deps(__deps) {
+                    __build_errors.push(::sayiir_core::error::BuildError::MissingDep {
+                        task_id: #name::task_id(),
+                        type_name: __m.type_name,
+                    });
+                }
+            }
+        });
+        quote::quote! {
+            let __deps: &::sayiir_core::deps::Deps = #deps_expr;
+            let mut __build_errors = ::sayiir_core::error::BuildErrors::new();
+            #(#verify_stmts)*
+            if !__build_errors.is_empty() {
+                return ::std::result::Result::Err(__build_errors);
+            }
+        }
+    }
+}
+
 fn generate(def: &WorkflowDef) -> syn::Result<TokenStream> {
     let id = &def.id;
     let codec = &def.codec;
@@ -31,70 +73,28 @@ fn generate(def: &WorkflowDef) -> syn::Result<TokenStream> {
     let task_refs = codegen::collect_task_refs(&def.steps);
     let aliases = codegen::collect_route_aliases(&def.steps);
 
-    // Builds the token expression that constructs a task instance for the
-    // given task ident — either `Task::new()` (no-deps mode) or
-    // `Task::from_deps(__deps)` (when `deps:` is present).
-    type InstanceFn = Box<dyn Fn(&syn::Ident) -> TokenStream>;
-
-    // When `deps:` is present, every #[task] is built via `from_deps`, and we
-    // emit verify_deps checks up-front so missing dependencies surface as a
-    // `BuildErrors::MissingDep` at construction time rather than panicking at
-    // first task invocation.
-    let (verify_block, instance_expr): (TokenStream, InstanceFn) = if let Some(deps_expr) =
-        &def.deps
-    {
-        let mut all_task_names: Vec<&syn::Ident> = Vec::new();
-        for name in &task_refs {
-            all_task_names.push(name);
-        }
-        for (name, _) in &aliases {
-            all_task_names.push(name);
-        }
-        // De-duplicate while preserving order.
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        all_task_names.retain(|n| seen.insert(n.to_string()));
-
-        let verify_stmts = all_task_names.iter().map(|name| {
-                quote::quote! {
-                    for __m in #name::verify_deps(__deps) {
-                        __build_errors.push(::sayiir_core::error::BuildError::MissingDep {
-                            task_id: <#name as ::sayiir_core::task::RegisterableTask>::task_id().to_string(),
-                            type_name: __m.type_name.to_string(),
-                        });
-                    }
-                }
-            });
-
-        let verify = quote::quote! {
-            let __deps: &::sayiir_core::deps::Deps = #deps_expr;
-            let mut __build_errors = ::sayiir_core::error::BuildErrors::new();
-            #(#verify_stmts)*
-            if !__build_errors.is_empty() {
-                return ::std::result::Result::Err(__build_errors);
-            }
-        };
-
-        let make_instance: InstanceFn =
-            Box::new(|name: &syn::Ident| quote::quote! { #name::from_deps(__deps) });
-
-        (verify, make_instance)
-    } else {
-        let make_instance: InstanceFn =
-            Box::new(|name: &syn::Ident| quote::quote! { #name::new() });
-        (quote::quote! {}, make_instance)
+    let mode = match &def.deps {
+        Some(expr) => BuildMode::FromDeps(expr),
+        None => BuildMode::New,
     };
 
-    // Auto-register all #[task] struct refs into the registry.
+    let verify_block = {
+        let mut all: Vec<&syn::Ident> = task_refs.to_vec();
+        all.extend(aliases.iter().map(|(name, _)| *name));
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        all.retain(|n| seen.insert(n.to_string()));
+        mode.verify_block(&all)
+    };
+
     let register_stmts = task_refs.iter().map(|name| {
-        let instance = instance_expr(name);
+        let instance = mode.instance(name);
         quote::quote! {
             #name::register(&mut __registry, __codec.clone(), #instance);
         }
     });
 
-    // Register route key function aliases (e.g. "route::key_fn").
     let alias_stmts = aliases.iter().map(|(name, alias_id)| {
-        let instance = instance_expr(name);
+        let instance = mode.instance(name);
         quote::quote! {
             __registry.register_with_metadata(
                 #alias_id,

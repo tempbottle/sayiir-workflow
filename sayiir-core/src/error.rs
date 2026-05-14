@@ -98,9 +98,9 @@ pub enum BuildError {
     #[error("Task '{task_id}': missing dependency `{type_name}` in Deps container")]
     MissingDep {
         /// The task that requires the dependency.
-        task_id: String,
+        task_id: &'static str,
         /// The Rust type name of the missing dependency (via `std::any::type_name`).
-        type_name: String,
+        type_name: &'static str,
     },
 }
 

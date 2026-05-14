@@ -237,8 +237,6 @@ impl std::error::Error for MissingDep {}
 #[inline(never)]
 #[allow(clippy::panic)]
 fn missing_panic(type_name: &'static str) -> ! {
-    // Documented panic behaviour of `Deps::expect`. `verify_deps` is the
-    // recoverable path; callers reach this function only when they skipped it.
     panic!(
         "Deps::expect: missing dependency `{type_name}` (verify_deps should have caught this at workflow build time)"
     )
@@ -390,10 +388,7 @@ mod tests {
     #[test]
     fn builder_merge_other_wins_on_overlap() {
         let library = Deps::builder().insert(ServiceA(2)).build();
-        let combined = Deps::builder()
-            .insert(ServiceA(1))
-            .merge(library)
-            .build();
+        let combined = Deps::builder().insert(ServiceA(1)).merge(library).build();
 
         assert_eq!(combined.get::<ServiceA>(), Some(ServiceA(2)));
     }

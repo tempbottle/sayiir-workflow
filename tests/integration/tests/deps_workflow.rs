@@ -16,6 +16,20 @@ use std::sync::Arc;
 
 type BuildResult = Result<SerializableWorkflow<JsonCodec, u32, ()>, BuildErrors>;
 
+fn expect_err(wf: BuildResult, ctx: &str) -> BuildErrors {
+    match wf {
+        Ok(_) => panic!("expected build to fail: {ctx}"),
+        Err(e) => e,
+    }
+}
+
+fn expect_ok(wf: BuildResult, ctx: &str) -> SerializableWorkflow<JsonCodec, u32, ()> {
+    match wf {
+        Ok(w) => w,
+        Err(e) => panic!("{ctx}: {e}"),
+    }
+}
+
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -30,7 +44,6 @@ struct Counter {
 
 #[task(id = "deps_fetch")]
 async fn deps_fetch(input: u32, #[inject] client: Arc<HttpClient>) -> Result<u32, BoxError> {
-    // Use the injected client (only to prove the dep was wired).
     Ok(input + client.base_url.len() as u32)
 }
 
@@ -99,44 +112,38 @@ fn workflow_macro_builds_with_deps() {
         .insert(Arc::new(Counter { factor: 5 }))
         .build();
 
-    let wf: BuildResult = workflow! {
-        name: "checkout",
-        codec: JsonCodec,
-        deps: &deps,
-        steps: [deps_fetch, deps_multiply, deps_plain]
-    };
-
-    if let Err(errs) = &wf {
-        panic!("build failed: {errs}");
-    }
+    expect_ok(
+        workflow! {
+            name: "checkout",
+            codec: JsonCodec,
+            deps: &deps,
+            steps: [deps_fetch, deps_multiply, deps_plain]
+        },
+        "checkout build",
+    );
 }
 
 #[test]
 fn workflow_macro_surfaces_missing_dep_as_build_error() {
     let deps = Deps::new(); // empty — both tasks have unmet inject deps.
 
-    let wf: BuildResult = workflow! {
-        name: "checkout-broken",
-        codec: JsonCodec,
-        deps: &deps,
-        steps: [deps_fetch, deps_multiply]
-    };
-
-    let errs = match wf {
-        Ok(_) => panic!("expected MissingDep BuildErrors"),
-        Err(e) => e,
-    };
+    let errs = expect_err(
+        workflow! {
+            name: "checkout-broken",
+            codec: JsonCodec,
+            deps: &deps,
+            steps: [deps_fetch, deps_multiply]
+        },
+        "both tasks missing deps",
+    );
     let collected: Vec<_> = errs.into_iter().collect();
     assert_eq!(collected.len(), 2);
 
     let task_ids: Vec<&str> = collected
         .iter()
-        .filter_map(|e| {
-            if let BuildError::MissingDep { task_id, .. } = e {
-                Some(task_id.as_str())
-            } else {
-                None
-            }
+        .filter_map(|e| match e {
+            BuildError::MissingDep { task_id, .. } => Some(*task_id),
+            _ => None,
         })
         .collect();
     assert!(task_ids.contains(&"deps_fetch"));
@@ -158,22 +165,20 @@ fn workflow_macro_partial_missing_dep() {
         }))
         .build();
 
-    let wf: BuildResult = workflow! {
-        name: "checkout-partial",
-        codec: JsonCodec,
-        deps: &deps,
-        steps: [deps_fetch, deps_multiply]
-    };
-
-    let errs = match wf {
-        Ok(_) => panic!("expected MissingDep for Counter"),
-        Err(e) => e,
-    };
+    let errs = expect_err(
+        workflow! {
+            name: "checkout-partial",
+            codec: JsonCodec,
+            deps: &deps,
+            steps: [deps_fetch, deps_multiply]
+        },
+        "Counter missing",
+    );
     let collected: Vec<_> = errs.into_iter().collect();
     assert_eq!(collected.len(), 1);
     match &collected[0] {
         BuildError::MissingDep { task_id, type_name } => {
-            assert_eq!(task_id, "deps_multiply");
+            assert_eq!(*task_id, "deps_multiply");
             assert!(type_name.contains("Counter"));
         }
         other => panic!("unexpected error: {other:?}"),
@@ -210,26 +215,25 @@ fn workflow_macro_flow_shares_deps() {
         .insert(Arc::new(Counter { factor: 2 }))
         .build();
 
-    let child: SerializableWorkflow<JsonCodec, u32, ()> = match workflow! {
-        name: "child",
-        codec: JsonCodec,
-        deps: &deps,
-        steps: [deps_multiply]
-    } {
-        Ok(wf) => wf,
-        Err(e) => panic!("child build failed: {e}"),
-    };
+    let child = expect_ok(
+        workflow! {
+            name: "child",
+            codec: JsonCodec,
+            deps: &deps,
+            steps: [deps_multiply]
+        },
+        "child build",
+    );
 
-    let parent: BuildResult = workflow! {
-        name: "parent",
-        codec: JsonCodec,
-        deps: &deps,
-        steps: [deps_fetch, flow child]
-    };
-
-    if let Err(e) = &parent {
-        panic!("parent build failed: {e}");
-    }
+    expect_ok(
+        workflow! {
+            name: "parent",
+            codec: JsonCodec,
+            deps: &deps,
+            steps: [deps_fetch, flow child]
+        },
+        "parent build",
+    );
 }
 
 // ─── 4. Backward compatibility: workflow! without deps still works ──────────
@@ -256,15 +260,15 @@ async fn workflow_with_deps_executes_in_process() {
         .insert(Arc::new(Counter { factor: 10 }))
         .build();
 
-    let serializable: SerializableWorkflow<JsonCodec, u32, ()> = match workflow! {
-        name: "exec",
-        codec: JsonCodec,
-        deps: &deps,
-        steps: [deps_fetch, deps_multiply, deps_plain]
-    } {
-        Ok(wf) => wf,
-        Err(e) => panic!("build failed: {e}"),
-    };
+    let serializable = expect_ok(
+        workflow! {
+            name: "exec",
+            codec: JsonCodec,
+            deps: &deps,
+            steps: [deps_fetch, deps_multiply, deps_plain]
+        },
+        "exec build",
+    );
 
     let runner = InProcessRunner;
     // 5 + 3 = 8, 8 * 10 = 80, 80 + 1 = 81
@@ -333,7 +337,11 @@ fn merged_deps_used_by_workflow_macro() {
 
     // Application layers on the Counter service before passing to workflow!.
     let mut deps = base;
-    deps.merge(Deps::builder().insert(Arc::new(Counter { factor: 9 })).build());
+    deps.merge(
+        Deps::builder()
+            .insert(Arc::new(Counter { factor: 9 }))
+            .build(),
+    );
 
     let wf: BuildResult = workflow! {
         name: "merged",
