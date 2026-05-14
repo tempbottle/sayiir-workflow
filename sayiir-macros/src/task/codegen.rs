@@ -13,6 +13,7 @@ pub fn generate(parsed: &ParsedTask) -> TokenStream {
     let core_task_impl = gen_core_task(parsed, &name);
     let registerable_impl = gen_registerable_task(parsed, &name);
     let default_impl = gen_default(parsed, &name);
+    let deps_impl = gen_deps_impl(parsed, &name);
     let original_fn = &parsed.original_fn;
 
     quote! {
@@ -21,6 +22,7 @@ pub fn generate(parsed: &ParsedTask) -> TokenStream {
         #core_task_impl
         #registerable_impl
         #default_impl
+        #deps_impl
         #original_fn
     }
 }
@@ -185,6 +187,80 @@ fn gen_default(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
         }
     } else {
         quote! {}
+    }
+}
+
+/// Generate `from_deps` and `verify_deps` constructors for use with the
+/// `workflow!` macro's `deps:` field.
+///
+/// Emitted uniformly for **every** task:
+/// - No-inject tasks: `from_deps` returns `Self::default()`, `verify_deps`
+///   returns an empty `Vec<MissingDep>`.
+/// - Inject tasks: each `#[inject]` param resolves via `deps.expect::<T>()`,
+///   and `verify_deps` reports any missing types.
+fn gen_deps_impl(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
+    if parsed.inject_params.is_empty() {
+        quote! {
+            impl #name {
+                /// Construct from a `Deps` container.
+                ///
+                /// This task has no `#[inject]` parameters, so it is equivalent
+                /// to `Self::default()`.
+                #[must_use]
+                pub fn from_deps(_deps: &::sayiir_core::deps::Deps) -> Self {
+                    <Self as ::std::default::Default>::default()
+                }
+
+                /// Verify that the `Deps` container holds every dependency this
+                /// task requires. No-inject tasks always succeed.
+                #[must_use]
+                pub fn verify_deps(_deps: &::sayiir_core::deps::Deps) -> ::std::vec::Vec<::sayiir_core::deps::MissingDep> {
+                    ::std::vec::Vec::new()
+                }
+            }
+        }
+    } else {
+        let field_inits = parsed.inject_params.iter().map(|p| {
+            let ident = &p.ident;
+            let ty = &p.ty;
+            quote! { #ident: deps.expect::<#ty>() }
+        });
+        let verify_checks = parsed.inject_params.iter().map(|p| {
+            let ty = &p.ty;
+            quote! {
+                if !deps.contains::<#ty>() {
+                    missing.push(::sayiir_core::deps::MissingDep::of::<#ty>());
+                }
+            }
+        });
+
+        quote! {
+            impl #name {
+                /// Construct this task by resolving every `#[inject]` parameter
+                /// from the provided `Deps` container.
+                ///
+                /// # Panics
+                ///
+                /// Panics if any required dependency is absent. Prefer
+                /// [`Self::verify_deps`] at build time so missing deps surface
+                /// as a `BuildErrors::MissingDep` rather than a runtime panic.
+                #[must_use]
+                pub fn from_deps(deps: &::sayiir_core::deps::Deps) -> Self {
+                    Self {
+                        #(#field_inits,)*
+                    }
+                }
+
+                /// Verify that the `Deps` container holds every dependency this
+                /// task requires. Returns one `MissingDep` per missing type.
+                #[must_use]
+                pub fn verify_deps(deps: &::sayiir_core::deps::Deps) -> ::std::vec::Vec<::sayiir_core::deps::MissingDep> {
+                    let mut missing = ::std::vec::Vec::new();
+                    #(#verify_checks)*
+                    missing
+                }
+            }
+        }
     }
 }
 

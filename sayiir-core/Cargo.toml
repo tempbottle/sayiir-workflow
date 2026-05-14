@@ -22,6 +22,7 @@ tokio = ["dep:tokio"]
 rkyv = ["dep:rkyv", "dep:bytecheck"]
 
 [dependencies]
+sayiir-di = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, optional = true }

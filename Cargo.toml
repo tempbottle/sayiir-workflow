@@ -4,6 +4,7 @@ members = [
     "sayiir-persistence",
     "sayiir-postgres",
     "sayiir-d1",
+    "sayiir-di",
     "sayiir-runtime",
     "sayiir-macros",
     "sayiir-py",
@@ -35,6 +36,7 @@ sayiir-persistence = { version = "0.4.0", path = "sayiir-persistence" }
 sayiir-runtime = { version = "0.4.0", path = "sayiir-runtime", default-features = false }
 sayiir-postgres = { version = "0.4.0", path = "sayiir-postgres" }
 sayiir-d1 = { version = "0.4.0", path = "sayiir-d1" }
+sayiir-di = { version = "0.4.0", path = "sayiir-di" }
 sayiir-macros = { version = "0.4.0", path = "sayiir-macros" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [

@@ -87,5 +87,16 @@ pub mod task;
 pub mod task_claim;
 pub mod workflow;
 
+/// Re-export of [`sayiir-di`](https://docs.rs/sayiir-di) types.
+///
+/// This module exists so the `#[task]` macro and `workflow! { deps: … }`
+/// expansion can resolve `Deps`, `DepsBuilder`, and `MissingDep` through the
+/// canonical `::sayiir_core::deps::…` path. Consuming crates therefore do not
+/// need to add a separate `sayiir-di` dependency entry — having `sayiir-core`
+/// (which they already need for `#[task]` codegen) is enough.
+pub mod deps {
+    pub use sayiir_di::{Deps, DepsBuilder, MissingDep};
+}
+
 pub use loop_result::LoopResult;
 pub use workflow::MaxIterationsPolicy;

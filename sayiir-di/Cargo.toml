@@ -1,0 +1,21 @@
+[package]
+name = "sayiir-di"
+description = "Type-keyed dependency injection container for Sayiir workflows and tasks"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+categories = ["asynchronous", "concurrency", "rust-patterns"]
+keywords.workspace = true
+documentation = "https://docs.rs/sayiir-di"
+
+[lib]
+name = "sayiir_di"
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]

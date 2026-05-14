@@ -88,6 +88,20 @@ pub enum BuildError {
         /// The hash found in the serialized state.
         found: String,
     },
+
+    /// A `#[task]` requires a dependency that is missing from the `Deps`
+    /// container passed to `workflow! { deps: … }`.
+    ///
+    /// Emitted by `verify_deps` codegen at workflow construction time, so the
+    /// failure surfaces as a `BuildErrors` rather than panicking at first task
+    /// invocation.
+    #[error("Task '{task_id}': missing dependency `{type_name}` in Deps container")]
+    MissingDep {
+        /// The task that requires the dependency.
+        task_id: String,
+        /// The Rust type name of the missing dependency (via `std::any::type_name`).
+        type_name: String,
+    },
 }
 
 /// A collection of [`BuildError`]s accumulated during workflow construction.
