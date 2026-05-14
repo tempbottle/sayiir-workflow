@@ -1737,7 +1737,8 @@ impl<C, Input, M> Deref for SerializableWorkflow<C, Input, M> {
     clippy::uninlined_format_args,
     clippy::manual_let_else,
     clippy::too_many_lines,
-    clippy::items_after_statements
+    clippy::items_after_statements,
+    clippy::indexing_slicing
 )]
 mod tests {
     use crate::codec::{Decoder, Encoder, sealed};
@@ -1816,16 +1817,11 @@ mod tests {
         let mut current = workflow.continuation();
         let mut task_ids = vec![];
 
-        loop {
-            match current {
-                crate::workflow::WorkflowContinuation::Task { id, next, .. } => {
-                    task_ids.push(id.clone());
-                    match next {
-                        Some(next_box) => current = next_box.as_ref(),
-                        None => break,
-                    }
-                }
-                _ => break,
+        while let crate::workflow::WorkflowContinuation::Task { id, next, .. } = current {
+            task_ids.push(id.clone());
+            match next {
+                Some(next_box) => current = next_box.as_ref(),
+                None => break,
             }
         }
 

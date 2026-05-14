@@ -63,6 +63,7 @@ impl From<NapiTaskMetadata> for TaskMetadata {
 /// Retrieve via `getTaskContext()`.
 #[napi(object)]
 #[derive(Clone)]
+#[allow(dead_code)] // Exposed via #[napi] for N-API runtime
 pub struct NapiTaskExecutionContext {
     pub workflow_id: String,
     pub instance_id: String,
@@ -103,6 +104,7 @@ impl From<TaskExecutionContext> for NapiTaskExecutionContext {
 ///
 /// Returns `null` if called outside of a task execution.
 #[napi]
+#[allow(dead_code)] // Exposed via #[napi] for N-API runtime
 pub fn get_task_context() -> Option<NapiTaskExecutionContext> {
     sayiir_core::context::get_task_context().map(Into::into)
 }
