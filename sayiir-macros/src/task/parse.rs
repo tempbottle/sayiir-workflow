@@ -78,6 +78,11 @@ pub struct ParsedTask {
 }
 
 impl ParsedTask {
+    /// Whether this task has any `#[inject]` parameters.
+    pub fn has_injects(&self) -> bool {
+        !self.inject_params.is_empty()
+    }
+
     pub fn parse(attrs: TaskAttrs, mut item_fn: ItemFn) -> syn::Result<Self> {
         // Validation 1: must be async
         if item_fn.sig.asyncness.is_none() {

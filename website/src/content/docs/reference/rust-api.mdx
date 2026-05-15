@@ -35,11 +35,13 @@ Core domain types and traits. Runtime-agnostic — no persistence, no execution 
 - `TaskExecutionContext` — Read-only context available to running tasks (workflow ID, instance ID, task ID, metadata)
 - `WorkflowSnapshot` — Checkpoint of in-flight execution state
 - `TaskRegistry` — Name → factory map for task deserialization
+- `Deps` / `DepsBuilder` / `MissingDep` (in `sayiir_core::deps`) — type-keyed dependency-injection container used by `#[task]` and `workflow! { deps: … }`
 
 **Key Traits:**
 - `CoreTask` — Task execution trait (input → output)
 - `Codec` — Pluggable serialization (JSON, rkyv, etc.)
 - `BranchKey` — Typed routing key for conditional branching
+- `DepsInjectable` — auto-implemented by `#[task]`; drives `TaskRegistry::register_from_deps` and the `workflow! { deps: … }` expansion
 
 ### sayiir-persistence
 
@@ -102,6 +104,7 @@ use sayiir_runtime::prelude::*;
 - `TaskRegistry`
 - `CheckpointingRunner`, `InProcessRunner`, `PooledWorker`, `PooledWorkerBuilder`, `WorkerHandle`, `WorkflowClient`, `WorkflowRunExt`
 - `InMemoryBackend`, `PersistentBackend`
+- `Deps`, `DepsBuilder`, `MissingDep`
 - `JsonCodec` (if `json` feature enabled)
 - `RkyvCodec` (if `rkyv` feature enabled)
 - `BranchKey` trait
@@ -160,9 +163,14 @@ async fn charge(
     stripe.charge(&order).await
 }
 
-// Usage
+// Manual construction (single task, no macro):
 let stripe = Arc::new(StripeClient::new("sk_test_..."));
 let charge_task = ChargeTask::new(stripe);
+
+// Or via Deps, resolved by type — required when used as a `task_name` step in
+// the `workflow!` macro (see the `deps:` field below).
+let deps = Deps::builder().insert(stripe.clone()).build();
+let charge_task = ChargeTask::from_deps(&deps);
 ```
 
 ### Attribute Options
@@ -205,16 +213,28 @@ The macro generates a PascalCase struct with a `Task` suffix from the function n
 
 The struct includes:
 - `new()` constructor with positional args for injected dependencies
+- `from_deps(&Deps)` — construct by resolving every `#[inject]` parameter from a `Deps` container. Used by `workflow! { deps: … }`.
+- `verify_deps(&Deps) -> Vec<MissingDep>` — report which `#[inject]` types are absent from the container, without constructing the task.
+- `register()` — register a hand-constructed instance into a `TaskRegistry`.
 - `task_id()` — returns the task ID (`id` attribute or function name)
 - `metadata()` — returns `TaskMetadata` from attributes
-- `register()` method for `TaskRegistry` integration
 - `CoreTask` trait implementation
+- `DepsInjectable` trait implementation (delegates to `from_deps` / `verify_deps`). Enables `TaskRegistry::register_from_deps::<T, _>(codec, &deps)` for task-library and worker setup.
 
 The original function is preserved for direct use/testing.
 
 ## workflow! Macro
 
-Build a workflow pipeline with a concise DSL. The macro automatically registers `#[task]`-annotated functions — no manual `registry.register(...)` calls needed. Uses named fields: `name` and `steps` (with optional `codec` and `registry`):
+Build a workflow pipeline with a concise DSL. The macro automatically registers `#[task]`-annotated functions — no manual `registry.register(...)` calls needed. Uses named fields:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Workflow ID (string literal) |
+| `steps` | yes | Pipeline (bracketed, comma-separated) |
+| `codec` | no | Codec type path (default: `JsonCodec`) |
+| `deps` | no | `&Deps` container — when set, tasks are built via `Task::from_deps(deps)` and missing dependencies surface as `BuildError::MissingDep` entries inside the returned `BuildErrors` at construction time. |
+| `registry` | no | Pre-built `TaskRegistry` to merge into (default: `TaskRegistry::new()`) |
+| `metadata` | no | User metadata wrapped in `Arc<_>` (default: `Arc::new(())`) |
 
 ### Basic Syntax
 
@@ -222,6 +242,20 @@ Build a workflow pipeline with a concise DSL. The macro automatically registers 
 let workflow = workflow! {
     name: "workflow-id",
     steps: [task_a, task_b, task_c]
+}.unwrap();
+```
+
+With injected dependencies:
+
+```rust
+let deps = Deps::builder()
+    .insert(Arc::new(StripeClient::new("sk_test_...")))
+    .build();
+
+let workflow = workflow! {
+    name: "checkout",
+    deps: &deps,
+    steps: [validate, charge, send_email]
 }.unwrap();
 ```
 
@@ -272,6 +306,10 @@ let workflow = workflow! {
     steps: [double(x: i32) { Ok(x * 2) }, triple(x: i32) { Ok(x * 3) }]
 }.unwrap();
 ```
+
+:::caution[Inline tasks can't be injected]
+Inline tasks are anonymous closures, so they have no `#[inject]` syntax and the `deps:` field does not see them. If an inline task needs a shared service, promote it to a named `#[task]` function — that gives you `from_deps` resolution and lets the macro auto-register it.
+:::
 
 Durable delay:
 
@@ -336,7 +374,103 @@ Each branch arm uses `[task, task]` syntax for task chains. The `_` arm is the o
 
 ### Returns
 
-A `Result<SerializableWorkflow<C, Input, ()>, BuildError>` expression.
+A `Result<SerializableWorkflow<C, Input, ()>, BuildErrors>` expression. When `deps:` is set, missing dependencies appear as `BuildError::MissingDep` entries inside the returned `BuildErrors`.
+
+## Deps
+
+Type-keyed dependency-injection container, re-exported as `sayiir_runtime::Deps` and (with builder/error types) `sayiir_core::deps`. The `#[task]` macro generates `from_deps` / `verify_deps` against it, and `workflow! { deps: &deps }` consumes it.
+
+### Building
+
+```rust
+use sayiir_runtime::prelude::*;
+use std::sync::Arc;
+
+let deps = Deps::builder()
+    .insert(Arc::new(StripeClient::new("sk_test_...")))
+    .insert(Arc::new(Mailer::new(/* … */)))
+    .insert(HttpClient::default())   // any Clone + Send + Sync + 'static
+    .build();
+```
+
+The container stores one value per Rust type. Inserting a second value of the same type replaces the first. Lookup is by exact `TypeId` — there is no coercion to traits.
+
+### Resolving
+
+| Method | Returns | When to use |
+|--------|---------|-------------|
+| `get::<T>()` | `Option<T>` | You can handle "absent" gracefully. |
+| `try_get::<T>()` | `Result<T, MissingDep>` | You want a structured error. |
+| `expect::<T>()` | `T` (panics on miss) | Used by macro-generated `from_deps`; rely on `verify_deps` to catch misses at build time. |
+| `contains::<T>()` | `bool` | Cheap presence check. |
+
+All resolution methods clone the stored value, so wrap shared singletons in `Arc<…>` before inserting.
+
+### Layering containers
+
+`Deps::merge(other)` moves every entry from `other` into `self`; entries in `other` win on type collision. `DepsBuilder::merge(other)` is the same operation expressed mid-build. Use this to combine a library-provided base container with application-specific services:
+
+```rust
+let base = library::deps();                          // Deps from a library
+
+// Layer at build time:
+let combined = Deps::builder()
+    .merge(base)                                     // pull in everything
+    .insert(Arc::new(AppLogger::new()))              // add/override
+    .build();
+
+// Or extend an existing container in place:
+let mut deps = library::deps();
+deps.merge(application::deps());
+```
+
+### Errors
+
+`MissingDep { type_name: &'static str }` — the type name of an absent dependency. Returned by `Deps::try_get` and listed by `Task::verify_deps`.
+
+`BuildError::MissingDep { task_id: &'static str, type_name: &'static str }` — the build-time variant the `workflow!` macro emits when `verify_deps` reports a miss. Both fields come from `const fn`s (`Task::task_id()` and `std::any::type_name`), so they avoid per-error allocation. Lives in `sayiir_core::error::BuildError`.
+
+`BuildError::RegistryDepsConflict { task_id: &'static str }` — emitted when the same task is provided by both `registry:` (pre-built instance) and `deps:` (would be auto-registered via `from_deps`). The macro refuses to silently pick one; drop the duplicate from either source to resolve.
+
+### Generic registration via `DepsInjectable`
+
+Every `#[task]` struct gets an auto-generated `impl DepsInjectable`, which lets `TaskRegistry` populate itself generically — useful for hand-rolled task libraries and `PooledWorker` setup where the `workflow!` macro is not the entry point:
+
+```rust
+use sayiir_runtime::prelude::*;   // brings DepsInjectable into scope
+
+let mut reg = TaskRegistry::new();
+reg.register_from_deps::<ChargeTask, _>(codec.clone(), &deps)?;
+reg.register_from_deps::<RefundTask, _>(codec,         &deps)?;
+```
+
+The method calls `T::verify_deps` first and returns `Err(Vec<MissingDep>)` before any mutation, so the registry is never left half-populated on failure. The `_` for the `Codec` parameter is inferred from the surrounding context.
+
+### `registry:` × `deps:` interaction
+
+The two fields cover non-overlapping needs and the macro enforces that:
+
+- Use **`deps:` alone** when every `#[task]` in `steps:` has its services resolvable from the container. This is the most common shape.
+- Use **`registry:` alone** when you want to override a `#[task]`'s default `new()`-built instance (e.g. for testing) or merge in an externally-built task library. The pre-built instance wins via the existing dedup.
+- Pass **both** only when each task lives in exactly one source. If a task ID appears in both, the build returns `BuildError::RegistryDepsConflict { task_id }` — pick one source and re-run.
+
+### Sub-workflow composition
+
+The same `Deps` can build a child workflow and then be passed to the parent — `flow` works unchanged:
+
+```rust
+let refund = workflow! {
+    name: "refund",
+    deps: &deps,
+    steps: [lookup, reverse_charge]
+}.unwrap();
+
+let checkout = workflow! {
+    name: "checkout",
+    deps: &deps,
+    steps: [fetch, charge, flow refund]
+}.unwrap();
+```
 
 ## TaskRegistry
 
