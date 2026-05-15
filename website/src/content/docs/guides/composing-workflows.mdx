@@ -258,7 +258,7 @@ The engine checks for duplicate task IDs across the merged workflow tree. If a p
 
 Beyond inlining child workflows, you can build standalone **task libraries** — reusable collections of tasks that you merge into any workflow or worker. This is useful when multiple workflows share the same tasks but don't share the same pipeline structure.
 
-Each `#[task]` exposes a `register_from_deps(registry, codec, &deps)` method. Pair it with a shared `Deps` container so library functions take services by type rather than threading each service through positional arguments:
+`TaskRegistry::register_from_deps::<T, C>(codec, &deps)` builds and registers a `#[task]` in one call. Pair it with a shared `Deps` container so library functions take services by type rather than threading each service through positional arguments:
 
 ```rust
 use sayiir_runtime::prelude::*;
@@ -287,8 +287,8 @@ pub fn billing_tasks(
     deps: &Deps,
 ) -> Result<TaskRegistry, Vec<MissingDep>> {
     let mut reg = TaskRegistry::new();
-    ChargeTask::register_from_deps(&mut reg, codec.clone(), deps)?;
-    RefundTask::register_from_deps(&mut reg, codec, deps)?;
+    reg.register_from_deps::<ChargeTask, _>(codec.clone(), deps)?;
+    reg.register_from_deps::<RefundTask, _>(codec, deps)?;
     Ok(reg)
 }
 ```
@@ -308,12 +308,12 @@ pub fn notification_tasks(
     deps: &Deps,
 ) -> Result<TaskRegistry, Vec<MissingDep>> {
     let mut reg = TaskRegistry::new();
-    SendEmailTask::register_from_deps(&mut reg, codec, deps)?;
+    reg.register_from_deps::<SendEmailTask, _>(codec, deps)?;
     Ok(reg)
 }
 ```
 
-`register_from_deps` calls `verify_deps` first, so a missing `Arc<StripeClient>` or `Arc<Mailer>` is reported as `Err(Vec<MissingDep>)` before any task is added — the registry is never left partially populated.
+`register_from_deps` calls `DepsInjectable::verify_deps` first, so a missing `Arc<StripeClient>` or `Arc<Mailer>` is reported as `Err(Vec<MissingDep>)` before any task is added — the registry is never left partially populated.
 
 Then in your application, build one shared `Deps` and merge the library registries:
 

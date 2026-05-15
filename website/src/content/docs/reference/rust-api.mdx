@@ -35,11 +35,13 @@ Core domain types and traits. Runtime-agnostic — no persistence, no execution 
 - `TaskExecutionContext` — Read-only context available to running tasks (workflow ID, instance ID, task ID, metadata)
 - `WorkflowSnapshot` — Checkpoint of in-flight execution state
 - `TaskRegistry` — Name → factory map for task deserialization
+- `Deps` / `DepsBuilder` / `MissingDep` (in `sayiir_core::deps`) — type-keyed dependency-injection container used by `#[task]` and `workflow! { deps: … }`
 
 **Key Traits:**
 - `CoreTask` — Task execution trait (input → output)
 - `Codec` — Pluggable serialization (JSON, rkyv, etc.)
 - `BranchKey` — Typed routing key for conditional branching
+- `DepsInjectable` — auto-implemented by `#[task]`; drives `TaskRegistry::register_from_deps` and the `workflow! { deps: … }` expansion
 
 ### sayiir-persistence
 
@@ -88,15 +90,6 @@ Procedural macros that eliminate boilerplate.
 - `#[task]` — Transform an async function into a `CoreTask` implementation
 - `#[derive(BranchKey)]` — Derive `BranchKey` for fieldless enums
 - `workflow!` — Build workflows with a concise DSL
-
-### sayiir-di
-
-Type-keyed dependency-injection container shared by `#[task]` and `workflow!`. Re-exported by `sayiir-core` (as `sayiir_core::deps`) and `sayiir-runtime`, so most users do not need to add this crate directly.
-
-**Key Types:**
-- `Deps` — type-keyed service container
-- `DepsBuilder` — fluent builder
-- `MissingDep` — error type returned by `try_get` and listed by `Task::verify_deps`
 
 ## Prelude
 
@@ -223,10 +216,10 @@ The struct includes:
 - `from_deps(&Deps)` — construct by resolving every `#[inject]` parameter from a `Deps` container. Used by `workflow! { deps: … }`.
 - `verify_deps(&Deps) -> Vec<MissingDep>` — report which `#[inject]` types are absent from the container, without constructing the task.
 - `register()` — register a hand-constructed instance into a `TaskRegistry`.
-- `register_from_deps(&mut reg, codec, &deps) -> Result<(), Vec<MissingDep>>` — verify, build, and register in one call. Used by task libraries and `PooledWorker` setup where the `workflow!` macro is not the entry point.
 - `task_id()` — returns the task ID (`id` attribute or function name)
 - `metadata()` — returns `TaskMetadata` from attributes
 - `CoreTask` trait implementation
+- `DepsInjectable` trait implementation (delegates to `from_deps` / `verify_deps`). Enables `TaskRegistry::register_from_deps::<T, _>(codec, &deps)` for task-library and worker setup.
 
 The original function is preserved for direct use/testing.
 
@@ -239,7 +232,7 @@ Build a workflow pipeline with a concise DSL. The macro automatically registers 
 | `name` | yes | Workflow ID (string literal) |
 | `steps` | yes | Pipeline (bracketed, comma-separated) |
 | `codec` | no | Codec type path (default: `JsonCodec`) |
-| `deps` | no | `&Deps` container — when set, tasks are built via `Task::from_deps(deps)` and missing dependencies surface as `BuildErrors::MissingDep` at construction time. |
+| `deps` | no | `&Deps` container — when set, tasks are built via `Task::from_deps(deps)` and missing dependencies surface as `BuildError::MissingDep` entries inside the returned `BuildErrors` at construction time. |
 | `registry` | no | Pre-built `TaskRegistry` to merge into (default: `TaskRegistry::new()`) |
 | `metadata` | no | User metadata wrapped in `Arc<_>` (default: `Arc::new(())`) |
 
@@ -313,6 +306,10 @@ let workflow = workflow! {
     steps: [double(x: i32) { Ok(x * 2) }, triple(x: i32) { Ok(x * 3) }]
 }.unwrap();
 ```
+
+:::caution[Inline tasks can't be injected]
+Inline tasks are anonymous closures, so they have no `#[inject]` syntax and the `deps:` field does not see them. If an inline task needs a shared service, promote it to a named `#[task]` function — that gives you `from_deps` resolution and lets the macro auto-register it.
+:::
 
 Durable delay:
 
@@ -432,6 +429,30 @@ deps.merge(application::deps());
 `MissingDep { type_name: &'static str }` — the type name of an absent dependency. Returned by `Deps::try_get` and listed by `Task::verify_deps`.
 
 `BuildError::MissingDep { task_id: &'static str, type_name: &'static str }` — the build-time variant the `workflow!` macro emits when `verify_deps` reports a miss. Both fields come from `const fn`s (`Task::task_id()` and `std::any::type_name`), so they avoid per-error allocation. Lives in `sayiir_core::error::BuildError`.
+
+`BuildError::RegistryDepsConflict { task_id: &'static str }` — emitted when the same task is provided by both `registry:` (pre-built instance) and `deps:` (would be auto-registered via `from_deps`). The macro refuses to silently pick one; drop the duplicate from either source to resolve.
+
+### Generic registration via `DepsInjectable`
+
+Every `#[task]` struct gets an auto-generated `impl DepsInjectable`, which lets `TaskRegistry` populate itself generically — useful for hand-rolled task libraries and `PooledWorker` setup where the `workflow!` macro is not the entry point:
+
+```rust
+use sayiir_runtime::prelude::*;   // brings DepsInjectable into scope
+
+let mut reg = TaskRegistry::new();
+reg.register_from_deps::<ChargeTask, _>(codec.clone(), &deps)?;
+reg.register_from_deps::<RefundTask, _>(codec,         &deps)?;
+```
+
+The method calls `T::verify_deps` first and returns `Err(Vec<MissingDep>)` before any mutation, so the registry is never left half-populated on failure. The `_` for the `Codec` parameter is inferred from the surrounding context.
+
+### `registry:` × `deps:` interaction
+
+The two fields cover non-overlapping needs and the macro enforces that:
+
+- Use **`deps:` alone** when every `#[task]` in `steps:` has its services resolvable from the container. This is the most common shape.
+- Use **`registry:` alone** when you want to override a `#[task]`'s default `new()`-built instance (e.g. for testing) or merge in an externally-built task library. The pre-built instance wins via the existing dedup.
+- Pass **both** only when each task lives in exactly one source. If a task ID appears in both, the build returns `BuildError::RegistryDepsConflict { task_id }` — pick one source and re-run.
 
 ### Sub-workflow composition
 

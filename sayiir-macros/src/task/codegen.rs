@@ -31,7 +31,7 @@ pub fn generate(parsed: &ParsedTask) -> TokenStream {
 fn gen_struct(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
     let vis = &parsed.vis;
 
-    if parsed.inject_params.is_empty() {
+    if !parsed.has_injects() {
         quote! { #vis struct #name; }
     } else {
         let fields = parsed.inject_params.iter().map(|p| {
@@ -55,7 +55,7 @@ fn gen_impl(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
     let output_ty = &parsed.output_type;
     let metadata_body = gen_metadata_body(parsed);
 
-    let new_fn = if parsed.inject_params.is_empty() {
+    let new_fn = if !parsed.has_injects() {
         quote! { pub fn new() -> Self { Self } }
     } else {
         let params = parsed.inject_params.iter().map(|p| {
@@ -95,38 +95,6 @@ fn gen_impl(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
                     + 'static,
             {
                 registry.register_with_metadata(#task_id, codec, task, Self::metadata());
-            }
-
-            /// Build the task from a `Deps` container and register it into a
-            /// `TaskRegistry`.
-            ///
-            /// Calls [`Self::verify_deps`] first so missing dependencies
-            /// surface as `Err(Vec<MissingDep>)` instead of panicking inside
-            /// `from_deps`. Use this when populating a registry for a
-            /// `PooledWorker` or a hand-rolled task library where the
-            /// `workflow!` macro is not the entry point.
-            ///
-            /// # Errors
-            ///
-            /// Returns the list of missing dependency types if the container
-            /// does not satisfy this task's `#[inject]` parameters.
-            pub fn register_from_deps<C>(
-                registry: &mut ::sayiir_core::registry::TaskRegistry,
-                codec: ::std::sync::Arc<C>,
-                deps: &::sayiir_core::deps::Deps,
-            ) -> ::std::result::Result<(), ::std::vec::Vec<::sayiir_core::deps::MissingDep>>
-            where
-                C: ::sayiir_core::codec::Codec
-                    + ::sayiir_core::codec::sealed::DecodeValue<#input_ty>
-                    + ::sayiir_core::codec::sealed::EncodeValue<#output_ty>
-                    + 'static,
-            {
-                let missing = Self::verify_deps(deps);
-                if !missing.is_empty() {
-                    return ::std::result::Result::Err(missing);
-                }
-                Self::register(registry, codec, Self::from_deps(deps));
-                ::std::result::Result::Ok(())
             }
         }
     }
@@ -211,7 +179,7 @@ fn gen_registerable_task(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream 
 
 /// Generate `Default` impl for tasks without injected dependencies.
 fn gen_default(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
-    if parsed.inject_params.is_empty() {
+    if !parsed.has_injects() {
         quote! {
             impl ::std::default::Default for #name {
                 fn default() -> Self { Self }
@@ -231,7 +199,7 @@ fn gen_default(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
 /// - Inject tasks: each `#[inject]` param resolves via `deps.expect::<T>()`,
 ///   and `verify_deps` reports any missing types.
 fn gen_deps_impl(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
-    if parsed.inject_params.is_empty() {
+    let inherent = if !parsed.has_injects() {
         quote! {
             impl #name {
                 /// Construct from a `Deps` container.
@@ -275,7 +243,7 @@ fn gen_deps_impl(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
                 ///
                 /// Panics if any required dependency is absent. Prefer
                 /// [`Self::verify_deps`] at build time so missing deps surface
-                /// as a `BuildErrors::MissingDep` rather than a runtime panic.
+                /// as a `BuildError::MissingDep` rather than a runtime panic.
                 #[must_use]
                 pub fn from_deps(deps: &::sayiir_core::deps::Deps) -> Self {
                     Self {
@@ -293,6 +261,25 @@ fn gen_deps_impl(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
                 }
             }
         }
+    };
+
+    // Trait impl delegates to inherent methods (which Rust resolves first via
+    // method precedence) so the generic `TaskRegistry::register_from_deps` and
+    // the `workflow!` macro can drive these uniformly.
+    let trait_impl = quote! {
+        impl ::sayiir_core::deps::DepsInjectable for #name {
+            fn from_deps(deps: &::sayiir_core::deps::Deps) -> Self {
+                Self::from_deps(deps)
+            }
+            fn verify_deps(deps: &::sayiir_core::deps::Deps) -> ::std::vec::Vec<::sayiir_core::deps::MissingDep> {
+                Self::verify_deps(deps)
+            }
+        }
+    };
+
+    quote! {
+        #inherent
+        #trait_impl
     }
 }
 

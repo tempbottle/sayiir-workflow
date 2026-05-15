@@ -83,9 +83,13 @@ let workflow = workflow! {
 The macro:
 
 1. Builds every referenced `#[task]` via `Task::from_deps(&deps)` instead of `Task::new()`.
-2. Calls `verify_deps` for each task **before** construction. If any task asks for a type that wasn't inserted, the macro returns a `BuildErrors::MissingDep { task_id, type_name }` rather than panicking at first invocation.
+2. Calls `verify_deps` for each task **before** construction. If any task asks for a type that wasn't inserted, the macro returns a `BuildErrors` containing one `BuildError::MissingDep { task_id, type_name }` per absent service, rather than panicking at first invocation.
 
 Lookup is by exact `TypeId`. Insert `Arc<HttpClient>` → inject `Arc<HttpClient>`. There is no coercion to a trait object or a parent type — what you insert is what each task receives.
+
+:::caution[Inline tasks can't be injected]
+Inline closure steps in `workflow!` (`name(param: T) { … }`) have no `#[inject]` syntax. If an inline task needs a shared service, promote it to a named `#[task]` function — that lets `from_deps` resolve services for you and lets the macro auto-register it.
+:::
 
 ## Build workflows with `workflow!`
 

@@ -292,9 +292,15 @@ fn register_from_deps_populates_registry() {
         .build();
 
     let mut registry = TaskRegistry::new();
-    DepsFetchTask::register_from_deps(&mut registry, codec.clone(), &deps).unwrap();
-    DepsMultiplyTask::register_from_deps(&mut registry, codec.clone(), &deps).unwrap();
-    DepsPlainTask::register_from_deps(&mut registry, codec, &deps).unwrap();
+    registry
+        .register_from_deps::<DepsFetchTask, _>(codec.clone(), &deps)
+        .unwrap();
+    registry
+        .register_from_deps::<DepsMultiplyTask, _>(codec.clone(), &deps)
+        .unwrap();
+    registry
+        .register_from_deps::<DepsPlainTask, _>(codec, &deps)
+        .unwrap();
 
     assert_eq!(registry.len(), 3);
     assert!(registry.contains("deps_fetch"));
@@ -308,7 +314,8 @@ fn register_from_deps_reports_missing() {
     let deps = Deps::new(); // empty
     let mut registry = TaskRegistry::new();
 
-    let err = DepsFetchTask::register_from_deps(&mut registry, codec, &deps)
+    let err = registry
+        .register_from_deps::<DepsFetchTask, _>(codec, &deps)
         .expect_err("missing HttpClient should be reported");
     assert_eq!(err.len(), 1);
     assert!(err[0].type_name.contains("HttpClient"));
@@ -322,7 +329,9 @@ fn register_from_deps_no_inject_task_succeeds_with_empty_deps() {
     let deps = Deps::new();
     let mut registry = TaskRegistry::new();
 
-    DepsPlainTask::register_from_deps(&mut registry, codec, &deps).unwrap();
+    registry
+        .register_from_deps::<DepsPlainTask, _>(codec, &deps)
+        .unwrap();
     assert!(registry.contains("deps_plain"));
 }
 
@@ -361,8 +370,8 @@ fn task_library_pattern() {
         deps: &Deps,
     ) -> Result<TaskRegistry, Vec<sayiir_core::deps::MissingDep>> {
         let mut reg = TaskRegistry::new();
-        DepsFetchTask::register_from_deps(&mut reg, codec.clone(), deps)?;
-        DepsMultiplyTask::register_from_deps(&mut reg, codec, deps)?;
+        reg.register_from_deps::<DepsFetchTask, _>(codec.clone(), deps)?;
+        reg.register_from_deps::<DepsMultiplyTask, _>(codec, deps)?;
         Ok(reg)
     }
 
@@ -375,4 +384,132 @@ fn task_library_pattern() {
 
     let reg = billing_tasks(Arc::new(JsonCodec), &deps).unwrap();
     assert_eq!(reg.len(), 2);
+}
+
+// ─── 7. registry: × deps: collision detection ───────────────────────────────
+
+#[test]
+fn registry_deps_conflict_is_detected() {
+    // Pre-build a registry containing DepsFetchTask via the manual path.
+    let codec = Arc::new(JsonCodec);
+    let client_v1 = Arc::new(HttpClient {
+        base_url: "v1".into(),
+    });
+    let mut prebuilt = TaskRegistry::new();
+    DepsFetchTask::register(&mut prebuilt, codec.clone(), DepsFetchTask::new(client_v1));
+
+    // Pass both `registry:` (with the pre-built task) AND `deps:` (which would
+    // re-register the same task via from_deps). The macro must surface a
+    // RegistryDepsConflict instead of silently dropping one source.
+    let deps = Deps::builder()
+        .insert(Arc::new(HttpClient {
+            base_url: "v2".into(),
+        }))
+        .build();
+
+    let errs = expect_err(
+        workflow! {
+            name: "conflict",
+            codec: JsonCodec,
+            registry: prebuilt,
+            deps: &deps,
+            steps: [deps_fetch]
+        },
+        "registry and deps both define deps_fetch",
+    );
+    let collected: Vec<_> = errs.into_iter().collect();
+    assert_eq!(collected.len(), 1);
+    match &collected[0] {
+        BuildError::RegistryDepsConflict { task_id } => {
+            assert_eq!(*task_id, "deps_fetch");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn registry_without_collision_is_fine() {
+    // Pre-built registry contains an unrelated task; `deps:` registers a
+    // different one. No collision, build should succeed.
+    let codec = Arc::new(JsonCodec);
+    let mut prebuilt = TaskRegistry::new();
+    DepsPlainTask::register(&mut prebuilt, codec, DepsPlainTask::new());
+
+    let deps = Deps::builder()
+        .insert(Arc::new(HttpClient {
+            base_url: "x".into(),
+        }))
+        .build();
+
+    expect_ok(
+        workflow! {
+            name: "no-conflict",
+            codec: JsonCodec,
+            registry: prebuilt,
+            deps: &deps,
+            steps: [deps_fetch]
+        },
+        "no-conflict build",
+    );
+}
+
+#[test]
+fn registry_collision_without_deps_is_not_flagged() {
+    // When `deps:` is absent, the macro must not emit conflict checks —
+    // pre-registering a task and then referencing it from `steps:` is a
+    // documented override pattern (silent dedup retains the pre-built task).
+    let codec = Arc::new(JsonCodec);
+    let mut prebuilt = TaskRegistry::new();
+    DepsPlainTask::register(&mut prebuilt, codec, DepsPlainTask::new());
+
+    expect_ok(
+        workflow! {
+            name: "override-allowed",
+            codec: JsonCodec,
+            registry: prebuilt,
+            steps: [deps_plain]
+        },
+        "override pattern build",
+    );
+}
+
+#[test]
+fn registry_deps_conflict_aggregates_with_missing_dep() {
+    // Both error classes happen in the same build — the check loop must
+    // collect both before returning.
+    let codec = Arc::new(JsonCodec);
+    let mut prebuilt = TaskRegistry::new();
+    // `deps_plain` has no inject params; pre-register it to force a collision.
+    DepsPlainTask::register(&mut prebuilt, codec, DepsPlainTask::new());
+
+    // `deps_fetch` has #[inject] but `deps:` doesn't satisfy it → MissingDep.
+    let deps = Deps::new();
+
+    let errs = expect_err(
+        workflow! {
+            name: "both-errors",
+            codec: JsonCodec,
+            registry: prebuilt,
+            deps: &deps,
+            steps: [deps_plain, deps_fetch]
+        },
+        "missing dep + collision",
+    );
+    let collected: Vec<_> = errs.into_iter().collect();
+    assert_eq!(collected.len(), 2);
+
+    let has_missing = collected.iter().any(|e| {
+        matches!(
+            e,
+            BuildError::MissingDep { task_id, .. } if *task_id == "deps_fetch"
+        )
+    });
+    let has_conflict = collected.iter().any(|e| {
+        matches!(
+            e,
+            BuildError::RegistryDepsConflict { task_id } if *task_id == "deps_plain"
+        )
+    });
+    assert!(has_missing, "expected MissingDep for deps_fetch");
+    assert!(has_conflict, "expected RegistryDepsConflict for deps_plain");
 }

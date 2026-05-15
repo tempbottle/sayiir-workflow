@@ -102,6 +102,22 @@ pub enum BuildError {
         /// The Rust type name of the missing dependency (via `std::any::type_name`).
         type_name: &'static str,
     },
+
+    /// A task auto-registered via `workflow! { deps: … }` is already present in
+    /// the pre-built `TaskRegistry` passed via `workflow! { registry: … }`.
+    ///
+    /// Without this check the duplicate registration would be silently deduped,
+    /// and the resulting task instance would depend on registration order
+    /// rather than the user's expressed intent. Surfacing the conflict forces
+    /// an explicit choice between the two sources.
+    #[error(
+        "Task '{task_id}' is present in both the pre-built `registry:` and would \
+         be auto-registered via `deps:` — drop one to resolve the conflict"
+    )]
+    RegistryDepsConflict {
+        /// The task whose registration source is ambiguous.
+        task_id: &'static str,
+    },
 }
 
 /// A collection of [`BuildError`]s accumulated during workflow construction.

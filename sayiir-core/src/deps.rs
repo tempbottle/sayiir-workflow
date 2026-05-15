@@ -1,13 +1,19 @@
-//! Type-keyed dependency-injection container for Sayiir workflows.
+//! Dependency-injection container and integration trait.
 //!
-//! `Deps` lets you register cloneable values once and resolve them from anywhere
-//! a `&Deps` is available — most notably inside `#[task]`-generated `from_deps`
-//! constructors and the `workflow!` macro's `deps:` field.
+//! Two halves sit in this module:
+//!
+//! 1. The [`Deps`] type-keyed service container plus its [`DepsBuilder`] —
+//!    register cloneable values once, resolve them by type from anywhere a
+//!    `&Deps` is available.
+//! 2. The [`DepsInjectable`] trait that ties [`RegisterableTask`](crate::task::RegisterableTask)
+//!    to `Deps`. Implemented automatically by the `#[task]` proc-macro; used
+//!    by [`TaskRegistry::register_from_deps`](crate::registry::TaskRegistry::register_from_deps)
+//!    and the `workflow! { deps: … }` expansion.
 //!
 //! # Quick Example
 //!
 //! ```
-//! use sayiir_di::Deps;
+//! use sayiir_core::deps::Deps;
 //! use std::sync::Arc;
 //!
 //! #[derive(Clone)]
@@ -28,24 +34,11 @@
 //! Stored values must be `Send + Sync + 'static`, and `get` / `expect` /
 //! `try_get` require `Clone` because the container owns one copy per type.
 
-#![deny(missing_docs)]
-#![deny(clippy::pedantic)]
-#![forbid(unsafe_code)]
-#![deny(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::todo,
-    clippy::unimplemented,
-    clippy::dbg_macro,
-    clippy::print_stdout,
-    clippy::print_stderr
-)]
-
 use std::any::{Any, TypeId, type_name};
 use std::collections::HashMap;
 use std::fmt;
+
+use crate::task::RegisterableTask;
 
 /// A type-keyed container of cloneable services.
 ///
@@ -242,6 +235,29 @@ fn missing_panic(type_name: &'static str) -> ! {
     )
 }
 
+/// A [`RegisterableTask`] whose dependencies can be resolved from a [`Deps`]
+/// container.
+///
+/// Implemented automatically by the `#[task]` proc-macro. Drives the
+/// `workflow! { deps: … }` expansion and
+/// [`TaskRegistry::register_from_deps`](crate::registry::TaskRegistry::register_from_deps)
+/// when they need to construct task instances generically.
+pub trait DepsInjectable: RegisterableTask
+where
+    Self::Input: Send + 'static,
+    Self::Output: Send + 'static,
+    Self::Future: Send + 'static,
+{
+    /// Build an instance by resolving every `#[inject]` parameter from
+    /// `deps`. Panics on miss — call [`Self::verify_deps`] first when the
+    /// container's contents are not statically known.
+    fn from_deps(deps: &Deps) -> Self;
+
+    /// Return one [`MissingDep`] per `#[inject]` type that is absent from
+    /// `deps`. Empty slice means [`Self::from_deps`] will not panic.
+    fn verify_deps(deps: &Deps) -> ::std::vec::Vec<MissingDep>;
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -263,7 +279,6 @@ mod tests {
     #[test]
     fn insert_arc_keeps_arc_key() {
         let deps = Deps::builder().insert(Arc::new(ServiceA(7))).build();
-        // Arc<ServiceA> is the registered key, not ServiceA.
         assert!(deps.contains::<Arc<ServiceA>>());
         assert!(!deps.contains::<ServiceA>());
         let resolved: Arc<ServiceA> = deps.expect();

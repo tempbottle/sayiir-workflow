@@ -12,44 +12,65 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     generate(&def)
 }
 
-enum BuildMode<'a> {
+/// How `workflow!`-referenced task structs should be instantiated.
+///
+/// `FromDeps` mode also requires emitting a verify/conflict-check preamble —
+/// see [`gen_check_block`].
+#[derive(Clone, Copy)]
+enum BuildMode {
     New,
-    FromDeps(&'a syn::Expr),
+    FromDeps,
 }
 
-impl BuildMode<'_> {
-    fn instance(&self, name: &syn::Ident) -> TokenStream {
+impl BuildMode {
+    /// The instance-construction expression for a single task reference.
+    /// In `FromDeps` mode, the generated code references the `__deps` local
+    /// materialized by [`gen_check_block`].
+    fn instance(self, name: &syn::Ident) -> TokenStream {
         match self {
             Self::New => quote::quote! { #name::new() },
-            Self::FromDeps(_) => quote::quote! { #name::from_deps(__deps) },
+            Self::FromDeps => quote::quote! { #name::from_deps(__deps) },
         }
     }
+}
 
-    /// Emit a verify-deps preamble. Returns empty when running in `New` mode.
-    ///
-    /// Runs *before* any task instance is constructed so missing deps surface
-    /// as `BuildErrors::MissingDep` rather than panicking at first invocation.
-    fn verify_block(&self, names: &[&syn::Ident]) -> TokenStream {
-        let Self::FromDeps(deps_expr) = self else {
-            return TokenStream::new();
-        };
-        let verify_stmts = names.iter().map(|name| {
-            quote::quote! {
-                for __m in #name::verify_deps(__deps) {
-                    __build_errors.push(::sayiir_core::error::BuildError::MissingDep {
-                        task_id: #name::task_id(),
-                        type_name: __m.type_name,
-                    });
-                }
-            }
-        });
+/// Emit the build-check preamble — empty unless the workflow has a `deps:`
+/// field. Two error classes aggregate into one `BuildErrors`:
+///
+/// 1. **`MissingDep`** — any `#[inject]` type absent from `__deps`. Avoids the
+///    runtime panic that `from_deps` would otherwise produce.
+/// 2. **`RegistryDepsConflict`** — the user passed a pre-built `registry:`
+///    that already contains a task this macro would otherwise re-register via
+///    `from_deps`. Surfacing it forces an explicit choice rather than relying
+///    on silent registry dedup.
+///
+/// The emitted code materializes the `__deps` local used by every
+/// `from_deps(__deps)` call site downstream.
+fn gen_check_block(deps_expr: Option<&syn::Expr>, names: &[&syn::Ident]) -> TokenStream {
+    let Some(deps_expr) = deps_expr else {
+        return TokenStream::new();
+    };
+    let stmts = names.iter().map(|name| {
         quote::quote! {
-            let __deps: &::sayiir_core::deps::Deps = #deps_expr;
-            let mut __build_errors = ::sayiir_core::error::BuildErrors::new();
-            #(#verify_stmts)*
-            if !__build_errors.is_empty() {
-                return ::std::result::Result::Err(__build_errors);
+            for __m in #name::verify_deps(__deps) {
+                __build_errors.push(::sayiir_core::error::BuildError::MissingDep {
+                    task_id: #name::task_id(),
+                    type_name: __m.type_name,
+                });
             }
+            if __registry.contains(#name::task_id()) {
+                __build_errors.push(::sayiir_core::error::BuildError::RegistryDepsConflict {
+                    task_id: #name::task_id(),
+                });
+            }
+        }
+    });
+    quote::quote! {
+        let __deps: &::sayiir_core::deps::Deps = #deps_expr;
+        let mut __build_errors = ::sayiir_core::error::BuildErrors::new();
+        #(#stmts)*
+        if !__build_errors.is_empty() {
+            return ::std::result::Result::Err(__build_errors);
         }
     }
 }
@@ -73,17 +94,18 @@ fn generate(def: &WorkflowDef) -> syn::Result<TokenStream> {
     let task_refs = codegen::collect_task_refs(&def.steps);
     let aliases = codegen::collect_route_aliases(&def.steps);
 
-    let mode = match &def.deps {
-        Some(expr) => BuildMode::FromDeps(expr),
-        None => BuildMode::New,
+    let mode = if def.deps.is_some() {
+        BuildMode::FromDeps
+    } else {
+        BuildMode::New
     };
 
-    let verify_block = {
+    let check_block = {
         let mut all: Vec<&syn::Ident> = task_refs.to_vec();
         all.extend(aliases.iter().map(|(name, _)| *name));
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         all.retain(|n| seen.insert(n.to_string()));
-        mode.verify_block(&all)
+        gen_check_block(def.deps.as_ref(), &all)
     };
 
     let register_stmts = task_refs.iter().map(|name| {
@@ -111,9 +133,9 @@ fn generate(def: &WorkflowDef) -> syn::Result<TokenStream> {
     Ok(quote::quote! {
         (|| -> ::std::result::Result<_, ::sayiir_core::error::BuildErrors> {
             #(#exhaustiveness_checks)*
-            #verify_block
             let __codec = ::std::sync::Arc::new(#codec);
             let mut __registry = #registry_expr;
+            #check_block
             #(#register_stmts)*
             #(#alias_stmts)*
             let __ctx = ::sayiir_core::context::WorkflowContext::new(

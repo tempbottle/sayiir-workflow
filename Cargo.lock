@@ -2656,7 +2656,6 @@ dependencies = [
  "chrono",
  "proptest",
  "rkyv",
- "sayiir-di",
  "serde",
  "serde_json",
  "sha2",
@@ -2678,10 +2677,6 @@ dependencies = [
  "sqlx-d1",
  "worker",
 ]
-
-[[package]]
-name = "sayiir-di"
-version = "0.4.0"
 
 [[package]]
 name = "sayiir-integration-tests"

@@ -110,7 +110,7 @@ pub use worker::{
 };
 
 pub use sayiir_core::branch_key::BranchKey;
-pub use sayiir_core::deps::{Deps, DepsBuilder, MissingDep};
+pub use sayiir_core::deps::{Deps, DepsBuilder, DepsInjectable, MissingDep};
 pub use sayiir_core::task_context;
 pub use sayiir_core::workflow::ConflictPolicy;
 #[cfg(feature = "macros")]
