@@ -131,7 +131,8 @@ const onboarding = flow<number>("onboarding").then(fetchUser).then(sendEmail).bu
 export default {
   async fetch(request: Request, env: { DB: D1Database }): Promise<Response> {
     const engine = await Engine.create(env.DB);
-    return Response.json(await engine.run(onboarding, "onboard-42", 42));
+    const instanceId = `onboard-${crypto.randomUUID()}`;
+    return Response.json(await engine.run(onboarding, instanceId, 42));
   },
   // Cron resume sweeps parked + evicted instances back to life
   async scheduled(_e: ScheduledEvent, env: { DB: D1Database }): Promise<void> {
