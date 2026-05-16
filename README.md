@@ -1,6 +1,6 @@
 # Sayiir
 
-**Durable, fast workflow engine that feels like writing normal code.** Graph-based, continuation-driven execution with a Rust core and Python/Node.js bindings — no DSL, no replay, workflows from your plain code.
+**Durable, fast workflow engine that feels like writing normal code.** Graph-based, continuation-driven execution with a Rust core and Python / Node.js / Cloudflare Workers bindings — no DSL, no replay, workflows from your plain code.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/A2jWBFZsNK)
@@ -17,12 +17,14 @@
 [![npm](https://img.shields.io/npm/v/sayiir.svg)](https://www.npmjs.com/package/sayiir)
 [![npm downloads](https://img.shields.io/npm/dm/sayiir.svg)](https://www.npmjs.com/package/sayiir)
 [![Node.js](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022-339933.svg)](https://nodejs.org)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://www.npmjs.com/package/@sayiir/cloudflare)
 
 > Sayiir is under active development. Core functionality works. We welcome contributors, maintainers, and sponsors.
 
 - &#129408; **Rust core** — High-performance, memory-safe workflow engine
 - &#128737; **Durable** — Automatic checkpointing & crash recovery with pluggable persistence
 - &#129520; **Multi-language** — Type-safe Python, TypeScript, and Rust bindings
+- &#9729;&#65039; **Runs on the edge** — First-class [Cloudflare Workers](https://docs.sayiir.dev/getting-started/cloudflare/) runtime with D1 persistence, checkpoint-and-exit execution, and cron-driven resume
 - &#10024; **Built for developers** — Low learning curve; native language idioms, async code you already know, no DSL. No separate server or infra to deploy; get up and running in minutes. [Enterprise server](https://docs.sayiir.dev/roadmap/) in active development for when you need one
 - &#9208; **Workflow control** — Cancel, pause, and resume running workflow instances
 - &#128065; **Observability** — Built-in OpenTelemetry tracing and logging for full workflow visibility
@@ -122,6 +124,38 @@ const status = runDurableWorkflow(workflow, instanceId, 42, PostgresBackend.conn
 
 <a href="https://docs.sayiir.dev/playground/"><img src="https://img.shields.io/badge/Try_it_live-▶-00C853" alt="Try it live" height="20"></a>
 
+#### ☁️ Cloudflare Workers
+
+```typescript
+import { task, flow, Engine } from "@sayiir/cloudflare";
+
+const fetchUser = task("fetch-user", async (id: number) => {
+  const res = await fetch(`https://api.example.com/users/${id}`);
+  return res.json() as Promise<{ id: number; name: string }>;
+});
+
+const sendEmail = task("send-email", async (user: { id: number; name: string }) => {
+  return `Sent welcome to ${user.name}`;
+});
+
+const onboarding = flow<number>("onboarding").then(fetchUser).then(sendEmail).build();
+
+export default {
+  async fetch(request: Request, env: { DB: D1Database }): Promise<Response> {
+    const engine = await Engine.create(env.DB);
+    const status = await engine.run(onboarding, "onboard-42", 42);
+    return Response.json(status);
+  },
+  // Resume parked + evicted instances from a cron handler
+  async scheduled(_event: ScheduledEvent, env: { DB: D1Database }): Promise<void> {
+    const engine = await Engine.create(env.DB);
+    await engine.resumeAll(onboarding);
+  },
+};
+```
+
+Rust/WASM core, D1 persistence, checkpoint-and-exit across requests, signal/delay parking with cron-driven resume. See the [Cloudflare quick start](https://docs.sayiir.dev/getting-started/cloudflare/).
+
 ---
 
 ## When to Use Sayiir
@@ -146,7 +180,8 @@ Sayiir is a full-featured, embeddable workflow engine — branching, loops, fork
 **Getting Started**&ensp;
 [Python](https://docs.sayiir.dev/getting-started/python/) &#183;
 [Node.js](https://docs.sayiir.dev/getting-started/nodejs/) &#183;
-[Rust](https://docs.sayiir.dev/getting-started/rust/)
+[Rust](https://docs.sayiir.dev/getting-started/rust/) &#183;
+[Cloudflare Workers](https://docs.sayiir.dev/getting-started/cloudflare/)
 
 **Learn**&ensp;
 [How It Works](https://docs.sayiir.dev/concepts/how-it-works/) &#183;
@@ -173,7 +208,7 @@ Sayiir is a full-featured, embeddable workflow engine — branching, loops, fork
 | **Python** bindings | ![stable](https://img.shields.io/badge/stable-brightgreen) |
 | **Node.js** bindings | ![stable](https://img.shields.io/badge/stable-brightgreen) |
 | **PostgreSQL** backend | ![stable](https://img.shields.io/badge/stable-brightgreen)&ensp;requires PG 13+ |
-| **Cloudflare Workers** | ![in progress](https://img.shields.io/badge/in%20progress-yellow) |
+| **Cloudflare Workers** + D1 | ![beta](https://img.shields.io/badge/beta-blue)&ensp;`@sayiir/cloudflare` |
 | **Enterprise server** | ![planned](https://img.shields.io/badge/planned-lightgrey) |
 
 ---

@@ -1,0 +1,51 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rag-agent-cf",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  // Sayiir checkpoints + this example's docs/chunks/conversations share one D1.
+  // Run `wrangler d1 create rag-agent` and paste the id below.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "rag-agent",
+      "database_id": "25d695fc-716b-4cbd-a5dd-b51af91be335",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Workers AI — embeddings (bge-base-en-v1.5) + completion (llama-3.1-8b-instruct).
+  "ai": {
+    "binding": "AI"
+  },
+  // Vectorize index for chunk embeddings.
+  // Run `wrangler vectorize create rag-chunks --dimensions=768 --metric=cosine`.
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "rag-chunks",
+      // Vectorize has no local emulator yet; in `wrangler dev` we hit the
+      // real index. Costs are tiny — just the per-call queries.
+      "remote": true
+    }
+  ],
+  // R2 bucket for the raw fetched bytes of each ingested doc.
+  // Run `wrangler r2 bucket create rag-raw-docs`.
+  "r2_buckets": [
+    {
+      "binding": "RAW",
+      "bucket_name": "rag-raw-docs"
+    }
+  ],
+  // Cron sweeps for stuck ingests and parked low-confidence queries.
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  },
+  "observability": {
+    "enabled": true
+  }
+}

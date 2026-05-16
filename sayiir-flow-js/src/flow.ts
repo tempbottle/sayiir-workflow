@@ -594,7 +594,6 @@ export class RouteBuilder<
   }
 }
 
-// ---- Helpers ----
 
 function isTaskFn(fn: unknown): fn is TaskFn<any, any> {
   return typeof fn === "function" && "_taskId" in fn;

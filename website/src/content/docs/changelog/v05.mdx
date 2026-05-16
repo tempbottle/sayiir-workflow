@@ -1,17 +1,85 @@
 ---
 title: What's New in v0.5
-description: User-facing changes in Sayiir v0.5 — first-class Deps container for the Rust macros, letting tasks with #[inject] parameters drop straight into the workflow! DSL.
+description: User-facing changes in Sayiir v0.5 — Cloudflare Workers runtime with D1 persistence, plus a first-class Deps container for the Rust macros that lets tasks with #[inject] parameters drop straight into the workflow! DSL.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <Aside type="note">
-Sayiir v0.5 is backward-compatible. Existing v0.4 workflows continue to work without changes — the new `deps:` field on the `workflow!` macro is opt-in.
+Sayiir v0.5 is backward-compatible. Existing v0.4 workflows continue to work without changes — the new `deps:` field on the `workflow!` macro and the Cloudflare Workers runtime are both opt-in.
 </Aside>
 
 ---
 
 ## New features
+
+### Cloudflare Workers runtime (`@sayiir/cloudflare`)
+
+Sayiir workflows now run natively inside Cloudflare Workers. The TypeScript surface (`task`, `flow`, `Engine`) mirrors `sayiir-nodejs`; execution is **checkpoint-and-exit** with signal/delay parking across requests and a cron-driven `resumeAll` sweep.
+
+```typescript
+import { task, flow, Engine } from "@sayiir/cloudflare";
+
+const onboarding = flow<number>("onboarding")
+  .then(fetchUser)
+  .then(sendEmail)
+  .build();
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const engine = await Engine.create(env.DB);
+    const status = await engine.run(onboarding, "onboard-42", 42);
+    return Response.json(status);
+  },
+  async scheduled(event: ScheduledEvent, env: Env): Promise<void> {
+    const engine = await Engine.create(env.DB);
+    await engine.resumeAll(onboarding);
+  },
+};
+```
+
+Highlights:
+
+- **D1 persistence** — Snapshots live in Cloudflare D1 (SQLite at the edge). No external database needed.
+- **Rust/WASM core** — Orchestration, checkpointing, and execution run as compiled WASM. The same `sayiir-d1` backend now drives both native SQLite (`sqlx::SqlitePool`) and D1 (`sqlx_d1::D1Connection`) over a generic `SQLiteBackend<T>`.
+- **`resumeAll` sweep** — Picks up ready (expired delay/timeout), signalled (buffered event), and stale (no update within `staleAfter`) instances. Parked positions waiting on an external signal are excluded from the stale path so they aren't re-resumed every cron tick.
+- **Fork branches** — Persist each branch's final output under `branch_id`. Parked branches collect into `ExecutionPosition::AtFork { completed_branches, wake_at }`; the join chain no longer double-executes, and a delayed branch wakes via `delay_wake_at` instead of `staleAfter` later.
+- **Durable RAG example** — [`examples/rag-agent-cf`](https://github.com/sayiir/sayiir/tree/main/examples/rag-agent-cf) demonstrates hybrid retrieval (Vectorize + D1 FTS5 + recency) via parallel fork, citation verification in a loop against R2-backed source text, and a `waitForSignal` 5-minute human-clarify fallback with timeout. Built on Workers AI + Vectorize + R2 + D1.
+
+Get started: [Cloudflare Workers quick start](/getting-started/cloudflare/).
+
+### `conflictPolicy` defaults to `"fail"` across all bindings
+
+`engine.run(workflow, instanceId, input)` is **not** an idempotent alias for `resume()`. v0.5 makes this explicit: with the new default `"fail"` policy, calling `run()` against an `instanceId` that already has a snapshot returns an error instead of silently overwriting in-progress state. The correct action for a known instance is `resume()`.
+
+This applies to every binding — Rust runtime, `sayiir-nodejs`, `sayiir-py`, and `@sayiir/cloudflare`.
+
+```typescript
+// default — rejects duplicate run() against an existing instance
+const engine = await Engine.create(env.DB);
+
+// idempotent retries — return the existing instance's status without re-executing
+const engine = await Engine.create(env.DB, { conflictPolicy: "use_existing" });
+
+// force fresh start — delete the prior snapshot and any cancel/pause signals
+const engine = await Engine.create(env.DB, { conflictPolicy: "terminate_existing" });
+```
+
+Rust callers pass the same options on the workflow client:
+
+```rust
+use sayiir_runtime::WorkflowClient;
+use sayiir_core::workflow::ConflictPolicy;
+
+let client = WorkflowClient::new(backend)
+    .with_conflict_policy(ConflictPolicy::UseExisting); // or ::TerminateExisting, ::Fail (default)
+```
+
+A definition-hash mismatch against an existing snapshot is always a hard error regardless of policy — you can't restart a different workflow under the same id.
+
+<Aside type="caution">
+**Migration note.** Pre-v0.5, `run()` would silently overwrite. If your code relies on that, pick the policy that matches your intent: `"use_existing"` for idempotent retries (most common — e.g. queue redelivery, client retry on timeout), `"terminate_existing"` for hard-restart semantics. Call sites worth auditing first are anything that retries `run()` in a loop or uses `run()` from a webhook handler that may receive duplicates.
+</Aside>
 
 ### Dependency injection with `Deps` (Rust)
 

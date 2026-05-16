@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS sayiir_workflow_snapshots (
     position_kind        TEXT,
     delay_wake_at        TEXT,
     trace_parent         TEXT,
+    awaited_signal_name  TEXT,
     started_at           TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     completed_at         TEXT,
     updated_at           TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -19,6 +20,9 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_status   ON sayiir_workflow_snapshots (
 CREATE INDEX IF NOT EXISTS idx_snapshots_task     ON sayiir_workflow_snapshots (current_task_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_updated  ON sayiir_workflow_snapshots (updated_at);
 CREATE INDEX IF NOT EXISTS idx_snapshots_position ON sayiir_workflow_snapshots (position_kind);
+CREATE INDEX IF NOT EXISTS idx_snapshots_awaited_signal
+    ON sayiir_workflow_snapshots (awaited_signal_name)
+    WHERE awaited_signal_name IS NOT NULL;
 
 -- Snapshot history: append-only log of every checkpoint (1:N per instance).
 CREATE TABLE IF NOT EXISTS sayiir_workflow_snapshot_history (

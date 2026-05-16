@@ -1,5 +1,5 @@
 /**
- * sayiir-flow-js — Pure TypeScript workflow builder DSL for Sayiir.
+ * @sayiir/flow-js — Pure TypeScript workflow builder DSL for Sayiir.
  *
  * This package contains only the builder logic with no native dependencies.
  * It is used by binding packages (sayiir-nodejs, sayiir-cloudflare, etc.)

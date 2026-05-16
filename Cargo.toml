@@ -8,6 +8,7 @@ members = [
     "sayiir-macros",
     "sayiir-py",
     "sayiir-node",
+    "sayiir-cloudflare",
     "tests/integration",
 ]
 resolver = "2"
@@ -35,6 +36,7 @@ sayiir-persistence = { version = "0.4.0", path = "sayiir-persistence" }
 sayiir-runtime = { version = "0.4.0", path = "sayiir-runtime", default-features = false }
 sayiir-postgres = { version = "0.4.0", path = "sayiir-postgres" }
 sayiir-d1 = { version = "0.4.0", path = "sayiir-d1" }
+sayiir-cloudflare = { version = "0.4.0", path = "sayiir-cloudflare" }
 sayiir-macros = { version = "0.4.0", path = "sayiir-macros" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
@@ -60,5 +62,6 @@ tokio = { version = "1", features = ["rt"] }
 sha2 = "0.10"
 strum = { version = "0.28", features = ["derive"] }
 thiserror = "2"
+base64 = "0.22"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
 proptest = "1"

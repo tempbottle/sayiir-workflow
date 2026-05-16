@@ -392,9 +392,9 @@ impl WorkflowSnapshotState {
         }
     }
 
-    /// Convert the snapshot state to a [`WorkflowStatus`], including parked
+    /// Convert the snapshot state to a [`crate::workflow::WorkflowStatus`], including parked
     /// in-progress positions (delay, signal, fork) instead of collapsing them
-    /// to [`WorkflowStatus::InProgress`].
+    /// to [`crate::workflow::WorkflowStatus::InProgress`].
     #[must_use]
     pub fn as_status(&self) -> crate::workflow::WorkflowStatus {
         use crate::workflow::WorkflowStatus;
@@ -991,7 +991,13 @@ impl WorkflowSnapshot {
         }
     }
 
-    /// The position kind string (e.g. `"at_task"`, `"at_delay"`), if applicable.
+    /// The position kind string (e.g. `"AtTask"`, `"AtDelay"`), if applicable.
+    ///
+    /// The string is the [`ExecutionPosition`] variant name as written
+    /// (derived from `strum::AsRefStr` with no `serialize_all`). Backends
+    /// persist this into the `position_kind` column and may filter on it —
+    /// see the pin test in the `tests` module before changing the strum
+    /// derive.
     ///
     /// Returns `None` for terminal states (Completed, Failed, Cancelled).
     #[must_use]
@@ -1003,12 +1009,41 @@ impl WorkflowSnapshot {
         }
     }
 
-    /// The delay wake-at time, if the workflow is parked at a delay or timed signal.
+    /// The name of the signal a workflow is currently waiting on, if it is
+    /// parked at an `AtSignal` position. `None` otherwise.
+    ///
+    /// Backends denormalize this into an `awaited_signal_name` column so
+    /// the `resumeAll` "signalled" pickup branch can filter buffered events
+    /// by (`instance_id`, `signal_name`) — without it, an event delivered
+    /// for a different signal would keep re-resuming the workflow
+    /// indefinitely.
+    #[must_use]
+    pub fn awaited_signal_name(&self) -> Option<&str> {
+        match &self.state {
+            WorkflowSnapshotState::InProgress {
+                position: ExecutionPosition::AtSignal { signal_name, .. },
+                ..
+            } => Some(signal_name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The wake-at time when the workflow can next make progress, if it is
+    /// parked at a delay, timed signal, or fork-with-delayed-branch.
+    ///
+    /// Backends promote this to a `delay_wake_at` column so dashboards and
+    /// cron sweepers (e.g. `Engine.resumeAll`) can find ready instances by a
+    /// simple `delay_wake_at <= now()` filter rather than walking the data
+    /// blob.
     #[must_use]
     pub fn delay_wake_at(&self) -> Option<DateTime<Utc>> {
         match &self.state {
             WorkflowSnapshotState::InProgress {
                 position: ExecutionPosition::AtDelay { wake_at, .. },
+                ..
+            }
+            | WorkflowSnapshotState::InProgress {
+                position: ExecutionPosition::AtFork { wake_at, .. },
                 ..
             }
             | WorkflowSnapshotState::InProgress {
@@ -1043,6 +1078,73 @@ mod tests {
         assert!(snapshot.state.is_in_progress());
         assert!(!snapshot.state.is_terminal());
         assert!(snapshot.initial_input.is_none());
+    }
+
+    /// Pin the `ExecutionPosition` variant strings consumed by the
+    /// `position_kind` column in persistence backends.
+    ///
+    /// `sayiir-d1::SQLiteBackend::find_resumable_instances` filters on these
+    /// literals (e.g. `position_kind IN ('AtTask', 'AtJoin', 'InLoop',
+    /// 'NotStarted')`). Renaming a variant — or adding `#[strum(serialize_all
+    /// = ...)]` to `ExecutionPosition` — would silently change the persisted
+    /// value and make the stale-pickup branch match nothing on existing rows.
+    /// Update both the SQL and the pinned strings together.
+    #[test]
+    fn execution_position_kind_strings_are_stable() {
+        use std::collections::HashMap;
+        let cases: [(ExecutionPosition, &str); 7] = [
+            (ExecutionPosition::NotStarted, "NotStarted"),
+            (
+                ExecutionPosition::AtTask {
+                    task_id: "t".into(),
+                },
+                "AtTask",
+            ),
+            (
+                ExecutionPosition::AtFork {
+                    fork_id: "f".into(),
+                    completed_branches: HashMap::new(),
+                    wake_at: chrono::Utc::now(),
+                },
+                "AtFork",
+            ),
+            (
+                ExecutionPosition::AtJoin {
+                    join_id: "j".into(),
+                    completed_branches: HashMap::new(),
+                },
+                "AtJoin",
+            ),
+            (
+                ExecutionPosition::AtDelay {
+                    delay_id: "d".into(),
+                    entered_at: chrono::Utc::now(),
+                    wake_at: chrono::Utc::now(),
+                    next_task_id: None,
+                },
+                "AtDelay",
+            ),
+            (
+                ExecutionPosition::AtSignal {
+                    signal_id: "s".into(),
+                    signal_name: "n".into(),
+                    wake_at: None,
+                    next_task_id: None,
+                },
+                "AtSignal",
+            ),
+            (
+                ExecutionPosition::InLoop {
+                    loop_id: "l".into(),
+                    iteration: 0,
+                    next_task_id: None,
+                },
+                "InLoop",
+            ),
+        ];
+        for (variant, expected) in &cases {
+            assert_eq!(variant.as_ref(), *expected);
+        }
     }
 
     #[test]

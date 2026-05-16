@@ -287,7 +287,7 @@ impl FlowBuilder {
     ///
     /// Returns an error if the task list is empty or any branch chain is empty.
     ///
-    /// Note: unlike the typed Rust [`WorkflowBuilder`], this does **not** reject
+    /// Note: unlike the typed Rust [`crate::builder::WorkflowBuilder`], this does **not** reject
     /// duplicate task IDs. Binding-level workflows commonly reuse the same task
     /// function (and thus ID) at multiple positions in a pipeline — the task
     /// registry maps ID → callable, so duplicates simply re-execute the same task.

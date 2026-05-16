@@ -5,9 +5,9 @@
 //! 1. The [`Deps`] type-keyed service container plus its [`DepsBuilder`] —
 //!    register cloneable values once, resolve them by type from anywhere a
 //!    `&Deps` is available.
-//! 2. The [`DepsInjectable`] trait that ties [`RegisterableTask`](crate::task::RegisterableTask)
+//! 2. The [`DepsInjectable`] trait that ties [`crate::task::RegisterableTask`]
 //!    to `Deps`. Implemented automatically by the `#[task]` proc-macro; used
-//!    by [`TaskRegistry::register_from_deps`](crate::registry::TaskRegistry::register_from_deps)
+//!    by [`crate::registry::TaskRegistry::register_from_deps`]
 //!    and the `workflow! { deps: … }` expansion.
 //!
 //! # Quick Example

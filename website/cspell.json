@@ -80,7 +80,8 @@
     "resumability",
     "inlines",
     "jaegertracing",
-    "traceparent"
+    "traceparent",
+    "TOOBIG"
   ],
   "flagWords": [],
   "dictionaries": [
