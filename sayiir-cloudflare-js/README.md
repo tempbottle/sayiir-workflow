@@ -407,19 +407,111 @@ Discriminated union — use `status.status` with TypeScript narrowing:
 
 ## Architecture
 
+### Request lifecycle
+
+A single HTTP request that drives a workflow either to completion or to a park point:
+
 ```
-Request  ──>  Worker (TypeScript)
-                │
-                ├── task functions (your code)
-                │
-                └── Sayiir WASM engine
-                      │
-                      ├── checkpoint after each task ──> D1
-                      ├── park at delay/signal ──> D1
-                      └── resume from snapshot <── D1
+ HTTP request
+      │
+      ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ Worker isolate                                                   │
+│                                                                  │
+│   ① cold-start only: wasm-init.ts → initSync(<bundled .wasm>)    │
+│      (idempotent; folds into isolate spin-up, not first request) │
+│                                                                  │
+│   ② Engine.create(env.DB)                                        │
+│      └─ D1Backend connects + runs MIGRATION_SQL (idempotent)     │
+│                                                                  │
+│   ③ engine.run(workflow, instanceId, input)                      │
+│      │                                                           │
+│      │  ┌──────────────────────────────────────────┐             │
+│      │  │ prepare_run                              │             │
+│      │  │   load snapshot for instanceId           │             │
+│      │  │   ├─ exists & ConflictPolicy=Fail        │             │
+│      │  │   │   → return error                     │             │
+│      │  │   ├─ exists & UseExisting                │             │
+│      │  │   │   → return its current status        │             │
+│      │  │   ├─ exists & TerminateExisting          │             │
+│      │  │   │   → delete + write fresh snapshot    │             │
+│      │  │   └─ not exists                          │             │
+│      │  │       → write initial snapshot           │             │
+│      │  └──────────────────────────────────────────┘             │
+│      │                                                           │
+│      │  ┌──────────────────────────────────────────┐             │
+│      │  │ execute loop, per task:                  │             │
+│      │  │                                          │             │
+│      │  │   bytes ─decode→ JS value                │             │
+│      │  │             │                            │             │
+│      │  │             ▼                            │             │
+│      │  │      user task callback (TS)             │             │
+│      │  │             │                            │             │
+│      │  │   JS value ─encode→ bytes                │             │
+│      │  │             │                            │             │
+│      │  │             ▼                            │             │
+│      │  │      SAVE_SNAPSHOT ────────────────► D1  │             │
+│      │  │                                          │             │
+│      │  └────┬───────────────────────────┬─────────┘             │
+│      │       │                           │                       │
+│      │       ▼ all tasks complete        ▼ hits delay / signal   │
+│      │  finalize_execution            save park snapshot:        │
+│      │  status=Completed              position_kind=AtDelay      │
+│      │                                              |AtSignal    │
+│      │                                              |AtFork      │
+│      │                                delay_wake_at = …          │
+│      │                                awaited_signal_name = …    │
+│      │                                                           │
+│      ▼                                                           │
+│   ④ Response.json(status)   ◄── status carries park metadata     │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+      │                                       Worker may die here.
+      ▼
+ HTTP response (status: completed | awaiting_signal | waiting | …)
 ```
 
-Workers are ephemeral. Sayiir checkpoints execution state to D1 after every task. When a workflow **parks** (delay, signal), the engine returns a status and the caller schedules a wake-up. When a Worker is **evicted**, the snapshot reflects the last checkpoint — use `resumeAll()` in a cron handler to recover both cases. Completed tasks are never re-executed; the task that was in-flight at eviction re-executes once.
+Each user task is its own checkpoint. A Worker eviction mid-task only loses the in-flight task; everything before it stays skipped on resume.
+
+### How a parked workflow makes progress
+
+Three paths converge on `engine.resume(workflow, instanceId)`. All three load the same snapshot and continue from the saved position; the differences are only in what triggers the call.
+
+```
+        ┌─────────────────────┐  GET /workflows/:id
+        │ HTTP poll           │ ─────────────────────────┐
+        └─────────────────────┘                          │
+                                                         ▼
+        ┌─────────────────────┐  POST /signal +    ┌──────────────────┐
+        │ Signal delivery     │  inline resume     │ engine.resume    │
+        │ engine.sendSignal() │ ─────────────────► │   load snapshot  │
+        └─────────────────────┘                    │   resolve parked │
+                                                   │   continue execute│
+        ┌─────────────────────┐  scheduled() ───►  │   checkpoint     │
+        │ Cron sweep          │                    └────────┬─────────┘
+        │ engine.resumeAll()  │                             │
+        └─────────────────────┘                             ▼
+                                                  completed | parks again
+```
+
+`engine.resumeAll()` runs a single SQL pickup in `sayiir-d1` that returns three categories of instances:
+
+| Category   | SQL condition                                                                    | Triggers on                                                       |
+|------------|----------------------------------------------------------------------------------|-------------------------------------------------------------------|
+| Ready      | `delay_wake_at <= now()`                                                         | Delay expired; timed signal hit timeout; fork's delayed branch fired. |
+| Signalled  | `position_kind = 'AtSignal'` AND a buffered event row matches `awaited_signal_name` | Fire-and-forget `sendSignal()` where the caller didn't `resume()` inline. |
+| Stale      | non-parked position (`AtTask | AtJoin | InLoop | NotStarted`) AND `updated_at <= now() - staleAfter` | Worker eviction mid-task — recovery path.                         |
+
+The stale category explicitly excludes parked positions. A workflow correctly waiting on a signal never gets re-resumed by the cron sweep — only by a delivered event or an explicit `resume()`.
+
+### Codec boundary — JS values across WASM
+
+Sayiir's core operates on opaque `Bytes`. The codec in `sayiir-cloudflare/src/codec.rs` is the only thing that knows how to convert:
+
+- **Encode** (JS → bytes): `JSON.stringify` with a replacer that intercepts `ArrayBuffer` / `Uint8Array` and emits a base64-tagged envelope `{"$sayiir_bin": "<b64>", "$sayiir_kind": "ArrayBuffer" | "Uint8Array"}`. Everything else stringifies natively.
+- **Decode** (bytes → JS): substring fast-path — if the payload doesn't contain `"$sayiir_bin"`, plain `JSON.parse`. Otherwise `JSON.parse` with a reviver that rehydrates envelopes back to real binary types.
+
+So `ArrayBuffer` / `Uint8Array` round-trip cleanly through task boundaries (~1.33× JSON overhead from base64), but the snapshot row size limit in D1 still applies — see *D1 snapshot size limit* in the [Cloudflare quick-start docs](https://docs.sayiir.dev/getting-started/cloudflare/#d1-snapshot-size-limit) before shipping large blobs through workflow state.
 
 ## Requirements
 
