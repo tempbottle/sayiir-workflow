@@ -285,3 +285,53 @@ jobs:
           tarball=$(ls -1 *.tgz | head -1)
           echo "Publishing tarball: $tarball"
           npm publish "$tarball" --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
+
+  flow-js-publish:
+    name: Publish @sayiir/flow-js to npm
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@sayiir/flow-js
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build TypeScript
+        working-directory: sayiir-flow-js
+        run: pnpm build
+
+      - name: Determine npm dist-tag
+        id: dist-tag
+        shell: bash
+        run: |
+          version=$(node -p "require('./sayiir-flow-js/package.json').version")
+          if echo "$version" | grep -qE '-(alpha|beta|rc)'; then
+            tag=$(echo "$version" | sed -E 's/.*-([a-z]+).*/\1/')
+          else
+            tag="latest"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing version $version with tag: $tag"
+
+      - name: Publish to npm
+        working-directory: sayiir-flow-js
+        env:
+          NPM_TAG: ${{ steps.dist-tag.outputs.tag }}
+        run: |
+          pnpm pack
+          tarball=$(ls -1 *.tgz | head -1)
+          echo "Publishing tarball: $tarball"
+          npm publish "$tarball" --provenance --access public --tag "$NPM_TAG"

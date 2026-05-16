@@ -160,7 +160,7 @@ Rust/WASM core, D1 persistence, checkpoint-and-exit across requests, signal/dela
 
 ## Works with Edge & Serverless
 
-The Rust core compiles to **WASM** and runs inside short-lived runtimes like Cloudflare Workers and Lambda — no sidecar, no control plane. Checkpoint-and-exit between tasks, park on signals or delays, resume on cron. See the [`rag-agent-cf`](https://github.com/sayiir/sayiir/tree/main/examples/rag-agent-cf) example.
+The Rust core compiles to **WASM** and runs natively inside Cloudflare Workers — no sidecar, no control plane. Checkpoint-and-exit between tasks via D1, park on signals or delays, resume on cron. See the [`rag-agent-cf`](https://github.com/sayiir/sayiir/tree/main/examples/rag-agent-cf) example.
 
 ---
 
