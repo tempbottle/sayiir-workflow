@@ -476,10 +476,11 @@ impl WorkflowContinuation {
         }
     }
 
-    /// Build a [`TaskHint`] from the first task in this continuation.
+    /// Build a [`crate::snapshot::TaskHint`] from the first task in this continuation.
     ///
-    /// Combines [`first_task_id`], [`first_task_priority`], and [`first_task_tags`]
-    /// into a single struct for passing through `prepare_run` and `ParkReason`.
+    /// Combines [`Self::first_task_id`], [`Self::first_task_priority`], and
+    /// [`Self::first_task_tags`] into a single struct for passing through
+    /// `prepare_run` and `ParkReason`.
     #[must_use]
     pub fn first_task_hint(&self) -> crate::snapshot::TaskHint {
         crate::snapshot::TaskHint {
@@ -1365,8 +1366,8 @@ pub struct SerializedWorkflowState {
     pub continuation: SerializableContinuation,
 }
 
-/// Policy controlling what happens when [`run()`] is called with an
-/// `instance_id` that already has a persisted snapshot.
+/// Policy controlling what happens when a workflow `run()` is called
+/// with an `instance_id` that already has a persisted snapshot.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum::EnumString, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum ConflictPolicy {

@@ -392,9 +392,9 @@ impl WorkflowSnapshotState {
         }
     }
 
-    /// Convert the snapshot state to a [`WorkflowStatus`], including parked
+    /// Convert the snapshot state to a [`crate::workflow::WorkflowStatus`], including parked
     /// in-progress positions (delay, signal, fork) instead of collapsing them
-    /// to [`WorkflowStatus::InProgress`].
+    /// to [`crate::workflow::WorkflowStatus::InProgress`].
     #[must_use]
     pub fn as_status(&self) -> crate::workflow::WorkflowStatus {
         use crate::workflow::WorkflowStatus;
