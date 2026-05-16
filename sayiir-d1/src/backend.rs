@@ -165,8 +165,10 @@ where
                  (s.delay_wake_at IS NOT NULL AND s.delay_wake_at <= datetime('now'))
                  OR
                  (s.position_kind = 'AtSignal'
+                  AND s.awaited_signal_name IS NOT NULL
                   AND EXISTS (SELECT 1 FROM sayiir_workflow_events e
-                              WHERE e.instance_id = s.instance_id))
+                              WHERE e.instance_id = s.instance_id
+                                AND e.signal_name = s.awaited_signal_name))
                  OR
                  (s.delay_wake_at IS NULL
                   AND (s.position_kind IS NULL

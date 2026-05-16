@@ -21,6 +21,7 @@ where
         let terminal = snapshot.state.is_terminal();
         let pos_kind = snapshot.position_kind();
         let wake_at = dt_to_sqlite(snapshot.delay_wake_at());
+        let awaited_signal = snapshot.awaited_signal_name();
 
         let now = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
         let completed_at_expr = if terminal { now } else { "NULL" };
@@ -29,8 +30,8 @@ where
             "INSERT INTO sayiir_workflow_snapshots
                 (instance_id, status, definition_hash, current_task_id,
                  completed_task_count, data, error, position_kind, delay_wake_at,
-                 trace_parent, completed_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                 trace_parent, awaited_signal_name, completed_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                      {completed_at_expr}, {now})
              ON CONFLICT (instance_id) DO UPDATE SET
                 status = ?2,
@@ -42,6 +43,7 @@ where
                 position_kind = ?8,
                 delay_wake_at = ?9,
                 trace_parent = ?10,
+                awaited_signal_name = ?11,
                 completed_at = CASE WHEN {terminal} THEN {now} ELSE sayiir_workflow_snapshots.completed_at END,
                 updated_at = {now}",
             terminal = if terminal { "1" } else { "0" },
@@ -59,6 +61,7 @@ where
             .bind(pos_kind) // ?8
             .bind(&wake_at) // ?9
             .bind(snapshot.trace_parent.as_deref()) // ?10
+            .bind(awaited_signal) // ?11
             .execute(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;

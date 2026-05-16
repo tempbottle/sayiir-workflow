@@ -263,8 +263,15 @@ async fn resolve_parked<B: SignalStore>(
                 return Ok(Some(status));
             }
 
-            // Try to consume a buffered signal
-            if let Ok(Some(payload)) = backend.consume_event(instance_id, &signal_name).await {
+            // Try to consume a buffered signal. Propagate backend errors —
+            // silently treating them like "no buffered signal" leaves the
+            // workflow stuck in AwaitingSignal until timeout when the
+            // problem may be transient and worth surfacing immediately.
+            if let Some(payload) = backend
+                .consume_event(instance_id, &signal_name)
+                .await
+                .map_err(to_js_error)?
+            {
                 snapshot.mark_task_completed(signal_id.clone(), payload);
                 if let Some(next_id) = next_task_id {
                     snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
