@@ -1,0 +1,15 @@
+{
+  "name": "sayiir-workspace",
+  "private": true,
+  "pnpm": {
+    "overrides": {
+      "postcss": "^8.5.14",
+      "undici": "^7.25.0",
+      "uuid": "^13.0.2",
+      "picomatch@^2": "^2.3.2",
+      "picomatch@^4": "^4.0.4",
+      "protobufjs": "^7.5.8",
+      "yaml": "^2.9.0"
+    }
+  }
+}
