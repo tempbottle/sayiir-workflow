@@ -9,7 +9,7 @@
  *   - `Engine` class — durable with D1 checkpointing (production)
  */
 
-import type { Workflow } from "sayiir-flow-js";
+import type { Workflow } from "@sayiir/flow-js";
 import type { WorkflowStatus } from "./types.js";
 import { WorkflowError } from "./types.js";
 

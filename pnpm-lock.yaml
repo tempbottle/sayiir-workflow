@@ -35,12 +35,12 @@ importers:
 
   sayiir-cloudflare-js:
     dependencies:
+      '@sayiir/flow-js':
+        specifier: workspace:*
+        version: link:../sayiir-flow-js
       ms:
         specifier: ^2.1.3
         version: 2.1.3
-      sayiir-flow-js:
-        specifier: workspace:*
-        version: link:../sayiir-flow-js
       zod:
         specifier: ^3.0.0
         version: 3.25.76
@@ -79,12 +79,12 @@ importers:
 
   sayiir-nodejs:
     dependencies:
+      '@sayiir/flow-js':
+        specifier: workspace:*
+        version: link:../sayiir-flow-js
       ms:
         specifier: ^2.1.3
         version: 2.1.3
-      sayiir-flow-js:
-        specifier: workspace:*
-        version: link:../sayiir-flow-js
       zod:
         specifier: ^3.0.0
         version: 3.25.76

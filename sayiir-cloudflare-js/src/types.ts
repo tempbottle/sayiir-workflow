@@ -1,11 +1,11 @@
 /**
  * Core type definitions for the Sayiir Cloudflare Workers engine.
  *
- * Pure types are re-exported from sayiir-flow-js.
+ * Pure types are re-exported from @sayiir/flow-js.
  * WASM-specific types are defined here.
  */
 
-// Re-export all pure types from sayiir-flow-js
+// Re-export all pure types from @sayiir/flow-js
 export type {
   Duration,
   LoopOptions,
@@ -16,9 +16,9 @@ export type {
   WorkflowStatus,
   ZodLike,
   MaxIterationsPolicy,
-} from "sayiir-flow-js";
+} from "@sayiir/flow-js";
 
-export { LoopResult, WorkflowError, TaskError, BackendError } from "sayiir-flow-js";
+export { LoopResult, WorkflowError, TaskError, BackendError } from "@sayiir/flow-js";
 
 /** All possible workflow status values returned by the WASM layer. */
 export type WasmWorkflowStatusKind =

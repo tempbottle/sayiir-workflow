@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "ms": "^2.1.3",
-    "sayiir-flow-js": "workspace:*"
+    "@sayiir/flow-js": "workspace:*"
   },
   "optionalDependencies": {
     "@sayiir/node-darwin-arm64": "workspace:*",

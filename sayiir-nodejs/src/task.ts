@@ -1,16 +1,16 @@
 /**
  * Task definition for workflow steps.
  *
- * The pure `task()` factory is re-exported from sayiir-flow-js.
+ * The pure `task()` factory is re-exported from @sayiir/flow-js.
  * `getTaskContext()` stays here because it depends on the native addon.
  */
 
 import type { NapiTaskExecutionContext } from "./native.js";
 import { getNative } from "./native.js";
 
-// Re-export from sayiir-flow-js
-export { task } from "sayiir-flow-js";
-export type { TaskFn } from "sayiir-flow-js";
+// Re-export from @sayiir/flow-js
+export { task } from "@sayiir/flow-js";
+export type { TaskFn } from "@sayiir/flow-js";
 
 /** Task execution context available from within a running task. */
 export type TaskExecutionContext = NapiTaskExecutionContext;

@@ -272,7 +272,9 @@ jobs:
         run: pnpm install --no-frozen-lockfile
 
       - name: Build WASM
-        run: wasm-pack build sayiir-cloudflare --target web --out-dir ../sayiir-cloudflare-js/wasm
+        run: |
+          wasm-pack build sayiir-cloudflare --target web --out-dir ../sayiir-cloudflare-js/wasm
+          rm -f sayiir-cloudflare-js/wasm/.gitignore sayiir-cloudflare-js/wasm/package.json sayiir-cloudflare-js/wasm/README.md
 
       - name: Lint
         working-directory: sayiir-cloudflare-js
