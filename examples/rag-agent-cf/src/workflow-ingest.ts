@@ -24,6 +24,7 @@
  */
 
 import { task, flow, type Workflow } from "@sayiir/cloudflare";
+import { parse as parseHtml } from "node-html-parser";
 
 import {
   EMBEDDING_MODEL,
@@ -74,21 +75,16 @@ export function buildIngestWorkflow(
       const contentType = res.headers.get("content-type") ?? "text/html";
       const raw = await res.text();
 
-      // Extract title + plaintext.
+      // Extract title + plaintext. node-html-parser strips tags and decodes
+      // entities; we drop script/style subtrees first so their contents
+      // don't bleed into the extracted text.
+      const doc = parseHtml(raw);
+      doc.querySelectorAll("script, style").forEach((n) => n.remove());
       const title =
-        raw.match(/<title>([^<]+)<\/title>/i)?.[1]?.trim() ??
-        raw.match(/<h1[^>]*>([^<]+)<\/h1>/i)?.[1]?.trim() ??
+        doc.querySelector("title")?.text?.trim() ||
+        doc.querySelector("h1")?.text?.trim() ||
         null;
-      const text = raw
-        .replace(/<script[\s\S]*?<\/script>/gi, " ")
-        .replace(/<style[\s\S]*?<\/style>/gi, " ")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/&nbsp;/g, " ")
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/\s+/g, " ")
-        .trim();
+      const text = doc.text.replace(/\s+/g, " ").trim();
 
       // Chunk.
       const chunks = chunkText(text);
