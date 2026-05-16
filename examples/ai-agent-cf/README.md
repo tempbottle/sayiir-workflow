@@ -54,6 +54,7 @@ Paste the printed `database_id` into `wrangler.jsonc`. Then apply the schema
 migration only adds the example's `agent_drafts` / `agent_reports` tables):
 
 ```bash
+# from examples/ai-agent-cf
 pnpm db:migrate:local      # for `wrangler dev`
 # or
 pnpm db:migrate:remote     # for deployed
@@ -121,6 +122,7 @@ eviction re-runs once; everything before it stays skipped.
 ## Deploy
 
 ```bash
+# from examples/ai-agent-cf
 pnpm db:migrate:remote
 pnpm deploy
 ```
