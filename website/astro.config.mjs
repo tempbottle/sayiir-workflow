@@ -39,6 +39,7 @@ export default defineConfig({
             { label: "Python Quick Start", slug: "getting-started/python" },
             { label: "Node.js Quick Start", slug: "getting-started/nodejs" },
             { label: "Rust Quick Start", slug: "getting-started/rust" },
+            { label: "Cloudflare Workers", slug: "getting-started/cloudflare", badge: "New" },
           ],
         },
         {

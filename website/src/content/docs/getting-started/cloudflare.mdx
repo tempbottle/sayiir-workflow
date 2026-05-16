@@ -1,0 +1,153 @@
+---
+title: Cloudflare Workers Quick Start
+description: Run Sayiir durable workflows inside Cloudflare Workers — Rust/WASM core, D1 persistence, checkpoint-and-exit execution across requests and cron sweeps.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Sayiir runs natively inside Cloudflare Workers. A Rust/WASM core handles orchestration and checkpointing; persistence lives in [D1](https://developers.cloudflare.com/d1/) — SQLite at the edge. No external database, no separate orchestrator.
+
+## Installation
+
+```bash
+pnpm add @sayiir/cloudflare
+```
+
+## D1 binding
+
+Add a D1 database to `wrangler.toml`:
+
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "sayiir"
+database_id = "<your-database-id>"
+```
+
+```typescript
+interface Env {
+  DB: D1Database;
+}
+```
+
+## Simple workflow
+
+```typescript
+import { task, flow, Engine } from "@sayiir/cloudflare";
+
+const fetchUser = task("fetch-user", async (id: number) => {
+  const res = await fetch(`https://api.example.com/users/${id}`);
+  return res.json() as Promise<{ id: number; name: string }>;
+});
+
+const sendEmail = task("send-email", async (user: { id: number; name: string }) => {
+  return `Sent welcome to ${user.name}`;
+});
+
+const onboarding = flow<number>("onboarding")
+  .then(fetchUser)
+  .then(sendEmail)
+  .build();
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const engine = await Engine.create(env.DB);
+    const status = await engine.run(onboarding, "onboard-42", 42);
+    return Response.json(status);
+  },
+};
+```
+
+Sayiir checkpoints to D1 after every task. Completed tasks are never re-executed — the task in-flight at eviction is the only one that re-runs on resume.
+
+## Parking — delays and signals
+
+Workers are short-lived. When a workflow hits a `delay()` or `waitForSignal()` it **parks**: the engine writes a snapshot to D1, returns a non-completed status with wake-up metadata, and your Worker returns a response. A later trigger (cron, queue, HTTP) resumes execution.
+
+```typescript
+const orderApproval = flow<string>("order-approval")
+  .then(submitOrder)
+  .delay("cooling-period", "1h")
+  .waitForSignal("approval", "manager_approval", { timeout: "48h" })
+  .then(notifyCustomer)
+  .build();
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const engine = await Engine.create(env.DB);
+    const instanceId = new URL(request.url).pathname.split("/").pop()!;
+    const status = await engine.run(orderApproval, instanceId, instanceId);
+    return Response.json(status, { status: status.status === "completed" ? 200 : 202 });
+  },
+
+  async scheduled(event: ScheduledEvent, env: Env): Promise<void> {
+    const engine = await Engine.create(env.DB);
+    await engine.resumeAll(orderApproval);
+  },
+};
+```
+
+## Signals — external events
+
+```typescript
+const engine = await Engine.create(env.DB);
+await engine.sendSignal(instanceId, "manager_approval", { approvedBy: "alice" });
+```
+
+The next `engine.resume()` picks up the buffered signal and continues. For lower latency than the cron interval, call `engine.resume()` inline from the signal handler.
+
+## Recovering from eviction
+
+`engine.resumeAll()` in a `scheduled` handler sweeps three categories of instances in one pass:
+
+1. Parked instances whose delay or signal timeout has elapsed.
+2. Instances waiting on a signal that has already been delivered.
+3. Actively-running instances with no update within `staleAfter` seconds (default 300) — the Worker eviction recovery path.
+
+```typescript
+async scheduled(event: ScheduledEvent, env: Env): Promise<void> {
+  const engine = await Engine.create(env.DB);
+  await engine.resumeAll(orderApproval, { staleAfter: 60, limit: 20 });
+}
+```
+
+The stale path explicitly **excludes** parked positions — a workflow correctly waiting on an external signal won't get re-resumed every `staleAfter` window just because its snapshot is old. Only a buffered event or an explicit `resume()` wakes it.
+
+## Conflict policy
+
+`engine.run(workflow, instanceId, input)` is **not** an idempotent alias for `resume()`. By default it throws when an instance with the same id already exists — the correct action for a known instance is `resume()`.
+
+```typescript
+const engine = await Engine.create(env.DB);                                        // fail (default)
+const engine = await Engine.create(env.DB, { conflictPolicy: "use_existing" });    // idempotent retries
+const engine = await Engine.create(env.DB, { conflictPolicy: "terminate_existing" }); // force fresh start
+```
+
+A definition-hash mismatch against an existing snapshot is always a hard error — you can't restart a different workflow under the same id.
+
+## Fork / join, loops, routing
+
+The full flow builder works on Workers:
+
+```typescript
+const checkout = flow<{ id: number }>("checkout")
+  .fork([
+    branch("inventory", checkInventory),
+    branch("payment", validatePayment),
+  ])
+  .join("finalize", ([inventory, payment]) => ({ ...inventory, ...payment }))
+  .build();
+```
+
+Branches run sequentially inside a single Worker invocation (single-threaded), but each branch checkpoints independently — only uncompleted branches re-execute on resume.
+
+<Aside type="tip">
+A full durable AI agent example with fork/join, Workers AI, signal-based approval, and cron-driven resume lives at [`examples/ai-agent-cf`](https://github.com/sayiir/sayiir/tree/main/examples/ai-agent-cf).
+</Aside>
+
+## Next steps
+
+- [Node.js API Reference](/reference/nodejs-api/) — Same surface as `@sayiir/cloudflare` minus backend specifics
+- [Durable Workflows](/guides/durable-workflows/) — Lifecycle operations
+- [Signals & Events](/guides/signals-and-events/) — Wait for external events
+- [Parallel Workflows](/guides/parallel-workflows/) — Fork/join parallelism
