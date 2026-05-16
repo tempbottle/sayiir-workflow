@@ -1009,6 +1009,25 @@ impl WorkflowSnapshot {
         }
     }
 
+    /// The name of the signal a workflow is currently waiting on, if it is
+    /// parked at an `AtSignal` position. `None` otherwise.
+    ///
+    /// Backends denormalize this into an `awaited_signal_name` column so
+    /// the `resumeAll` "signalled" pickup branch can filter buffered events
+    /// by (`instance_id`, `signal_name`) — without it, an event delivered
+    /// for a different signal would keep re-resuming the workflow
+    /// indefinitely.
+    #[must_use]
+    pub fn awaited_signal_name(&self) -> Option<&str> {
+        match &self.state {
+            WorkflowSnapshotState::InProgress {
+                position: ExecutionPosition::AtSignal { signal_name, .. },
+                ..
+            } => Some(signal_name.as_str()),
+            _ => None,
+        }
+    }
+
     /// The wake-at time when the workflow can next make progress, if it is
     /// parked at a delay, timed signal, or fork-with-delayed-branch.
     ///
