@@ -145,6 +145,25 @@ Branches run sequentially inside a single Worker invocation (single-threaded), b
 A full durable RAG example — hybrid retrieval (Vectorize + D1 FTS5), citation verification in a loop, and a `waitForSignal` low-confidence fallback with 5-minute timeout — lives at [`examples/rag-agent-cf`](https://github.com/sayiir/sayiir/tree/main/examples/rag-agent-cf).
 </Aside>
 
+## D1 snapshot size limit
+
+Sayiir checkpoints each task's return value as a JSON row in D1, and D1 imposes a **~1MB row size limit**. Most workflow values are well under this, but a few patterns can push intermediate state past the limit:
+
+- chunked documents (full text + per-chunk text + overlap)
+- batched embeddings (hundreds of 768-dim float vectors per task)
+- bulk API responses passed forward intact
+
+A `string or blob too big: SQLITE_TOOBIG` error from a task return is the symptom. The fix is to **shrink the value that crosses the checkpoint**, not the work itself. Two common reshapings:
+
+1. **Pass an ID, re-read on the other side.** Persist heavy state to the bindings you already have (D1 tables, R2, Vectorize) inside the task, then return only the identifier. Downstream tasks re-read what they need.
+2. **Coalesce tasks.** Combine the two adjacent tasks that share heavy state into one task so the data never crosses a checkpoint. Trade-off: a Worker eviction inside the combined task loses both stages' work.
+
+`@sayiir/cloudflare` already supports binary types (`ArrayBuffer`, `Uint8Array`) across task boundaries via a tagged JSON envelope, but the size budget still applies — base64-style array encoding adds ~5–7× overhead, so storing the raw bytes in R2 and passing the key is usually better than embedding them in workflow state.
+
+<Aside type="note">
+A planned **S3-compatible snapshot backend** will offload large task results to object storage transparently, lifting the per-task size limit for workflows that genuinely need to carry big values. Until that lands, prefer the "pass an ID, re-read" pattern above.
+</Aside>
+
 ## Next steps
 
 - [Node.js API Reference](/reference/nodejs-api/) — Same surface as `@sayiir/cloudflare` minus backend specifics

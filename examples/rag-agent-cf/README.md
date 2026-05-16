@@ -201,6 +201,25 @@ human-in-the-loop is the whole point of the pause.
 
 Want true durable timeouts on ask workflows? See "Tweak it" below.
 
+### Why two ingest tasks instead of six
+
+The ingest workflow is intentionally coarse: `prepareDoc` (fetch + extract +
+chunk + R2 put + D1 inserts) → `embedAndIndex` (read chunks back, embed,
+upsert to Vectorize). Only `{docId}` crosses the checkpoint boundary.
+
+Sayiir checkpoints each task's return value as a JSON row in D1, and **D1
+imposes a ~1MB row size limit**. A six-task pipeline that passed the chunked
+text or batched embeddings forward as intermediate values would routinely
+exceed that limit on real-world pages (a typical Wikipedia article comes out
+to ~250KB+ of JSON across full text + chunks with overlap + 768-dim
+embeddings × N chunks).
+
+The pattern this example uses — **persist heavy state inside the task, pass
+an ID forward, re-read on the other side** — is the general fix for the
+D1 size limit. See the [Cloudflare quick-start docs](https://docs.sayiir.dev/getting-started/cloudflare/#d1-snapshot-size-limit)
+for the broader story and the planned S3 snapshot backend that will lift
+this restriction.
+
 ## Tweak it
 
 - **Per-chunk fork on ingest** — split `embed` into N static fork branches

@@ -18,10 +18,9 @@
  *   in batches via Workers AI, and upserts the vectors into Vectorize.
  *
  * Trade-off: one Worker eviction during `prepareDoc` loses the entire
- * fetch+chunk+R2 work. For the example that's acceptable — the alternative
- * (fine-grained tasks) keeps hitting the D1 row size limit on real-world
- * pages. The README "Tweak it" section explains how to split further if
- * you want per-step recovery.
+ * fetch+chunk+R2 work. For the example that's acceptable — see the
+ * "D1 snapshot size limit" section of the README for the broader story
+ * and the planned S3 snapshot backend for large blobs.
  */
 
 import { task, flow, type Workflow } from "@sayiir/cloudflare";
