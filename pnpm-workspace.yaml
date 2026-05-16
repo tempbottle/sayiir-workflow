@@ -1,0 +1,6 @@
+packages:
+  - "sayiir-flow-js"
+  - "sayiir-nodejs"
+  - "sayiir-nodejs/npm/*"
+  - "sayiir-cloudflare-js"
+  - "examples/ai-agent-cf"

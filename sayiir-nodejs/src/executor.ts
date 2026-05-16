@@ -91,7 +91,7 @@ export async function runWorkflow<TIn, TOut>(
     if (status.status !== "completed") {
       throw new WorkflowError(
         `Workflow did not complete (status=${status.status}). ` +
-          `Use runDurableWorkflow() to inspect the full status.`,
+        `Use runDurableWorkflow() to inspect the full status.`,
       );
     }
     return status.output;

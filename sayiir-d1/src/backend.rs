@@ -4,7 +4,7 @@ use bytes::Bytes;
 use sayiir_core::codec::{self, Decoder, Encoder};
 use sayiir_core::snapshot::WorkflowSnapshot;
 use sayiir_persistence::BackendError;
-use sqlx::{Database, Executor, IntoArguments};
+use sqlx::{Database, Executor, IntoArguments, Row};
 
 use crate::schema::MIGRATION_SQL;
 
@@ -123,6 +123,66 @@ where
 {
     pub(crate) fn exec(&self) -> T {
         self.connection.clone()
+    }
+}
+
+impl<T> SQLiteBackend<T>
+where
+    for<'c> &'c T: Executor<'c, Database = crate::backend::BackendDB>,
+    T: Clone + Send + Sync,
+{
+    /// Find workflow instance ids that should be re-driven by a cron sweep.
+    ///
+    /// Returns instances in three categories, ordered by `updated_at` ascending
+    /// (oldest first) and capped at `limit`:
+    ///
+    /// 1. **Ready** — parked at `AtDelay`, `AtFork`, or timed `AtSignal`, with
+    ///    `delay_wake_at <= now()`.
+    /// 2. **Signalled** — parked at `AtSignal` (with or without timeout) and
+    ///    has at least one buffered event row. Covers fire-and-forget
+    ///    `send_signal` deliveries.
+    /// 3. **Stale** — actively executing positions (`AtTask`, `AtJoin`,
+    ///    `InLoop`, `NotStarted`, or NULL) not updated for at least
+    ///    `stale_after_seconds`. Recovers from a worker that was evicted
+    ///    mid-execution. Parked positions are excluded so workflows correctly
+    ///    awaiting an external signal aren't periodically re-resumed.
+    ///
+    /// New `ExecutionPosition` variants default to *excluded* from category 3
+    /// — extend the allow-list here when adding active-execution states.
+    ///
+    /// # Errors
+    /// Returns [`BackendError::Backend`] if the query fails.
+    pub async fn find_resumable_instances(
+        &self,
+        stale_after_seconds: u32,
+        limit: u32,
+    ) -> Result<Vec<String>, BackendError> {
+        let exec = self.exec();
+        let rows = sqlx::query(
+            "SELECT s.instance_id FROM sayiir_workflow_snapshots s
+             WHERE s.status = 'in_progress'
+               AND (
+                 (s.delay_wake_at IS NOT NULL AND s.delay_wake_at <= datetime('now'))
+                 OR
+                 (s.position_kind = 'AtSignal'
+                  AND EXISTS (SELECT 1 FROM sayiir_workflow_events e
+                              WHERE e.instance_id = s.instance_id))
+                 OR
+                 (s.delay_wake_at IS NULL
+                  AND (s.position_kind IS NULL
+                       OR s.position_kind IN ('AtTask', 'AtJoin', 'InLoop', 'NotStarted'))
+                  AND s.updated_at <= datetime('now', '-' || ?1 || ' seconds'))
+               )
+             ORDER BY s.updated_at ASC
+             LIMIT ?2",
+        )
+        .bind(i64::from(stale_after_seconds))
+        .bind(i64::from(limit))
+        .fetch_all(&exec)
+        .await
+        .map_err(|e| BackendError::Backend(e.to_string()))?;
+
+        Ok(rows.into_iter().map(|r| r.get("instance_id")).collect())
     }
 }
 
