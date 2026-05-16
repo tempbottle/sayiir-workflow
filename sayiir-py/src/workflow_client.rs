@@ -128,7 +128,6 @@ impl PyWorkflowClient {
                         first_task,
                         backend.as_ref(),
                         conflict_policy,
-                        true, // prechecked — check_existing_instance already ran
                     )
                     .await?
                     {

@@ -6,9 +6,9 @@
 //!
 //! # Exports
 //!
-//! - [`WasmFlowBuilder`] — builds `WorkflowContinuation` (mirrors `NapiFlowBuilder`)
-//! - [`WasmContinuationStepper`] — yields tasks one-by-one to JS via `current()` / `submitResult()`
-//! - [`WasmDurableEngine`] — checkpoint-and-exit orchestration with D1 persistence
+//! - `WasmFlowBuilder` — builds `WorkflowContinuation` (mirrors `NapiFlowBuilder`)
+//! - `WasmContinuationStepper` — yields tasks one-by-one to JS via `current()` / `submitResult()`
+//! - `WasmDurableEngine` — checkpoint-and-exit orchestration with D1 persistence
 //!
 
 #![cfg(target_arch = "wasm32")]

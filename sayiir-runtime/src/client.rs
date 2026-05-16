@@ -136,7 +136,6 @@ where
             first_task,
             self.backend.as_ref(),
             conflict_policy,
-            true, // prechecked — check_existing_instance already ran
         )
         .await?
         {

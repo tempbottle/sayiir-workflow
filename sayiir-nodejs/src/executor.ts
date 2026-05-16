@@ -11,6 +11,7 @@
 import type { Workflow } from "./flow.js";
 import type { NativeWorkflowStatus, WorkflowStatus } from "./types.js";
 import { WorkflowError } from "./types.js";
+import { parseAndRehydrate } from "./binary-codec.js";
 import type {
   NapiDurableEngine,
   NapiInMemoryBackend,
@@ -106,13 +107,16 @@ export async function runWorkflow<TIn, TOut>(
     if (!taskFn) {
       throw new WorkflowError(`Task '${step.taskId}' not found in registry`);
     }
-    const taskInput = step.inputJson != null ? JSON.parse(step.inputJson) : undefined;
+    const taskInput =
+      step.inputJson != null ? parseAndRehydrate(step.inputJson) : undefined;
     const output = await taskFn(taskInput);
     step = stepper.submitResult(output);
   }
 
   if (step.kind === "done") {
-    return (step.outputJson != null ? JSON.parse(step.outputJson) : undefined) as TOut;
+    return (step.outputJson != null
+      ? (parseAndRehydrate(step.outputJson) as TOut)
+      : (undefined as TOut));
   }
 
   throw new WorkflowError(`Unexpected step kind: ${step.kind}`);
@@ -234,7 +238,7 @@ function parseWorkflowStatus<TOut>(
       return {
         status: "completed",
         output: (raw.outputJson != null
-          ? JSON.parse(raw.outputJson)
+          ? parseAndRehydrate(raw.outputJson)
           : undefined) as TOut,
       };
     case "in_progress":

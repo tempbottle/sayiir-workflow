@@ -1,29 +1,30 @@
-//! Workflow lifecycle: prepare, resume, and finalize.
+//! Workflow lifecycle: resume + finalize (WASM-flavored).
 //!
-//! Minimal reimplementation of `sayiir-runtime`'s lifecycle functions for the
-//! WASM environment (no tokio dependency).
+//! Run-prep lives in `sayiir-persistence::prepare_run`; the bits that
+//! remain here are the resume / finalize / parked-position helpers
+//! (they're WASM-flavored because they return `JsValue` errors).
 
 use bytes::Bytes;
 use sayiir_core::error::WorkflowError;
-use sayiir_core::snapshot::{
-    ExecutionPosition, SignalKind, WorkflowSnapshot, WorkflowSnapshotState,
-};
-use sayiir_core::workflow::{ConflictPolicy, WorkflowStatus};
-use sayiir_persistence::{BackendError, SignalStore, SnapshotStore};
+use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
+use sayiir_core::workflow::WorkflowStatus;
+pub(crate) use sayiir_persistence::{PrepareRunOutcome, RunConflict, prepare_run};
+use sayiir_persistence::{SignalStore, SnapshotStore};
 
 use crate::error::to_js_error;
 
-/// Outcome of [`prepare_run`].
-pub(crate) enum PrepareRunOutcome {
-    /// Snapshot is fresh — execute the workflow from this state.
-    /// Boxed so the enum's size is dominated by `ExistingStatus` (the
-    /// cheap variant). `WorkflowSnapshot` is large enough that clippy's
-    /// `large_enum_variant` lint trips otherwise; the caller unboxes once
-    /// at the match site so there's no per-task allocation overhead.
-    Fresh(Box<WorkflowSnapshot>),
-    /// Existing instance reused under `UseExisting`. Caller must return
-    /// the carried status without executing.
-    ExistingStatus(WorkflowStatus, Option<Bytes>),
+/// Convert a `sayiir-persistence` [`RunConflict`] into a JS error
+/// suitable for surfacing through the wasm-bindgen boundary.
+pub(crate) fn run_conflict_to_js(err: RunConflict) -> wasm_bindgen::JsValue {
+    match err {
+        RunConflict::AlreadyExists(id) => to_js_error(format!(
+            "Workflow instance '{id}' already exists. Pass conflictPolicy: 'use_existing' or 'terminate_existing' to override, or call resume() instead.",
+        )),
+        RunConflict::DefinitionMismatch { expected, found } => to_js_error(format!(
+            "Workflow definition mismatch for existing snapshot: expected '{expected}', found '{found}'",
+        )),
+        RunConflict::Backend(e) => to_js_error(e.to_string()),
+    }
 }
 
 /// Outcome of [`prepare_resume`].
@@ -39,101 +40,6 @@ pub(crate) enum ResumeOutcome {
     Paused(WorkflowStatus),
     /// Parked position not yet ready.
     NotReady(WorkflowStatus),
-}
-
-/// Prepare a workflow run while honouring the configured [`ConflictPolicy`].
-///
-/// - **`Fail`** — returns `RunConflict::AlreadyExists` if a snapshot for
-///   `instance_id` already exists. This is the default and prevents the
-///   silent-overwrite footgun where `run()` is called twice with the same
-///   id on a parked workflow.
-/// - **`UseExisting`** — returns the existing instance's current status
-///   without re-executing; idempotent re-entry for clients that retry.
-/// - **`TerminateExisting`** — deletes the existing snapshot + clears
-///   cancel/pause signals, then starts fresh.
-///
-/// Definition-hash mismatches always abort regardless of policy.
-pub(crate) async fn prepare_run<B>(
-    instance_id: String,
-    definition_hash: String,
-    input_bytes: Bytes,
-    first_task_id: String,
-    backend: &B,
-    conflict_policy: ConflictPolicy,
-) -> Result<PrepareRunOutcome, RunConflict>
-where
-    B: SnapshotStore + SignalStore,
-{
-    match backend.load_snapshot(&instance_id).await {
-        Ok(existing) => {
-            if existing.definition_hash != definition_hash {
-                return Err(RunConflict::DefinitionMismatch {
-                    expected: definition_hash,
-                    found: existing.definition_hash,
-                });
-            }
-            match conflict_policy {
-                ConflictPolicy::Fail => return Err(RunConflict::AlreadyExists(instance_id)),
-                ConflictPolicy::UseExisting => {
-                    let output = existing.state.completed_output().cloned();
-                    return Ok(PrepareRunOutcome::ExistingStatus(
-                        existing.state.as_status(),
-                        output,
-                    ));
-                }
-                ConflictPolicy::TerminateExisting => {
-                    backend.delete_snapshot(&instance_id).await?;
-                    backend
-                        .clear_signal(&instance_id, SignalKind::Cancel)
-                        .await?;
-                    backend
-                        .clear_signal(&instance_id, SignalKind::Pause)
-                        .await?;
-                }
-            }
-        }
-        Err(BackendError::NotFound(_)) => {}
-        Err(e) => return Err(e.into()),
-    }
-
-    let mut snapshot =
-        WorkflowSnapshot::with_initial_input(instance_id, definition_hash, input_bytes);
-    snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: first_task_id,
-    });
-    backend.save_snapshot(&snapshot).await?;
-    Ok(PrepareRunOutcome::Fresh(Box::new(snapshot)))
-}
-
-/// Reasons [`prepare_run`] may reject a call.
-#[derive(Debug)]
-pub(crate) enum RunConflict {
-    /// `Fail` policy and the instance id is already in use.
-    AlreadyExists(String),
-    /// The existing snapshot was produced from a different workflow definition.
-    DefinitionMismatch { expected: String, found: String },
-    /// Backend I/O error.
-    Backend(BackendError),
-}
-
-impl From<BackendError> for RunConflict {
-    fn from(e: BackendError) -> Self {
-        RunConflict::Backend(e)
-    }
-}
-
-impl RunConflict {
-    pub(crate) fn into_js_error(self) -> wasm_bindgen::JsValue {
-        match self {
-            RunConflict::AlreadyExists(id) => to_js_error(format!(
-                "Workflow instance '{id}' already exists. Pass conflictPolicy: 'use_existing' or 'terminate_existing' to override, or call resume() instead.",
-            )),
-            RunConflict::DefinitionMismatch { expected, found } => to_js_error(format!(
-                "Workflow definition mismatch for existing snapshot: expected '{expected}', found '{found}'",
-            )),
-            RunConflict::Backend(e) => to_js_error(e.to_string()),
-        }
-    }
 }
 
 /// Prepare to resume a workflow from a saved snapshot.

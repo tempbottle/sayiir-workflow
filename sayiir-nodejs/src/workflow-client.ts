@@ -16,6 +16,7 @@
 import type { Workflow } from "./flow.js";
 import type { NapiWorkflowClient } from "./native.js";
 import type { NativeWorkflowStatus, WorkflowStatus } from "./types.js";
+import { parseAndRehydrate } from "./binary-codec.js";
 import {
   type Backend,
   type ConflictPolicy,
@@ -115,7 +116,7 @@ function parseWorkflowStatus<TOut>(
       return {
         status: "completed",
         output: (raw.outputJson != null
-          ? JSON.parse(raw.outputJson)
+          ? parseAndRehydrate(raw.outputJson)
           : undefined) as TOut,
       };
     case "in_progress":

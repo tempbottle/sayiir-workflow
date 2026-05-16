@@ -588,8 +588,12 @@ async fn test_checkpointing_skipped_tasks_bypass_timeout() {
 
 #[tokio::test]
 async fn test_prepare_run_creates_snapshot() {
+    // Use the persistence-level entry point — it does the full
+    // check-and-write in one call, which is what this standalone test
+    // wants. Runtime's `prepare_run` assumes a prior
+    // `check_existing_instance` (called via client.rs / distributed.rs).
     let backend = InMemoryBackend::new();
-    let outcome = prepare_run(
+    let outcome = sayiir_persistence::prepare_run(
         "inst-1".into(),
         "hash-1".into(),
         Bytes::from("input"),
@@ -599,14 +603,13 @@ async fn test_prepare_run_creates_snapshot() {
         },
         &backend,
         sayiir_core::workflow::ConflictPolicy::Fail,
-        false, // not prechecked — standalone call
     )
     .await
     .unwrap();
 
     let snapshot = match outcome {
-        crate::execution::PrepareRunOutcome::Fresh(s) => *s,
-        crate::execution::PrepareRunOutcome::ExistingStatus(..) => {
+        sayiir_persistence::PrepareRunOutcome::Fresh(s) => *s,
+        sayiir_persistence::PrepareRunOutcome::ExistingStatus(..) => {
             panic!("expected Fresh outcome")
         }
     };
@@ -615,7 +618,6 @@ async fn test_prepare_run_creates_snapshot() {
     assert_eq!(snapshot.definition_hash, "hash-1");
     assert!(snapshot.state.is_in_progress());
 
-    // Verify it was saved to backend
     let loaded = backend.load_snapshot("inst-1").await.unwrap();
     assert_eq!(loaded.instance_id, "inst-1");
 }

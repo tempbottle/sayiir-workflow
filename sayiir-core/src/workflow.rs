@@ -1368,7 +1368,17 @@ pub struct SerializedWorkflowState {
 
 /// Policy controlling what happens when a workflow `run()` is called
 /// with an `instance_id` that already has a persisted snapshot.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum::EnumString, strum::Display)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    strum::EnumString,
+    strum::Display,
+    strum::VariantNames,
+)]
 #[strum(serialize_all = "snake_case")]
 pub enum ConflictPolicy {
     /// Return an error if the instance already exists (default).
@@ -1380,6 +1390,34 @@ pub enum ConflictPolicy {
     /// Terminate the existing instance (delete snapshot + clear signals) and start fresh.
     #[strum(serialize = "terminate_existing", serialize = "terminateExisting")]
     TerminateExisting,
+}
+
+impl ConflictPolicy {
+    /// Parse an optional conflict-policy string. `None` yields the default
+    /// (`Fail`). On a malformed string, returns the original rejected value
+    /// so callers can build a binding-flavored error envelope (`JsValue`,
+    /// `napi::Error`, etc.).
+    ///
+    /// # Errors
+    ///
+    /// Returns the original `&str` on failure to parse.
+    pub fn parse_optional(s: Option<&str>) -> Result<Self, &str> {
+        match s {
+            None => Ok(Self::default()),
+            Some(val) => val.parse::<Self>().map_err(|_| val),
+        }
+    }
+
+    /// Canonical names accepted by [`Self::parse_optional`] (`snake_case`).
+    ///
+    /// Re-exports `<Self as strum::VariantNames>::VARIANTS` under a name
+    /// that callers can use without depending on `strum` directly — handy
+    /// for building error messages like
+    /// `"valid values: fail, use_existing, terminate_existing"`.
+    #[must_use]
+    pub fn valid_names() -> &'static [&'static str] {
+        <Self as strum::VariantNames>::VARIANTS
+    }
 }
 
 /// The status of a workflow execution.

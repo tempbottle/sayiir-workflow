@@ -119,7 +119,6 @@ impl NapiWorkflowClient {
                         first_task,
                         backend.as_ref(),
                         conflict_policy,
-                        true, // prechecked — check_existing_instance already ran
                     )
                     .await?
                     {
@@ -235,15 +234,13 @@ impl NapiWorkflowClient {
 
 /// Parse an optional conflict policy string.
 fn parse_conflict_policy(s: Option<&str>) -> Result<ConflictPolicy> {
-    match s {
-        None => Ok(ConflictPolicy::default()),
-        Some(val) => val.parse::<ConflictPolicy>().map_err(|_| {
-            Error::new(
-                Status::InvalidArg,
-                format!(
-                    "invalid conflictPolicy: {val:?} (expected \"fail\", \"useExisting\", or \"terminateExisting\")"
-                ),
-            )
-        }),
-    }
+    ConflictPolicy::parse_optional(s).map_err(|val| {
+        Error::new(
+            Status::InvalidArg,
+            format!(
+                "invalid conflictPolicy: {val:?} (valid: {})",
+                ConflictPolicy::valid_names().join(", "),
+            ),
+        )
+    })
 }

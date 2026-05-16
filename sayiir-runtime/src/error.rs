@@ -1,7 +1,7 @@
 //! Typed error for the sayiir runtime layer.
 
 use sayiir_core::error::{BoxError, BuildError, BuildErrors, CodecError, WorkflowError};
-use sayiir_persistence::BackendError;
+use sayiir_persistence::{BackendError, RunConflict};
 
 /// Typed error for the sayiir runtime layer.
 ///
@@ -50,6 +50,18 @@ impl From<BoxError> for RuntimeError {
 impl From<BuildError> for RuntimeError {
     fn from(error: BuildError) -> Self {
         Self::Build(BuildErrors::from(error))
+    }
+}
+
+impl From<RunConflict> for RuntimeError {
+    fn from(error: RunConflict) -> Self {
+        match error {
+            RunConflict::AlreadyExists(id) => Self::InstanceAlreadyExists(id),
+            RunConflict::DefinitionMismatch { expected, found } => {
+                Self::Workflow(WorkflowError::DefinitionMismatch { expected, found })
+            }
+            RunConflict::Backend(e) => Self::Backend(e),
+        }
     }
 }
 

@@ -5,30 +5,68 @@
 //! structured JSON (branch envelopes, named results) from valid JSON
 //! fragments — no `serde_json` needed.
 //!
+//! ## Binary types
+//!
+//! `JSON.stringify` is lossy for `ArrayBuffer` (returns `"{}"`) and
+//! `Uint8Array` (returns `{"0":...,"1":...}`). The codec works around
+//! this with a tagged-envelope round-trip:
+//!
+//! - **Encode**: a `stringify` replacer substitutes any `ArrayBuffer` or
+//!   `Uint8Array` value with `{"$sayiir_bin": [byte, byte, ...],
+//!   "$sayiir_kind": "ArrayBuffer" | "Uint8Array"}` before serialization.
+//! - **Decode**: a post-`parse` tree-walk rehydrates those tagged envelopes
+//!   back into real binary types.
+//!
+//! Other typed arrays (`Int32Array`, `Float64Array`, etc.) are not yet
+//! handled — call `.buffer` on them to obtain an `ArrayBuffer` first.
+//!
 //! ## Fork/join branch results
 //!
 //! Branch results are encoded as a plain JSON object `{"name1":val1,...}`
 //! by splicing together the already-valid JSON bytes of each branch output.
 
 use bytes::Bytes;
-use js_sys::JSON;
-use wasm_bindgen::JsValue;
+use js_sys::{Array, ArrayBuffer, JSON, JsString, Object, Reflect, Uint8Array};
+use wasm_bindgen::prelude::wasm_bindgen;
+use wasm_bindgen::{JsCast, JsError, JsValue};
 
 use crate::error::to_js_error;
 
+const TAG_BIN: &str = "$sayiir_bin";
+const TAG_KIND: &str = "$sayiir_kind";
+
+#[wasm_bindgen]
+extern "C" {
+    /// Mirror of `JSON.parse(text, reviver)` — `js_sys 0.3.98` only exposes
+    /// the no-reviver and replacer-flavored variants of stringify, so we
+    /// surface the reviver-flavored parse manually for codec rehydration.
+    #[wasm_bindgen(catch, js_namespace = JSON, js_name = parse)]
+    fn parse_with_reviver_func(
+        text: &str,
+        reviver: &mut dyn FnMut(JsString, JsValue) -> Result<JsValue, JsError>,
+    ) -> Result<JsValue, JsValue>;
+}
+
 /// Encode a JavaScript value to JSON bytes.
+///
+/// `ArrayBuffer` and `Uint8Array` values inside `value` (at any depth) are
+/// replaced with a tagged envelope so they survive the round-trip.
 ///
 /// # Errors
 ///
 /// Returns a JS error if `JSON.stringify` fails.
 pub(crate) fn encode_js_value(value: &JsValue) -> Result<Bytes, JsValue> {
-    let json_string =
-        JSON::stringify(value).map_err(|_| to_js_error("Failed to stringify JS value"))?;
+    let mut replacer = binary_replacer;
+    let json_string = JSON::stringify_with_replacer_func(value, &mut replacer, None)
+        .map_err(|_| to_js_error("Failed to stringify JS value"))?;
     let s: String = json_string.into();
     Ok(Bytes::from(s.into_bytes()))
 }
 
 /// Decode JSON bytes to a JavaScript value.
+///
+/// Tagged binary envelopes produced by [`encode_js_value`] are rehydrated
+/// back into `ArrayBuffer` / `Uint8Array` instances.
 ///
 /// # Errors
 ///
@@ -36,7 +74,96 @@ pub(crate) fn encode_js_value(value: &JsValue) -> Result<Bytes, JsValue> {
 pub(crate) fn decode_to_js_value(bytes: &Bytes) -> Result<JsValue, JsValue> {
     let json_str = std::str::from_utf8(bytes)
         .map_err(|e| to_js_error(format!("Invalid UTF-8 in bytes: {e}")))?;
-    JSON::parse(json_str).map_err(|_| to_js_error(format!("Invalid JSON: {json_str}")))
+    // Common case: payload has no binary envelopes. Skip the reviver
+    // walk (which `JSON.parse` would invoke for every node) and go
+    // straight to the fast no-reviver path.
+    if !json_str.contains("\"$sayiir_bin\"") {
+        return JSON::parse(json_str).map_err(|_| to_js_error(format!("Invalid JSON: {json_str}")));
+    }
+    let mut reviver = binary_reviver;
+    parse_with_reviver_func(json_str, &mut reviver)
+        .map_err(|_| to_js_error(format!("Invalid JSON: {json_str}")))
+}
+
+/// Replacer hook for `JSON.stringify`: substitutes binary values with a
+/// tagged envelope so they survive the JSON round-trip.
+///
+/// Returning `Some(value)` keeps the value (possibly substituted) in the
+/// output; returning `None` would drop the entry, which we never want.
+fn binary_replacer(_key: JsString, value: JsValue) -> Result<Option<JsValue>, JsError> {
+    if let Some(envelope) = binary_envelope(&value)? {
+        return Ok(Some(envelope));
+    }
+    Ok(Some(value))
+}
+
+/// Reviver hook for `JSON.parse`: rehydrates tagged envelopes back into
+/// `ArrayBuffer` / `Uint8Array` instances. Other values pass through.
+fn binary_reviver(_key: JsString, value: JsValue) -> Result<JsValue, JsError> {
+    if let Some(bin) = try_rehydrate_envelope(&value)? {
+        return Ok(bin);
+    }
+    Ok(value)
+}
+
+/// Build the tagged envelope for an `ArrayBuffer` or `Uint8Array`, or
+/// `Ok(None)` if `value` isn't a supported binary type.
+fn binary_envelope(value: &JsValue) -> Result<Option<JsValue>, JsError> {
+    let (bytes_array, kind): (Uint8Array, &str) = if value.is_instance_of::<ArrayBuffer>() {
+        (Uint8Array::new(value), "ArrayBuffer")
+    } else if value.is_instance_of::<Uint8Array>() {
+        let u8 = value.unchecked_ref::<Uint8Array>();
+        (u8.clone(), "Uint8Array")
+    } else {
+        return Ok(None);
+    };
+
+    let bytes = bytes_array.to_vec();
+    let arr = Array::new_with_length(bytes.len() as u32);
+    for (i, b) in bytes.into_iter().enumerate() {
+        arr.set(i as u32, JsValue::from_f64(f64::from(b)));
+    }
+
+    let env = Object::new();
+    Reflect::set(&env, &JsValue::from_str(TAG_BIN), &arr.into())
+        .map_err(|_| JsError::new("Failed to set $sayiir_bin"))?;
+    Reflect::set(&env, &JsValue::from_str(TAG_KIND), &JsValue::from_str(kind))
+        .map_err(|_| JsError::new("Failed to set $sayiir_kind"))?;
+    Ok(Some(env.into()))
+}
+
+/// If `value` is a binary envelope, decode it back to the original binary
+/// type. Returns `Ok(None)` for anything else.
+fn try_rehydrate_envelope(value: &JsValue) -> Result<Option<JsValue>, JsError> {
+    if !value.is_object() || Array::is_array(value) {
+        return Ok(None);
+    }
+    let bin = Reflect::get(value, &JsValue::from_str(TAG_BIN))
+        .map_err(|_| JsError::new("Reflect.get $sayiir_bin"))?;
+    let kind = Reflect::get(value, &JsValue::from_str(TAG_KIND))
+        .map_err(|_| JsError::new("Reflect.get $sayiir_kind"))?;
+    if !Array::is_array(&bin) {
+        return Ok(None);
+    }
+    let kind_str = match kind.as_string() {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let arr = Array::from(&bin);
+    let len = arr.length();
+    let u8 = Uint8Array::new_with_length(len);
+    for i in 0..len {
+        let byte = arr.get(i).as_f64().unwrap_or(0.0) as u8;
+        u8.set_index(i, byte);
+    }
+
+    let out: JsValue = match kind_str.as_str() {
+        "ArrayBuffer" => u8.buffer().into(),
+        "Uint8Array" => u8.into(),
+        _ => return Ok(None),
+    };
+    Ok(Some(out))
 }
 
 /// Decode a JSON-encoded string from bytes (e.g. `"my_key"` → `my_key`).
@@ -242,5 +369,94 @@ mod tests {
     fn loop_result_missing_tag() {
         let bytes = br#"{"value":1}"#;
         assert!(decode_loop_result(bytes).is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn arraybuffer_roundtrip() {
+        let u8 = Uint8Array::new_with_length(4);
+        u8.set_index(0, 0x00);
+        u8.set_index(1, 0x7f);
+        u8.set_index(2, 0xc0);
+        u8.set_index(3, 0xff);
+        let buf: JsValue = u8.buffer().into();
+
+        let bytes = encode_js_value(&buf).unwrap();
+        let s = std::str::from_utf8(&bytes).unwrap();
+        assert!(s.contains("$sayiir_bin"));
+        assert!(s.contains("ArrayBuffer"));
+
+        let decoded = decode_to_js_value(&bytes).unwrap();
+        assert!(decoded.is_instance_of::<ArrayBuffer>());
+        let round = Uint8Array::new(&decoded);
+        assert_eq!(round.length(), 4);
+        assert_eq!(round.get_index(0), 0x00);
+        assert_eq!(round.get_index(1), 0x7f);
+        assert_eq!(round.get_index(2), 0xc0);
+        assert_eq!(round.get_index(3), 0xff);
+    }
+
+    #[wasm_bindgen_test]
+    fn uint8array_roundtrip() {
+        let u8 = Uint8Array::new_with_length(3);
+        u8.set_index(0, 1);
+        u8.set_index(1, 2);
+        u8.set_index(2, 3);
+        let val: JsValue = u8.into();
+
+        let bytes = encode_js_value(&val).unwrap();
+        let decoded = decode_to_js_value(&bytes).unwrap();
+        assert!(decoded.is_instance_of::<Uint8Array>());
+        let round = decoded.unchecked_ref::<Uint8Array>();
+        assert_eq!(round.length(), 3);
+        assert_eq!(round.get_index(0), 1);
+        assert_eq!(round.get_index(1), 2);
+        assert_eq!(round.get_index(2), 3);
+    }
+
+    #[wasm_bindgen_test]
+    fn nested_binary_in_object_roundtrip() {
+        // { name: "doc", body: <Uint8Array [10, 20]> }
+        let u8 = Uint8Array::new_with_length(2);
+        u8.set_index(0, 10);
+        u8.set_index(1, 20);
+        let outer = js_sys::Object::new();
+        Reflect::set(
+            &outer,
+            &JsValue::from_str("name"),
+            &JsValue::from_str("doc"),
+        )
+        .unwrap();
+        Reflect::set(&outer, &JsValue::from_str("body"), &u8.into()).unwrap();
+
+        let bytes = encode_js_value(&outer.into()).unwrap();
+        let decoded = decode_to_js_value(&bytes).unwrap();
+
+        let name = Reflect::get(&decoded, &JsValue::from_str("name")).unwrap();
+        let body = Reflect::get(&decoded, &JsValue::from_str("body")).unwrap();
+        assert_eq!(name.as_string().as_deref(), Some("doc"));
+        assert!(body.is_instance_of::<Uint8Array>());
+        let body_u8 = body.unchecked_ref::<Uint8Array>();
+        assert_eq!(body_u8.get_index(0), 10);
+        assert_eq!(body_u8.get_index(1), 20);
+    }
+
+    #[wasm_bindgen_test]
+    fn binary_in_array_roundtrip() {
+        // [<Uint8Array [9]>, "next"]
+        let u8 = Uint8Array::new_with_length(1);
+        u8.set_index(0, 9);
+        let arr = Array::new();
+        arr.push(&u8.into());
+        arr.push(&JsValue::from_str("next"));
+
+        let bytes = encode_js_value(&arr.into()).unwrap();
+        let decoded = decode_to_js_value(&bytes).unwrap();
+
+        let out = Array::from(&decoded);
+        let first = out.get(0);
+        let second = out.get(1);
+        assert!(first.is_instance_of::<Uint8Array>());
+        assert_eq!(first.unchecked_ref::<Uint8Array>().get_index(0), 9);
+        assert_eq!(second.as_string().as_deref(), Some("next"));
     }
 }

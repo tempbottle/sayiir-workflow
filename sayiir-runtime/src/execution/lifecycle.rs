@@ -6,19 +6,11 @@ use sayiir_core::snapshot::{
     ExecutionPosition, SignalKind, TaskHint, WorkflowSnapshot, WorkflowSnapshotState,
 };
 use sayiir_core::workflow::{ConflictPolicy, WorkflowStatus};
+pub use sayiir_persistence::PrepareRunOutcome;
 use sayiir_persistence::{SignalStore, SnapshotStore};
 
 use super::helpers::ResumeParkedPosition;
 use crate::error::RuntimeError;
-
-/// Outcome of [`prepare_run`] when the conflict policy allows early return.
-#[derive(Debug)]
-pub enum PrepareRunOutcome {
-    /// A fresh snapshot was created — proceed with execution.
-    Fresh(Box<WorkflowSnapshot>),
-    /// The instance already exists and the policy says to reuse it.
-    ExistingStatus(WorkflowStatus, Option<Bytes>),
-}
 
 /// Check for an existing instance before encoding input.
 ///
@@ -76,20 +68,17 @@ where
     }
 }
 
-/// Prepare a fresh workflow run: create initial snapshot and save it.
+/// Prepare a fresh workflow run: create the initial snapshot and save it.
 ///
-/// When called after [`check_existing_instance`] (the recommended path), set
-/// `prechecked` to `true` to skip the redundant `load_snapshot`.  The only
-/// policy that still needs a backend read is **`TerminateExisting`** (cleanup
-/// of the old snapshot), which is handled regardless of the flag.
-///
-/// When `prechecked` is `false` the function performs the full existence check
-/// internally as a safety net — this is useful for callers that cannot
-/// guarantee a prior call to `check_existing_instance`.
+/// Requires the caller to have already called [`check_existing_instance`] —
+/// this function only handles the cleanup half of `TerminateExisting` and
+/// the snapshot write. Callers that need the full check-and-write in one
+/// shot should use [`sayiir_persistence::prepare_run`] directly (see the
+/// `test_prepare_run_creates_snapshot` test for the standalone shape).
 ///
 /// # Errors
-/// Returns an error if saving the initial snapshot fails or the conflict policy
-/// rejects the duplicate.
+/// Returns an error if saving the initial snapshot fails or the
+/// `TerminateExisting` cleanup fails.
 #[tracing::instrument(
     name = "lifecycle.prepare_run",
     skip(input_bytes, backend),
@@ -102,74 +91,27 @@ pub async fn prepare_run<B>(
     first_task: TaskHint,
     backend: &B,
     conflict_policy: ConflictPolicy,
-    prechecked: bool,
 ) -> Result<PrepareRunOutcome, RuntimeError>
 where
     B: SnapshotStore + SignalStore,
 {
-    tracing::debug!("preparing fresh workflow run");
-
-    // When prechecked == true the caller already verified via
-    // check_existing_instance that the instance doesn't exist (Fail /
-    // UseExisting) or that cleanup is needed (TerminateExisting).  We only
-    // need the backend round-trip for TerminateExisting cleanup.
-    if prechecked {
-        if matches!(conflict_policy, ConflictPolicy::TerminateExisting) {
-            // Best-effort cleanup — if nothing exists the deletes are no-ops.
-            match backend.load_snapshot(&instance_id).await {
-                Ok(_existing) => {
-                    tracing::info!("terminating existing instance before restart");
-                    backend.delete_snapshot(&instance_id).await?;
-                    backend
-                        .clear_signal(&instance_id, SignalKind::Cancel)
-                        .await?;
-                    backend
-                        .clear_signal(&instance_id, SignalKind::Pause)
-                        .await?;
-                }
-                Err(sayiir_persistence::BackendError::NotFound(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-    } else {
-        // Full safety-net path — check for an existing snapshot.
+    if matches!(conflict_policy, ConflictPolicy::TerminateExisting) {
+        // Best-effort cleanup — if nothing exists the deletes are no-ops.
         match backend.load_snapshot(&instance_id).await {
-            Ok(existing) => {
-                if existing.definition_hash != definition_hash {
-                    return Err(WorkflowError::DefinitionMismatch {
-                        expected: definition_hash,
-                        found: existing.definition_hash.clone(),
-                    }
-                    .into());
-                }
-                match conflict_policy {
-                    ConflictPolicy::Fail => {
-                        return Err(RuntimeError::InstanceAlreadyExists(instance_id));
-                    }
-                    ConflictPolicy::UseExisting => {
-                        let output = existing.state.completed_output().cloned();
-                        let status = existing.state.as_status();
-                        return Ok(PrepareRunOutcome::ExistingStatus(status, output));
-                    }
-                    ConflictPolicy::TerminateExisting => {
-                        tracing::info!("terminating existing instance before restart");
-                        backend.delete_snapshot(&instance_id).await?;
-                        backend
-                            .clear_signal(&instance_id, SignalKind::Cancel)
-                            .await?;
-                        backend
-                            .clear_signal(&instance_id, SignalKind::Pause)
-                            .await?;
-                    }
-                }
+            Ok(_existing) => {
+                tracing::info!("terminating existing instance before restart");
+                backend.delete_snapshot(&instance_id).await?;
+                backend
+                    .clear_signal(&instance_id, SignalKind::Cancel)
+                    .await?;
+                backend
+                    .clear_signal(&instance_id, SignalKind::Pause)
+                    .await?;
             }
-            Err(sayiir_persistence::BackendError::NotFound(_)) => {
-                // No existing snapshot — proceed normally
-            }
+            Err(sayiir_persistence::BackendError::NotFound(_)) => {}
             Err(e) => return Err(e.into()),
         }
     }
-
     let mut snapshot =
         WorkflowSnapshot::with_initial_input(instance_id, definition_hash, input_bytes);
     #[cfg(feature = "otel")]

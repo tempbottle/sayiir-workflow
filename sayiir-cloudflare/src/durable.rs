@@ -100,18 +100,18 @@ impl WasmDurableEngine {
     ) -> Result<WasmWorkflowStatus, JsValue> {
         let input_bytes = encode_js_value(&input)?;
         let continuation = Arc::clone(&workflow.continuation);
-        let first_task_id = continuation.first_task_id().to_string();
+        let first_task = continuation.first_task_hint();
 
         let outcome = lifecycle::prepare_run(
             instance_id,
             workflow.definition_hash.clone(),
             input_bytes.clone(),
-            first_task_id,
+            first_task,
             self.backend.as_ref(),
             self.conflict_policy,
         )
         .await
-        .map_err(lifecycle::RunConflict::into_js_error)?;
+        .map_err(lifecycle::run_conflict_to_js)?;
 
         let mut snapshot = match outcome {
             PrepareRunOutcome::Fresh(s) => *s,
@@ -855,8 +855,7 @@ fn cast_d1_database(db: JsValue) -> Result<D1Database, JsValue> {
             "expected a D1Database binding, got {db:?}"
         )));
     }
-    let has_prepare = js_sys::Reflect::has(&db, &JsValue::from_str("prepare"))
-        .unwrap_or(false);
+    let has_prepare = js_sys::Reflect::has(&db, &JsValue::from_str("prepare")).unwrap_or(false);
     if !has_prepare {
         return Err(JsValue::from_str(&format!(
             "expected a D1Database binding (object with a .prepare method), got {db:?}"
@@ -866,12 +865,10 @@ fn cast_d1_database(db: JsValue) -> Result<D1Database, JsValue> {
 }
 
 fn parse_conflict_policy(s: Option<&str>) -> Result<ConflictPolicy, JsValue> {
-    match s {
-        None => Ok(ConflictPolicy::default()),
-        Some(val) => val.parse::<ConflictPolicy>().map_err(|_| {
-            to_js_error(format!(
-                "Unknown conflict policy '{val}'. Valid values: 'fail', 'use_existing', 'terminate_existing'.",
-            ))
-        }),
-    }
+    ConflictPolicy::parse_optional(s).map_err(|val| {
+        to_js_error(format!(
+            "Unknown conflict policy '{val}'. Valid values: {}.",
+            ConflictPolicy::valid_names().join(", "),
+        ))
+    })
 }
