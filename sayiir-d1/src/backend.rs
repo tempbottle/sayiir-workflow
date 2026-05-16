@@ -89,7 +89,7 @@ impl<T, DB: Database> SQLiteBackend<T>
 where
     for<'c> &'c T: Executor<'c, Database = DB>,
     for<'a> DB::Arguments<'a>: IntoArguments<'a, DB>,
-    for<'r> i64: sqlx::Decode<'r, DB> + sqlx::Type<DB>,
+    for<'r> i64: sqlx::Decode<'r, DB> + sqlx::Encode<'r, DB> + sqlx::Type<DB>,
     usize: sqlx::ColumnIndex<DB::Row>,
     T: Clone,
 {
@@ -112,32 +112,57 @@ where
     pub async fn run_migrations(&self) -> Result<(), BackendError> {
         let conn = self.exec();
 
-        // Read current schema version. Both Sqlite and D1 expose
-        // `PRAGMA user_version` returning a single integer row.
-        let row = sqlx::query("PRAGMA user_version")
+        // Bootstrap the version table itself — idempotent. D1 forbids
+        // `PRAGMA user_version`, so we track the applied schema version
+        // in a regular row. The CHECK clause pins us to a single row.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sayiir_schema_version (
+                 id      INTEGER PRIMARY KEY CHECK (id = 1),
+                 version INTEGER NOT NULL
+             )",
+        )
+        .execute(&conn)
+        .await
+        .map_err(|e| BackendError::Backend(format!("create sayiir_schema_version: {e}")))?;
+        sqlx::query("INSERT OR IGNORE INTO sayiir_schema_version (id, version) VALUES (1, 0)")
+            .execute(&conn)
+            .await
+            .map_err(|e| BackendError::Backend(format!("seed sayiir_schema_version: {e}")))?;
+
+        let row = sqlx::query("SELECT version FROM sayiir_schema_version WHERE id = 1")
             .fetch_one(&conn)
             .await
-            .map_err(|e| BackendError::Backend(format!("read user_version: {e}")))?;
+            .map_err(|e| BackendError::Backend(format!("read schema version: {e}")))?;
         let current: i64 = row
             .try_get::<i64, _>(0_usize)
-            .map_err(|e| BackendError::Backend(format!("decode user_version: {e}")))?;
+            .map_err(|e| BackendError::Backend(format!("decode schema version: {e}")))?;
 
         for migration in MIGRATIONS {
             if i64::from(migration.version) <= current {
                 continue;
             }
-            sqlx::query(migration.sql)
-                .execute(&conn)
-                .await
-                .map_err(|e| {
-                    BackendError::Backend(format!("migration {} failed: {e}", migration.version))
-                })?;
-            sqlx::query(&format!("PRAGMA user_version = {}", migration.version))
+            match sqlx::query(migration.sql).execute(&conn).await {
+                Ok(_) => {}
+                // Tolerate columns that were added manually before the
+                // migrator existed — the schema is already where we want
+                // it. Other errors propagate.
+                Err(e) if e.to_string().contains("duplicate column name") => {
+                    // Schema is already where we want it.
+                }
+                Err(e) => {
+                    return Err(BackendError::Backend(format!(
+                        "migration {} failed: {e}",
+                        migration.version
+                    )));
+                }
+            }
+            sqlx::query("UPDATE sayiir_schema_version SET version = ?1 WHERE id = 1")
+                .bind(i64::from(migration.version))
                 .execute(&conn)
                 .await
                 .map_err(|e| {
                     BackendError::Backend(format!(
-                        "bump user_version to {}: {e}",
+                        "bump schema version to {}: {e}",
                         migration.version
                     ))
                 })?;
