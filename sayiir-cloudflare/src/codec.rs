@@ -12,10 +12,14 @@
 //! this with a tagged-envelope round-trip:
 //!
 //! - **Encode**: a `stringify` replacer substitutes any `ArrayBuffer` or
-//!   `Uint8Array` value with `{"$sayiir_bin": [byte, byte, ...],
+//!   `Uint8Array` value with `{"$sayiir_bin": "<base64>",
 //!   "$sayiir_kind": "ArrayBuffer" | "Uint8Array"}` before serialization.
-//! - **Decode**: a post-`parse` tree-walk rehydrates those tagged envelopes
-//!   back into real binary types.
+//! - **Decode**: a `parse` reviver decodes those tagged envelopes back
+//!   into real binary types.
+//!
+//! Base64 keeps the on-disk size to ~1.33× the raw bytes (versus ~5–7×
+//! for a JSON array of numbers); for a workflow snapshot subject to D1's
+//! ~1MB row size limit this matters.
 //!
 //! Other typed arrays (`Int32Array`, `Float64Array`, etc.) are not yet
 //! handled — call `.buffer` on them to obtain an `ArrayBuffer` first.
@@ -25,6 +29,8 @@
 //! Branch results are encoded as a plain JSON object `{"name1":val1,...}`
 //! by splicing together the already-valid JSON bytes of each branch output.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use js_sys::{Array, ArrayBuffer, JSON, JsString, Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -118,15 +124,15 @@ fn binary_envelope(value: &JsValue) -> Result<Option<JsValue>, JsError> {
         return Ok(None);
     };
 
-    let bytes = bytes_array.to_vec();
-    let arr = Array::new_with_length(bytes.len() as u32);
-    for (i, b) in bytes.into_iter().enumerate() {
-        arr.set(i as u32, JsValue::from_f64(f64::from(b)));
-    }
+    let encoded = BASE64.encode(bytes_array.to_vec());
 
     let env = Object::new();
-    Reflect::set(&env, &JsValue::from_str(TAG_BIN), &arr.into())
-        .map_err(|_| JsError::new("Failed to set $sayiir_bin"))?;
+    Reflect::set(
+        &env,
+        &JsValue::from_str(TAG_BIN),
+        &JsValue::from_str(&encoded),
+    )
+    .map_err(|_| JsError::new("Failed to set $sayiir_bin"))?;
     Reflect::set(&env, &JsValue::from_str(TAG_KIND), &JsValue::from_str(kind))
         .map_err(|_| JsError::new("Failed to set $sayiir_kind"))?;
     Ok(Some(env.into()))
@@ -142,21 +148,17 @@ fn try_rehydrate_envelope(value: &JsValue) -> Result<Option<JsValue>, JsError> {
         .map_err(|_| JsError::new("Reflect.get $sayiir_bin"))?;
     let kind = Reflect::get(value, &JsValue::from_str(TAG_KIND))
         .map_err(|_| JsError::new("Reflect.get $sayiir_kind"))?;
-    if !Array::is_array(&bin) {
+    let (Some(encoded), Some(kind_str)) = (bin.as_string(), kind.as_string()) else {
         return Ok(None);
-    }
-    let kind_str = match kind.as_string() {
-        Some(s) => s,
-        None => return Ok(None),
     };
+    let bytes = BASE64
+        .decode(encoded.as_bytes())
+        .map_err(|e| JsError::new(&format!("Invalid base64 in $sayiir_bin: {e}")))?;
+    let len_u32 = u32::try_from(bytes.len())
+        .map_err(|_| JsError::new("binary envelope exceeds u32::MAX bytes"))?;
 
-    let arr = Array::from(&bin);
-    let len = arr.length();
-    let u8 = Uint8Array::new_with_length(len);
-    for i in 0..len {
-        let byte = arr.get(i).as_f64().unwrap_or(0.0) as u8;
-        u8.set_index(i, byte);
-    }
+    let u8 = Uint8Array::new_with_length(len_u32);
+    u8.copy_from(&bytes);
 
     let out: JsValue = match kind_str.as_str() {
         "ArrayBuffer" => u8.buffer().into(),

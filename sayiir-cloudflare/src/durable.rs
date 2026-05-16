@@ -111,7 +111,7 @@ impl WasmDurableEngine {
             self.conflict_policy,
         )
         .await
-        .map_err(lifecycle::run_conflict_to_js)?;
+        .map_err(to_js_error)?;
 
         let mut snapshot = match outcome {
             PrepareRunOutcome::Fresh(s) => *s,

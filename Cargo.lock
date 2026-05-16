@@ -2649,6 +2649,7 @@ dependencies = [
 name = "sayiir-cloudflare"
 version = "0.4.0"
 dependencies = [
+ "base64",
  "bytes",
  "chrono",
  "js-sys",
@@ -2727,6 +2728,7 @@ dependencies = [
 name = "sayiir-node"
 version = "0.4.0"
 dependencies = [
+ "base64",
  "bytes",
  "chrono",
  "napi",

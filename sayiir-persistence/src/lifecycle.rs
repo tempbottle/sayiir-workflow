@@ -55,10 +55,13 @@ impl From<BackendError> for RunConflict {
 
 impl std::fmt::Display for RunConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Names are the canonical strum-serialized forms, which both the
+        // Rust `ConflictPolicy::*` variants and the JS `conflictPolicy:`
+        // engine option accept.
         match self {
             Self::AlreadyExists(id) => write!(
                 f,
-                "Workflow instance '{id}' already exists. Use ConflictPolicy::UseExisting or TerminateExisting to override, or call resume() instead.",
+                "Workflow instance '{id}' already exists. Use conflict policy 'use_existing' or 'terminate_existing' to override, or resume() instead.",
             ),
             Self::DefinitionMismatch { expected, found } => write!(
                 f,

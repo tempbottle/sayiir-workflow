@@ -8,24 +8,10 @@ use bytes::Bytes;
 use sayiir_core::error::WorkflowError;
 use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
 use sayiir_core::workflow::WorkflowStatus;
-pub(crate) use sayiir_persistence::{PrepareRunOutcome, RunConflict, prepare_run};
+pub(crate) use sayiir_persistence::{PrepareRunOutcome, prepare_run};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 
 use crate::error::to_js_error;
-
-/// Convert a `sayiir-persistence` [`RunConflict`] into a JS error
-/// suitable for surfacing through the wasm-bindgen boundary.
-pub(crate) fn run_conflict_to_js(err: RunConflict) -> wasm_bindgen::JsValue {
-    match err {
-        RunConflict::AlreadyExists(id) => to_js_error(format!(
-            "Workflow instance '{id}' already exists. Pass conflictPolicy: 'use_existing' or 'terminate_existing' to override, or call resume() instead.",
-        )),
-        RunConflict::DefinitionMismatch { expected, found } => to_js_error(format!(
-            "Workflow definition mismatch for existing snapshot: expected '{expected}', found '{found}'",
-        )),
-        RunConflict::Backend(e) => to_js_error(e.to_string()),
-    }
-}
 
 /// Outcome of [`prepare_resume`].
 pub(crate) enum ResumeOutcome {

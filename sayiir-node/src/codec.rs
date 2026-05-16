@@ -16,13 +16,15 @@
 //! value tree and substitutes any binary value with a tagged plain object:
 //!
 //! ```text
-//! { "$sayiir_bin": [byte, byte, ...], "$sayiir_kind": "Buffer" | "Uint8Array" | "ArrayBuffer" }
+//! { "$sayiir_bin": "<base64>", "$sayiir_kind": "Buffer" | "Uint8Array" | "ArrayBuffer" }
 //! ```
 //!
-//! On decode, a matching post-walk rehydrates those tagged objects back into
-//! the corresponding binary type. Other typed arrays (`Int32Array`,
-//! `Float64Array`, etc.) are not yet handled — call `.buffer` to obtain an
-//! `ArrayBuffer` first, or pull the bytes into a `Uint8Array`.
+//! Base64 keeps the on-disk size to ~1.33× the raw bytes (versus ~5–7× for
+//! a JSON array of numbers), which matters under D1's ~1MB row size limit.
+//! On decode, a matching post-walk rehydrates those tagged objects back
+//! into the corresponding binary type. Other typed arrays (`Int32Array`,
+//! `Float64Array`, etc.) are not yet handled — call `.buffer` to obtain
+//! an `ArrayBuffer` first, or pull the bytes into a `Uint8Array`.
 //!
 //! ## Fork/join branch results
 //!
@@ -32,6 +34,8 @@
 //! expect. [`decode_to_js_value`] detects this shape and converts it into a JS
 //! object where each value is individually JSON-decoded.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use napi::bindgen_prelude::*;
 use napi::sys;
@@ -247,12 +251,8 @@ fn js_to_json(value: &Unknown<'_>) -> Result<JsonValue> {
 }
 
 fn make_binary_json(bytes: &[u8], kind: &str) -> JsonValue {
-    let arr: Vec<JsonValue> = bytes
-        .iter()
-        .map(|&b| JsonValue::Number(Number::from(b)))
-        .collect();
     let mut map = Map::with_capacity(2);
-    map.insert(TAG_BIN.to_string(), JsonValue::Array(arr));
+    map.insert(TAG_BIN.to_string(), JsonValue::String(BASE64.encode(bytes)));
     map.insert(TAG_KIND.to_string(), JsonValue::String(kind.to_string()));
     JsonValue::Object(map)
 }
@@ -308,31 +308,18 @@ fn try_rehydrate_envelope<'env>(
     env: &'env Env,
     obj: &Object<'env>,
 ) -> Result<Option<Unknown<'env>>> {
-    // `kind` must be a string AND `bin` must be a JS array — otherwise
-    // this is just a user object that happens to have similar keys.
-    let Some(kind) = obj.get::<String>(TAG_KIND)? else {
+    // Both fields must be strings — otherwise this is just a user object
+    // that happens to have similar keys.
+    let (Some(kind), Some(encoded)) = (obj.get::<String>(TAG_KIND)?, obj.get::<String>(TAG_BIN)?)
+    else {
         return Ok(None);
     };
-    let Some(bin) = obj.get::<Unknown>(TAG_BIN)? else {
-        return Ok(None);
-    };
-    let env_raw = bin.value().env;
-    let bin_raw = bin.value().value;
-    let mut is_arr = false;
-    check_status!(
-        unsafe { sys::napi_is_array(env_raw, bin_raw, &raw mut is_arr) },
-        "napi_is_array (bin)"
-    )?;
-    if !is_arr {
-        return Ok(None);
-    }
-
-    let arr: Array = unsafe { Array::from_napi_value(env_raw, bin_raw) }?;
-    let mut bytes = Vec::with_capacity(arr.len() as usize);
-    for i in 0..arr.len() {
-        let n: u32 = arr.get::<u32>(i)?.unwrap_or(0);
-        bytes.push(n as u8);
-    }
+    let bytes = BASE64.decode(encoded.as_bytes()).map_err(|e| {
+        Error::new(
+            Status::InvalidArg,
+            format!("Invalid base64 in $sayiir_bin: {e}"),
+        )
+    })?;
 
     let out: Unknown = match kind.as_str() {
         "Buffer" => Buffer::from(bytes).into_unknown(env)?,

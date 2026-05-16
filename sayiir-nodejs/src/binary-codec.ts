@@ -5,13 +5,14 @@
  * The Rust side of the codec (in `sayiir-node/src/codec.rs`) replaces
  * binary values with a tagged envelope of the form
  *
- *   { "$sayiir_bin": [byte, byte, ...], "$sayiir_kind": "Buffer" | "Uint8Array" | "ArrayBuffer" }
+ *   { "$sayiir_bin": "<base64>", "$sayiir_kind": "Buffer" | "Uint8Array" | "ArrayBuffer" }
  *
- * That envelope round-trips cleanly through `serde_json::Value`. When the
- * stepper / durable engine paths return a JSON string to JS (`inputJson`
- * for the next task, `outputJson` for the final result), JS calls
- * `JSON.parse` and gets the envelope back as a plain object. This helper
- * walks the parsed value and reconstructs the original binary type.
+ * Base64 is used over a JSON array of numbers so the payload stays at
+ * ~1.33× the raw byte count instead of ~5–7×. When the stepper / durable
+ * engine paths return a JSON string to JS (`inputJson` for the next
+ * task, `outputJson` for the final result), JS calls `JSON.parse` and
+ * gets the envelope back as a plain object. This helper walks the parsed
+ * value and reconstructs the original binary type.
  *
  * Direct task↔native invocations (the durable engine's task registry
  * bridge) do their rehydration in Rust and never come through here.
@@ -44,17 +45,17 @@ export function rehydrateBinaries(value: unknown): unknown {
   const obj = value as Record<string, unknown>;
   const bin = obj[TAG_BIN];
   const kind = obj[TAG_KIND];
-  if (Array.isArray(bin) && typeof kind === "string") {
-    const bytes = Uint8Array.from(bin as number[]);
+  if (typeof bin === "string" && typeof kind === "string") {
+    const buf = Buffer.from(bin, "base64");
     switch (kind) {
       case "Buffer":
-        return Buffer.from(bytes);
+        return buf;
       case "Uint8Array":
-        return bytes;
+        return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
       case "ArrayBuffer":
-        return bytes.buffer.slice(
-          bytes.byteOffset,
-          bytes.byteOffset + bytes.byteLength,
+        return buf.buffer.slice(
+          buf.byteOffset,
+          buf.byteOffset + buf.byteLength,
         );
       // Unknown kind: leave the envelope as-is so the caller sees the
       // raw data rather than silently dropping it.
