@@ -1,6 +1,6 @@
 {
   "name": "@sayiir/cloudflare",
-  "version": "0.5.0-rc1",
+  "version": "0.5.0",
   "description": "Durable workflow engine for Cloudflare Workers — type-safe, fault-tolerant task orchestration over D1",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

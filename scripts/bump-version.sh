@@ -46,6 +46,9 @@ for pkg in "$ROOT"/sayiir-nodejs/npm/*/package.json; do
   yq -i -oj -I2 ".version = \"$VERSION\"" "$pkg"
 done
 
+# --- Flow JS ---
+yq -i -oj -I2 ".version = \"$VERSION\"" "$ROOT/sayiir-flow-js/package.json"
+
 # --- Cloudflare JS ---
 yq -i -oj -I2 ".version = \"$VERSION\"" "$ROOT/sayiir-cloudflare-js/package.json"
 
