@@ -142,7 +142,7 @@ const checkout = flow<{ id: number }>("checkout")
 Branches run sequentially inside a single Worker invocation (single-threaded), but each branch checkpoints independently — only uncompleted branches re-execute on resume.
 
 <Aside type="tip">
-A full durable AI agent example with fork/join, Workers AI, signal-based approval, and cron-driven resume lives at [`examples/ai-agent-cf`](https://github.com/sayiir/sayiir/tree/main/examples/ai-agent-cf).
+A full durable RAG example — hybrid retrieval (Vectorize + D1 FTS5), citation verification in a loop, and a `waitForSignal` low-confidence fallback with 5-minute timeout — lives at [`examples/rag-agent-cf`](https://github.com/sayiir/sayiir/tree/main/examples/rag-agent-cf).
 </Aside>
 
 ## Next steps

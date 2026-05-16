@@ -1,14 +1,14 @@
 {
-  "name": "ai-agent-cf",
+  "name": "rag-agent-cf",
   "private": true,
   "version": "0.0.0",
-  "description": "Durable AI research agent on Cloudflare Workers, powered by Sayiir + Workers AI + D1",
+  "description": "Durable RAG assistant on Cloudflare Workers, powered by Sayiir + Workers AI + Vectorize + R2 + D1",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "db:migrate:local": "wrangler d1 migrations apply sayiir-agent --local",
-    "db:migrate:remote": "wrangler d1 migrations apply sayiir-agent --remote",
+    "db:migrate:local": "wrangler d1 migrations apply rag-agent --local",
+    "db:migrate:remote": "wrangler d1 migrations apply rag-agent --remote",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

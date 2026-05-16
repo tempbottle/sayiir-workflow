@@ -3,4 +3,4 @@ packages:
   - "sayiir-nodejs"
   - "sayiir-nodejs/npm/*"
   - "sayiir-cloudflare-js"
-  - "examples/ai-agent-cf"
+  - "examples/rag-agent-cf"

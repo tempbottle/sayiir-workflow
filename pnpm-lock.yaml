@@ -17,7 +17,7 @@ importers:
 
   .: {}
 
-  examples/ai-agent-cf:
+  examples/rag-agent-cf:
     dependencies:
       '@sayiir/cloudflare':
         specifier: workspace:*

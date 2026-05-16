@@ -45,7 +45,7 @@ Highlights:
 - **`ConflictPolicy::Fail` by default** — A duplicate `engine.run()` with the same `instanceId` no longer overwrites in-progress state; the caller must `resume()` instead.
 - **`resumeAll` sweep** — Picks up ready (expired delay/timeout), signalled (buffered event), and stale (no update within `staleAfter`) instances. Parked positions waiting on an external signal are excluded from the stale path so they aren't re-resumed every cron tick.
 - **Fork branches** — Persist each branch's final output under `branch_id`. Parked branches collect into `ExecutionPosition::AtFork { completed_branches, wake_at }`; the join chain no longer double-executes, and a delayed branch wakes via `delay_wake_at` instead of `staleAfter` later.
-- **AI agent example** — [`examples/ai-agent-cf`](https://github.com/sayiir/sayiir/tree/main/examples/ai-agent-cf) demonstrates fork/join, Workers AI iterative refinement, signal-based human approval, and cron-driven resume.
+- **Durable RAG example** — [`examples/rag-agent-cf`](https://github.com/sayiir/sayiir/tree/main/examples/rag-agent-cf) demonstrates hybrid retrieval (Vectorize + D1 FTS5 + recency) via parallel fork, citation verification in a loop against R2-backed source text, and a `waitForSignal` 5-minute human-clarify fallback with timeout. Built on Workers AI + Vectorize + R2 + D1.
 
 Get started: [Cloudflare Workers quick start](/getting-started/cloudflare/).
 
