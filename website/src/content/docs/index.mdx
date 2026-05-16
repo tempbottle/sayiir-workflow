@@ -1,9 +1,9 @@
 ---
-title: Sayiir — Fast, Simple Durable Workflow Engine
-description: Fast, lightweight durable workflow engine for Python, Node.js, and Rust. Zero learning curve — write normal async code with automatic checkpointing, retries, and crash recovery. No DSL, no infrastructure, native performance.
+title: Sayiir — Durable Workflows for Serverless & Edge Runtimes
+description: Durable workflow engine for Python, Node.js, Rust, and Cloudflare Workers. Checkpoint-and-exit execution built for short-lived runtimes — no DSL, no replay, no control plane. Temporal-class orchestration without the infrastructure.
 template: splash
 hero:
-  tagline: The fast, simple durable workflow engine. Graph-based, continuation-driven execution — just write normal Python, TypeScript, or Rust. Native performance, automatic checkpointing, no infrastructure to deploy.
+  tagline: Durable workflows for serverless & edge runtimes. Graph-based, continuation-driven execution in Python, TypeScript, Rust, and Cloudflare Workers — no DSL, no replay, no control plane. Temporal-class orchestration without the infrastructure.
   actions:
     - text: Get Started (Python)
       link: /getting-started/python/
@@ -15,6 +15,10 @@ hero:
       variant: minimal
     - text: Get Started (Rust)
       link: /getting-started/rust/
+      icon: right-arrow
+      variant: minimal
+    - text: Cloudflare Workers
+      link: /getting-started/cloudflare/
       icon: right-arrow
       variant: minimal
 ---
@@ -35,8 +39,14 @@ import ScrollHint from '../../components/ScrollHint.astro';
   <Card title="Native Rust Performance" icon="star">
     Rust core, no replay overhead. JSON by default, swap to zero-copy rkyv or any binary codec.
   </Card>
+  <Card title="Built for the Edge" icon="cloud-download">
+    First-class Cloudflare Workers runtime. Checkpoint-and-exit across requests, D1 persistence, cron-driven resume — durable orchestration that fits short-lived runtimes.
+  </Card>
+  <Card title="Durable AI Agents" icon="random">
+    Long-running, retry-heavy, human-in-the-loop. Run RAG pipelines and agent loops that survive evictions, park on signals, and resume on cron.
+  </Card>
   <Card title="Pluggable & Lightweight" icon="setting">
-    Swap backends, codecs, runners. InMemory for tests, Postgres for production.
+    Swap backends, codecs, runners. InMemory for tests, Postgres for production, D1 on the edge.
   </Card>
 </CardGrid>
 
@@ -102,6 +112,36 @@ let workflow = workflow! {
     steps: [fetch_user, send_email]
 }.unwrap();
 ```
+
+## Cloudflare Workers
+
+```typescript
+import { task, flow, Engine } from "@sayiir/cloudflare";
+
+const fetchUser = task("fetch-user", async (id: number) => {
+  const res = await fetch(`https://api.example.com/users/${id}`);
+  return res.json() as Promise<{ id: number; name: string }>;
+});
+
+const sendEmail = task("send-email", async (user: { id: number; name: string }) =>
+  `Sent welcome to ${user.name}`);
+
+const onboarding = flow<number>("onboarding").then(fetchUser).then(sendEmail).build();
+
+export default {
+  async fetch(request: Request, env: { DB: D1Database }): Promise<Response> {
+    const engine = await Engine.create(env.DB);
+    return Response.json(await engine.run(onboarding, "onboard-42", 42));
+  },
+  // Cron resume sweeps parked + evicted instances back to life
+  async scheduled(_e: ScheduledEvent, env: { DB: D1Database }): Promise<void> {
+    const engine = await Engine.create(env.DB);
+    await engine.resumeAll(onboarding);
+  },
+};
+```
+
+Rust/WASM core, D1 persistence, signal/delay parking, cron-driven resume. No external orchestrator, no separate database.
 
 ---
 

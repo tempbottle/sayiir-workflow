@@ -158,6 +158,12 @@ Rust/WASM core, D1 persistence, checkpoint-and-exit across requests, signal/dela
 
 ---
 
+## Works with Edge & Serverless
+
+The Rust core compiles to **WASM** and runs inside short-lived runtimes like Cloudflare Workers and Lambda — no sidecar, no control plane. Checkpoint-and-exit between tasks, park on signals or delays, resume on cron. See the [`rag-agent-cf`](https://github.com/sayiir/sayiir/tree/main/examples/rag-agent-cf) example.
+
+---
+
 ## When to Use Sayiir
 
 Sayiir is a full-featured, embeddable workflow engine — branching, loops, fork/join, signals, cancel, pause, resume, retries, timeouts — that lives inside your application as a library, not beside it as a platform.
