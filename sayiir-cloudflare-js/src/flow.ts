@@ -5,6 +5,8 @@
  * The `flow()` factory function injects the WASM builder backend.
  */
 
+import "./wasm-init.js";
+
 import {
   createFlowFactory,
   type FlowBuilderBackend,

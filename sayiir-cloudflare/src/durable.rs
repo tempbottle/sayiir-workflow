@@ -68,9 +68,7 @@ impl WasmDurableEngine {
         conflict_policy: Option<String>,
     ) -> Result<WasmDurableEngine, JsValue> {
         let policy = parse_conflict_policy(conflict_policy.as_deref())?;
-        let d1: D1Database = db
-            .dyn_into()
-            .map_err(|v| JsValue::from_str(&format!("expected a D1Database binding, got {v:?}")))?;
+        let d1 = cast_d1_database(db)?;
         let backend = D1Backend::connect(d1).await.map_err(to_js_error)?;
         Ok(Self {
             backend: Arc::new(backend),
@@ -840,6 +838,31 @@ async fn check_guards(
         return Err(WorkflowError::paused());
     }
     Ok(())
+}
+
+/// Cast an incoming `JsValue` to a `D1Database` binding.
+///
+/// `JsCast::dyn_into::<D1Database>()` does a strict `instanceof globalThis.D1Database`
+/// check which fails for Wrangler 4 local-dev bindings (the wrapper object has
+/// shape `{ alwaysPrimarySession, fetcher, bookmarkOrConstraint }` and does not
+/// have `D1Database` in its prototype chain). The wrapper still exposes the
+/// `.prepare` / `.batch` methods that sqlx-d1 actually invokes, so probing for
+/// the method via `Reflect::has` is sufficient — and works in both wrangler dev
+/// and the production Workers runtime.
+fn cast_d1_database(db: JsValue) -> Result<D1Database, JsValue> {
+    if !db.is_object() {
+        return Err(JsValue::from_str(&format!(
+            "expected a D1Database binding, got {db:?}"
+        )));
+    }
+    let has_prepare = js_sys::Reflect::has(&db, &JsValue::from_str("prepare"))
+        .unwrap_or(false);
+    if !has_prepare {
+        return Err(JsValue::from_str(&format!(
+            "expected a D1Database binding (object with a .prepare method), got {db:?}"
+        )));
+    }
+    Ok(db.unchecked_into::<D1Database>())
 }
 
 fn parse_conflict_policy(s: Option<&str>) -> Result<ConflictPolicy, JsValue> {

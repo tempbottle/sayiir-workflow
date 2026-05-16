@@ -9,6 +9,8 @@
  *   - `Engine` class — durable with D1 checkpointing (production)
  */
 
+import "./wasm-init.js";
+
 import type { Workflow } from "@sayiir/flow-js";
 import type { WorkflowStatus } from "./types.js";
 import { WorkflowError } from "./types.js";

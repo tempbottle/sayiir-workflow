@@ -16,6 +16,8 @@ docs/plans/
 
 node_modules/
 
+.wrangler/
+
 id_ssh*
 
 playground/codapi

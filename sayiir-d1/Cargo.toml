@@ -24,8 +24,8 @@ serde_json = { workspace = true }
 sqlx = { version = "0.8"}
 
 # D1
-sqlx-d1 = { version = "0.3", optional = true }
-worker = { version = "0.7", features = ["d1"], optional = true }  # pinned to match sqlx-d1
+sqlx-d1 = { version = "0.4", optional = true }
+worker = { version = "0.8", features = ["d1"], optional = true }  # pinned to match sqlx-d1
 
 [features]
 default = ["d1"]
