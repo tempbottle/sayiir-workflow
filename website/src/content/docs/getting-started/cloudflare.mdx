@@ -153,7 +153,7 @@ Sayiir checkpoints each task's return value as a JSON row in D1, and D1 imposes 
 - batched embeddings (hundreds of 768-dim float vectors per task)
 - bulk API responses passed forward intact
 
-A `string or blob too big: SQLITE_TOOBIG` error from a task return is the symptom. The fix is to **shrink the value that crosses the checkpoint**, not the work itself. Two common reshapings:
+A `string or blob too big: SQLITE_TOOBIG` error from a task return is the symptom. The fix is to **shrink the value that crosses the checkpoint**, not the work itself. Two common patterns:
 
 1. **Pass an ID, re-read on the other side.** Persist heavy state to the bindings you already have (D1 tables, R2, Vectorize) inside the task, then return only the identifier. Downstream tasks re-read what they need.
 2. **Coalesce tasks.** Combine the two adjacent tasks that share heavy state into one task so the data never crosses a checkpoint. Trade-off: a Worker eviction inside the combined task loses both stages' work.
