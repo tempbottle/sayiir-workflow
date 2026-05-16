@@ -6,7 +6,7 @@ use sayiir_core::snapshot::WorkflowSnapshot;
 use sayiir_persistence::BackendError;
 use sqlx::{Database, Executor, IntoArguments, Row};
 
-use crate::schema::MIGRATION_SQL;
+use crate::schema::MIGRATIONS;
 
 // ---------------------------------------------------------------------------
 // Inline JsonCodec (avoids depending on sayiir-runtime which pulls in tokio)
@@ -89,6 +89,8 @@ impl<T, DB: Database> SQLiteBackend<T>
 where
     for<'c> &'c T: Executor<'c, Database = DB>,
     for<'a> DB::Arguments<'a>: IntoArguments<'a, DB>,
+    for<'r> i64: sqlx::Decode<'r, DB> + sqlx::Type<DB>,
+    usize: sqlx::ColumnIndex<DB::Row>,
     T: Clone,
 {
     /// Create a new `SQLiteBackend` and run schema migrations.
@@ -109,10 +111,37 @@ where
     /// Returns a `BackendError` if the migration fails.
     pub async fn run_migrations(&self) -> Result<(), BackendError> {
         let conn = self.exec();
-        sqlx::query(MIGRATION_SQL)
-            .execute(&conn)
+
+        // Read current schema version. Both Sqlite and D1 expose
+        // `PRAGMA user_version` returning a single integer row.
+        let row = sqlx::query("PRAGMA user_version")
+            .fetch_one(&conn)
             .await
-            .map_err(|e| BackendError::Backend(e.to_string()))?;
+            .map_err(|e| BackendError::Backend(format!("read user_version: {e}")))?;
+        let current: i64 = row
+            .try_get::<i64, _>(0_usize)
+            .map_err(|e| BackendError::Backend(format!("decode user_version: {e}")))?;
+
+        for migration in MIGRATIONS {
+            if i64::from(migration.version) <= current {
+                continue;
+            }
+            sqlx::query(migration.sql)
+                .execute(&conn)
+                .await
+                .map_err(|e| {
+                    BackendError::Backend(format!("migration {} failed: {e}", migration.version))
+                })?;
+            sqlx::query(&format!("PRAGMA user_version = {}", migration.version))
+                .execute(&conn)
+                .await
+                .map_err(|e| {
+                    BackendError::Backend(format!(
+                        "bump user_version to {}: {e}",
+                        migration.version
+                    ))
+                })?;
+        }
         Ok(())
     }
 }
