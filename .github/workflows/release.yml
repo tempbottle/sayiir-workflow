@@ -116,6 +116,11 @@ jobs:
   crates-publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/sayiir-core
+    permissions:
+      id-token: write
     steps:
       - uses: actions/checkout@v6
 
@@ -124,10 +129,14 @@ jobs:
       - name: Install cargo-workspaces
         run: cargo install cargo-workspaces
 
+      - name: Authenticate with crates.io
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
       - name: Publish crates
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo ws publish --from-git --yes --token "$CARGO_REGISTRY_TOKEN"
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+        run: cargo ws publish --from-git --yes
 
   node-build:
     name: Node.js (${{ matrix.platform }})
