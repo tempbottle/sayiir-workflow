@@ -146,7 +146,7 @@ where
         use crate::{PrepareRunOutcome, check_existing_instance, prepare_run};
 
         let instance_id = instance_id.into();
-        let definition_hash = workflow.definition_hash().to_string();
+        let definition_hash = *workflow.definition_hash();
         let conflict_policy = self.conflict_policy;
 
         // Phase 1: check for existing instance before encoding input.
@@ -166,7 +166,7 @@ where
         let first_task = workflow.continuation().first_task_hint();
 
         let mut snapshot = match prepare_run(
-            instance_id,
+            &instance_id,
             definition_hash,
             input_bytes.clone(),
             first_task,
@@ -184,10 +184,12 @@ where
         // Execute workflow with checkpointing
         let context = workflow.context().clone();
         let continuation = workflow.continuation();
+        let task_index = workflow.task_index();
         let backend = Arc::clone(&self.backend);
 
         let result = Self::execute_with_checkpointing(
             continuation,
+            task_index,
             input_bytes,
             &mut snapshot,
             Arc::clone(&backend),
@@ -229,10 +231,10 @@ where
         let mut snapshot = self.backend.load_snapshot(instance_id).await?;
 
         // Validate definition hash
-        if snapshot.definition_hash != workflow.definition_hash() {
+        if snapshot.definition_hash != *workflow.definition_hash() {
             return Err(WorkflowError::DefinitionMismatch {
-                expected: workflow.definition_hash().to_string(),
-                found: snapshot.definition_hash.clone(),
+                expected: *workflow.definition_hash(),
+                found: snapshot.definition_hash,
             }
             .into());
         }
@@ -254,6 +256,7 @@ where
         // Resume execution
         let context = workflow.context().clone();
         let continuation = workflow.continuation();
+        let task_index = workflow.task_index();
         let backend = Arc::clone(&self.backend);
 
         // Get the last completed task's output or initial input
@@ -261,6 +264,7 @@ where
 
         let result = Self::execute_with_checkpointing(
             continuation,
+            task_index,
             input_bytes,
             &mut snapshot,
             Arc::clone(&backend),
@@ -276,6 +280,7 @@ where
     #[allow(clippy::manual_async_fn, clippy::too_many_lines)]
     async fn execute_with_checkpointing<'a, C, M>(
         continuation: &'a WorkflowContinuation,
+        task_index: &'a sayiir_core::TaskIndex,
         input: Bytes,
         snapshot: &'a mut WorkflowSnapshot,
         backend: Arc<B>,
@@ -298,7 +303,12 @@ where
                     retry_policy,
                     ..
                 } => {
-                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+                    check_guards(
+                        backend.as_ref(),
+                        &snapshot.instance_id,
+                        Some(sayiir_core::TaskId::from(id)),
+                    )
+                    .await?;
                     set_deadline_if_needed(id, timeout.as_ref(), snapshot, backend.as_ref())
                         .await?;
 
@@ -316,13 +326,14 @@ where
                     .await?;
 
                     if let Some(next_cont) = current.get_next() {
-                        let next_id = next_cont.first_task_id().to_string();
-                        snapshot.set_task_hint(&TaskHint {
-                            id: next_id.clone(),
-                            priority: continuation.get_task_priority(&next_id),
-                            tags: continuation.get_task_tags(&next_id),
-                        });
-                        snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
+                        let next_name = next_cont.first_task_id().to_string();
+                        let next_hash = sayiir_core::TaskId::from(next_name.as_str());
+                        snapshot.set_task_hint(&TaskHint::new(
+                            &next_name,
+                            task_index.priority(&next_hash),
+                            task_index.tags(&next_hash),
+                        ));
+                        snapshot.update_position(ExecutionPosition::AtTask { task_id: next_hash });
                     }
                     backend.save_snapshot(snapshot).await?;
                     check_guards(backend.as_ref(), &snapshot.instance_id, None).await?;
@@ -333,14 +344,22 @@ where
                     return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
                 }
                 WorkflowContinuation::Delay { id, duration, next } => {
-                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+                    check_guards(
+                        backend.as_ref(),
+                        &snapshot.instance_id,
+                        Some(sayiir_core::TaskId::from(id)),
+                    )
+                    .await?;
 
-                    if snapshot.get_task_result(id).is_some() {
+                    if snapshot
+                        .get_task_result(&sayiir_core::TaskId::from(id))
+                        .is_some()
+                    {
                         Ok(ControlFlow::Continue(current_input.clone()))
                     } else {
                         let wake_at = compute_wake_at(duration)?;
                         Ok(ControlFlow::Break(StepOutcome::Park(ParkReason::Delay {
-                            delay_id: id.clone(),
+                            delay_id: sayiir_core::TaskId::from(id.as_str()),
                             wake_at,
                             next_task: next.as_deref().map(WorkflowContinuation::first_task_hint),
                             passthrough: current_input.clone(),
@@ -353,11 +372,19 @@ where
                     timeout,
                     next,
                 } => {
-                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+                    check_guards(
+                        backend.as_ref(),
+                        &snapshot.instance_id,
+                        Some(sayiir_core::TaskId::from(id)),
+                    )
+                    .await?;
 
-                    if snapshot.get_task_result(id).is_some() {
+                    if snapshot
+                        .get_task_result(&sayiir_core::TaskId::from(id))
+                        .is_some()
+                    {
                         let payload = snapshot
-                            .get_task_result_bytes(id)
+                            .get_task_result_bytes(&sayiir_core::TaskId::from(id))
                             .unwrap_or(current_input.clone());
                         Ok(ControlFlow::Continue(payload))
                     } else {
@@ -366,27 +393,29 @@ where
                             .await
                         {
                             Ok(Some(payload)) => {
-                                snapshot.mark_task_completed(id.clone(), payload);
+                                snapshot
+                                    .mark_task_completed(sayiir_core::TaskId::from(id), payload);
                                 if let Some(next_cont) = next.as_deref() {
-                                    let next_id = next_cont.first_task_id().to_string();
-                                    snapshot.set_task_hint(&TaskHint {
-                                        id: next_id.clone(),
-                                        priority: continuation.get_task_priority(&next_id),
-                                        tags: continuation.get_task_tags(&next_id),
-                                    });
+                                    let next_name = next_cont.first_task_id().to_string();
+                                    let next_hash = sayiir_core::TaskId::from(next_name.as_str());
+                                    snapshot.set_task_hint(&TaskHint::new(
+                                        &next_name,
+                                        task_index.priority(&next_hash),
+                                        task_index.tags(&next_hash),
+                                    ));
                                     snapshot.update_position(ExecutionPosition::AtTask {
-                                        task_id: next_id,
+                                        task_id: next_hash,
                                     });
                                 }
                                 backend.save_snapshot(snapshot).await?;
                                 let output = snapshot
-                                    .get_task_result_bytes(id)
+                                    .get_task_result_bytes(&sayiir_core::TaskId::from(id))
                                     .unwrap_or(current_input.clone());
                                 Ok(ControlFlow::Continue(output))
                             }
                             Ok(None) => Ok(ControlFlow::Break(StepOutcome::Park(
                                 ParkReason::AwaitingSignal {
-                                    signal_id: id.clone(),
+                                    signal_id: sayiir_core::TaskId::from(id.as_str()),
                                     signal_name: signal_name.clone(),
                                     timeout: compute_signal_timeout(timeout.as_ref()),
                                     next_task: next
@@ -441,9 +470,14 @@ where
                     default,
                     ..
                 } => {
-                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+                    check_guards(
+                        backend.as_ref(),
+                        &snapshot.instance_id,
+                        Some(sayiir_core::TaskId::from(id)),
+                    )
+                    .await?;
 
-                    if let Some(result) = snapshot.get_task_result(id) {
+                    if let Some(result) = snapshot.get_task_result(&sayiir_core::TaskId::from(id)) {
                         Ok(ControlFlow::Continue(result.output.clone()))
                     } else {
                         let key_bytes = key_fn
@@ -476,7 +510,10 @@ where
                             .encode_branch_envelope(&key, &branch_output)
                             .map_err(RuntimeError::from)?;
 
-                        snapshot.mark_task_completed(id.clone(), envelope_bytes.clone());
+                        snapshot.mark_task_completed(
+                            sayiir_core::TaskId::from(id),
+                            envelope_bytes.clone(),
+                        );
                         backend.save_snapshot(snapshot).await?;
 
                         Ok(ControlFlow::Continue(envelope_bytes))
@@ -497,9 +534,14 @@ where
                     on_max,
                     ..
                 } => {
-                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+                    check_guards(
+                        backend.as_ref(),
+                        &snapshot.instance_id,
+                        Some(sayiir_core::TaskId::from(id)),
+                    )
+                    .await?;
 
-                    if let Some(result) = snapshot.get_task_result(id) {
+                    if let Some(result) = snapshot.get_task_result(&sayiir_core::TaskId::from(id)) {
                         Ok(ControlFlow::Continue(result.output.clone()))
                     } else {
                         let cfg = LoopConfig {
@@ -507,7 +549,8 @@ where
                             body,
                             max_iterations: *max_iterations,
                             on_max: *on_max,
-                            start_iteration: snapshot.loop_iteration(id),
+                            start_iteration: snapshot
+                                .loop_iteration(&sayiir_core::TaskId::from(id)),
                         };
                         let mut loop_input = current_input.clone();
                         let mut final_output = None;
@@ -515,6 +558,7 @@ where
                         for iteration in cfg.start_iteration..cfg.max_iterations {
                             let output = Box::pin(Self::execute_with_checkpointing(
                                 body,
+                                task_index,
                                 loop_input.clone(),
                                 snapshot,
                                 Arc::clone(&backend),
@@ -524,23 +568,31 @@ where
 
                             let body_ser = body.to_serializable();
                             for tid in &body_ser.task_ids() {
-                                snapshot.remove_task_result(tid);
+                                snapshot.remove_task_result(&sayiir_core::TaskId::from(*tid));
                             }
 
                             match resolve_loop_iteration(&output, iteration, &cfg)? {
                                 ControlFlow::Break(LoopExit(inner)) => {
-                                    snapshot.clear_loop_iteration(id);
-                                    snapshot.mark_task_completed(id.clone(), inner.clone());
+                                    snapshot.clear_loop_iteration(&sayiir_core::TaskId::from(id));
+                                    snapshot.mark_task_completed(
+                                        sayiir_core::TaskId::from(id),
+                                        inner.clone(),
+                                    );
                                     backend.save_snapshot(snapshot).await?;
                                     final_output = Some(inner);
                                     break;
                                 }
                                 ControlFlow::Continue(LoopNext(inner)) => {
-                                    snapshot.set_loop_iteration(id, iteration + 1);
+                                    snapshot.set_loop_iteration(
+                                        sayiir_core::TaskId::from(id),
+                                        iteration + 1,
+                                    );
                                     snapshot.update_position(ExecutionPosition::InLoop {
-                                        loop_id: id.clone(),
+                                        loop_id: sayiir_core::TaskId::from(id),
                                         iteration: iteration + 1,
-                                        next_task_id: Some(body.first_task_id().to_string()),
+                                        next_task_id: Some(sayiir_core::TaskId::from(
+                                            body.first_task_id(),
+                                        )),
                                     });
                                     backend.save_snapshot(snapshot).await?;
                                     loop_input = inner;
@@ -551,20 +603,26 @@ where
                         match final_output {
                             Some(output) => Ok(ControlFlow::Continue(output)),
                             None => Err(RuntimeError::from(WorkflowError::MaxIterationsExceeded {
-                                loop_id: id.clone(),
+                                loop_id: sayiir_core::TaskId::from(id),
                                 max_iterations: *max_iterations,
                             })),
                         }
                     }
                 }
                 WorkflowContinuation::ChildWorkflow { id, child, .. } => {
-                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+                    check_guards(
+                        backend.as_ref(),
+                        &snapshot.instance_id,
+                        Some(sayiir_core::TaskId::from(id)),
+                    )
+                    .await?;
 
-                    if let Some(result) = snapshot.get_task_result(id) {
+                    if let Some(result) = snapshot.get_task_result(&sayiir_core::TaskId::from(id)) {
                         Ok(ControlFlow::Continue(result.output.clone()))
                     } else {
                         let output = Box::pin(Self::execute_with_checkpointing(
                             child,
+                            task_index,
                             current_input.clone(),
                             snapshot,
                             Arc::clone(&backend),
@@ -572,7 +630,7 @@ where
                         ))
                         .await?;
 
-                        snapshot.mark_task_completed(id.clone(), output.clone());
+                        snapshot.mark_task_completed(sayiir_core::TaskId::from(id), output.clone());
                         backend.save_snapshot(snapshot).await?;
 
                         Ok(ControlFlow::Continue(output))
@@ -614,10 +672,11 @@ where
         let instance_id = snapshot.instance_id.clone();
 
         for branch in branches {
-            let branch_id = branch.id().to_string();
+            let branch_name = branch.id().to_string();
+            let branch_hash = sayiir_core::TaskId::from(branch_name.as_str());
 
-            if let Some(result) = snapshot.get_task_result(&branch_id) {
-                branch_results.push((branch_id, result.output.clone()));
+            if let Some(result) = snapshot.get_task_result(&branch_hash) {
+                branch_results.push((branch_name, result.output.clone()));
             } else {
                 let branch = Arc::clone(branch);
                 let branch_input = input.clone();
@@ -634,7 +693,7 @@ where
                         ctx_for_work,
                     )
                     .await?;
-                    Ok((branch_id, result))
+                    Ok((branch_name, result))
                 });
             }
         }
@@ -681,12 +740,13 @@ where
     {
         let mut set: tokio::task::JoinSet<Result<(String, Bytes), RuntimeError>> =
             tokio::task::JoinSet::new();
+        let shared_instance_id: Arc<str> = Arc::from(instance_id);
         for branch in branches {
             let id = branch.id().to_string();
             let branch = Arc::clone(branch);
             let branch_input = input.clone();
             let branch_backend = Arc::clone(backend);
-            let branch_instance_id = instance_id.to_string();
+            let branch_instance_id = Arc::clone(&shared_instance_id);
             let ctx_for_work = context.clone();
 
             set.spawn(async move {
@@ -722,7 +782,7 @@ where
         continuation: &WorkflowContinuation,
         input: Bytes,
         backend: Arc<B>,
-        instance_id: String,
+        instance_id: Arc<str>,
         context: WorkflowContext<C, M>,
     ) -> impl std::future::Future<Output = Result<Bytes, RuntimeError>> + Send + '_
     where
@@ -762,19 +822,24 @@ where
                             .await
                             {
                                 Ok(output) => {
-                                    snapshot.clear_retry_state(id);
+                                    snapshot.clear_retry_state(&sayiir_core::TaskId::from(id));
                                     break output;
                                 }
                                 Err(e) => {
                                     if let Some(rp) = retry_policy
-                                        && !snapshot.retries_exhausted(id)
+                                        && !snapshot
+                                            .retries_exhausted(&sayiir_core::TaskId::from(id))
                                     {
-                                        let next_retry_at =
-                                            snapshot.record_retry(id, rp, &e.to_string(), None);
+                                        let next_retry_at = snapshot.record_retry(
+                                            sayiir_core::TaskId::from(id),
+                                            rp,
+                                            &e.to_string(),
+                                            None,
+                                        );
                                         snapshot.clear_task_deadline();
                                         tracing::info!(
                                             task_id = %id,
-                                            attempt = snapshot.get_retry_state(id).map_or(0, |rs| rs.attempts),
+                                            attempt = snapshot.get_retry_state(&sayiir_core::TaskId::from(id)).map_or(0, |rs| rs.attempts),
                                             max_retries = rp.max_retries,
                                             %next_retry_at,
                                             error = %e,
@@ -793,13 +858,15 @@ where
                         Ok(ControlFlow::Continue(output))
                     }
                     WorkflowContinuation::Delay { id, duration, .. } => {
-                        if let Some(result) = snapshot.get_task_result(id) {
+                        if let Some(result) =
+                            snapshot.get_task_result(&sayiir_core::TaskId::from(id))
+                        {
                             tracing::debug!(delay_id = %id, "delay already completed in branch, skipping");
                             Ok(ControlFlow::Continue(result.output.clone()))
                         } else {
                             let wake_at = compute_wake_at(duration)?;
                             Ok(ControlFlow::Break(StepOutcome::Park(ParkReason::Delay {
-                                delay_id: id.clone(),
+                                delay_id: sayiir_core::TaskId::from(id),
                                 wake_at,
                                 next_task: None,
                                 passthrough: current_input.clone(),
@@ -812,14 +879,16 @@ where
                         timeout,
                         ..
                     } => {
-                        if let Some(result) = snapshot.get_task_result(id) {
+                        if let Some(result) =
+                            snapshot.get_task_result(&sayiir_core::TaskId::from(id))
+                        {
                             tracing::debug!(signal_id = %id, %signal_name, "signal already consumed in branch, skipping");
                             Ok(ControlFlow::Continue(result.output.clone()))
                         } else {
                             let wake_at = compute_signal_timeout(timeout.as_ref());
                             Ok(ControlFlow::Break(StepOutcome::Park(
                                 ParkReason::AwaitingSignal {
-                                    signal_id: id.clone(),
+                                    signal_id: sayiir_core::TaskId::from(id),
                                     signal_name: signal_name.clone(),
                                     timeout: wake_at,
                                     next_task: None,
@@ -857,7 +926,9 @@ where
                         default,
                         ..
                     } => {
-                        if let Some(result) = snapshot.get_task_result(id) {
+                        if let Some(result) =
+                            snapshot.get_task_result(&sayiir_core::TaskId::from(id))
+                        {
                             Ok(ControlFlow::Continue(result.output.clone()))
                         } else {
                             let key_bytes = key_fn
@@ -891,7 +962,10 @@ where
                                 .encode_branch_envelope(&key, &branch_output)
                                 .map_err(RuntimeError::from)?;
 
-                            snapshot.mark_task_completed(id.clone(), envelope_bytes.clone());
+                            snapshot.mark_task_completed(
+                                sayiir_core::TaskId::from(id),
+                                envelope_bytes.clone(),
+                            );
                             backend.save_snapshot(&snapshot).await?;
 
                             Ok(ControlFlow::Continue(envelope_bytes))
@@ -912,7 +986,9 @@ where
                         on_max,
                         ..
                     } => {
-                        if let Some(result) = snapshot.get_task_result(id) {
+                        if let Some(result) =
+                            snapshot.get_task_result(&sayiir_core::TaskId::from(id))
+                        {
                             Ok(ControlFlow::Continue(result.output.clone()))
                         } else {
                             let cfg = LoopConfig {
@@ -920,7 +996,8 @@ where
                                 body,
                                 max_iterations: *max_iterations,
                                 on_max: *on_max,
-                                start_iteration: snapshot.loop_iteration(id),
+                                start_iteration: snapshot
+                                    .loop_iteration(&sayiir_core::TaskId::from(id)),
                             };
                             let mut hooks = CheckpointingLoopHooks {
                                 snapshot: &mut snapshot,
@@ -946,7 +1023,9 @@ where
                         }
                     }
                     WorkflowContinuation::ChildWorkflow { id, child, .. } => {
-                        if let Some(result) = snapshot.get_task_result(id) {
+                        if let Some(result) =
+                            snapshot.get_task_result(&sayiir_core::TaskId::from(id))
+                        {
                             Ok(ControlFlow::Continue(result.output.clone()))
                         } else {
                             let output = Box::pin(Self::execute_branch_with_checkpoint(
@@ -958,7 +1037,8 @@ where
                             ))
                             .await?;
 
-                            snapshot.mark_task_completed(id.clone(), output.clone());
+                            snapshot
+                                .mark_task_completed(sayiir_core::TaskId::from(id), output.clone());
                             backend.save_snapshot(&snapshot).await?;
 
                             Ok(ControlFlow::Continue(output))
@@ -1214,12 +1294,12 @@ mod tests {
 
         // Manually create in-progress snapshot with workflow1's hash
         let mut snapshot = WorkflowSnapshot::with_initial_input(
-            "inst-2".into(),
-            workflow1.definition_hash().to_string(),
+            "inst-2",
+            *workflow1.definition_hash(),
             Bytes::from(serde_json::to_vec(&5u32).unwrap()),
         );
         snapshot.update_position(ExecutionPosition::AtTask {
-            task_id: "step1".into(),
+            task_id: sayiir_core::TaskId::from("step1"),
         });
         runner.backend().save_snapshot(&snapshot).await.unwrap();
 
@@ -1257,12 +1337,12 @@ mod tests {
         // Set up a snapshot as if it's in progress
         let input_bytes = Arc::new(JsonCodec).encode(&1u32).unwrap();
         let mut snapshot = WorkflowSnapshot::with_initial_input(
-            "inst-cancel".into(),
-            workflow.definition_hash().to_string(),
+            "inst-cancel",
+            *workflow.definition_hash(),
             input_bytes,
         );
         snapshot.update_position(ExecutionPosition::AtTask {
-            task_id: "slow_task".into(),
+            task_id: sayiir_core::TaskId::from("slow_task"),
         });
         runner.backend().save_snapshot(&snapshot).await.unwrap();
 
@@ -1301,12 +1381,12 @@ mod tests {
         // Save initial snapshot and request cancellation before running
         let input_bytes = Arc::new(JsonCodec).encode(&1u32).unwrap();
         let mut snapshot = WorkflowSnapshot::with_initial_input(
-            "inst-precancel".into(),
-            workflow.definition_hash().to_string(),
+            "inst-precancel",
+            *workflow.definition_hash(),
             input_bytes,
         );
         snapshot.update_position(ExecutionPosition::AtTask {
-            task_id: "task1".into(),
+            task_id: sayiir_core::TaskId::from("task1"),
         });
         runner.backend().save_snapshot(&snapshot).await.unwrap();
 
@@ -1392,7 +1472,7 @@ mod tests {
         // Should return Waiting (delay is 1 hour in the future)
         match &status {
             WorkflowStatus::Waiting { delay_id, .. } => {
-                assert_eq!(delay_id, "wait_1h");
+                assert_eq!(*delay_id, sayiir_core::TaskId::from("wait_1h"));
             }
             _ => panic!("Expected Waiting status, got {status:?}"),
         }
@@ -1407,8 +1487,8 @@ mod tests {
                     next_task_id,
                     ..
                 } => {
-                    assert_eq!(delay_id, "wait_1h");
-                    assert_eq!(next_task_id.as_deref(), Some("step2"));
+                    assert_eq!(*delay_id, sayiir_core::TaskId::from("wait_1h"));
+                    assert_eq!(next_task_id, &Some(sayiir_core::TaskId::from("step2")));
                 }
                 other => panic!("Expected AtDelay, got {other:?}"),
             },
@@ -1416,9 +1496,17 @@ mod tests {
         }
 
         // step1 should have been completed
-        assert!(snapshot.get_task_result("step1").is_some());
+        assert!(
+            snapshot
+                .get_task_result(&sayiir_core::TaskId::from("step1"))
+                .is_some()
+        );
         // delay pass-through should be stored
-        assert!(snapshot.get_task_result("wait_1h").is_some());
+        assert!(
+            snapshot
+                .get_task_result(&sayiir_core::TaskId::from("wait_1h"))
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -1441,7 +1529,7 @@ mod tests {
         let status = runner.resume(&workflow, "inst-1").await.unwrap();
         match &status {
             WorkflowStatus::Waiting { delay_id, .. } => {
-                assert_eq!(delay_id, "wait_1h");
+                assert_eq!(*delay_id, sayiir_core::TaskId::from("wait_1h"));
             }
             _ => panic!("Expected Waiting on resume, got {status:?}"),
         }
@@ -1606,9 +1694,10 @@ mod tests {
                     msg.contains("timed out"),
                     "Expected timeout error, got: {msg}"
                 );
+                let slow_hash = sayiir_core::TaskId::from("slow_task").to_hex();
                 assert!(
-                    msg.contains("slow_task"),
-                    "Expected task id in error, got: {msg}"
+                    msg.contains(&slow_hash),
+                    "Expected task id hash in error, got: {msg}"
                 );
             }
             other => panic!("Expected Failed status, got {other:?}"),

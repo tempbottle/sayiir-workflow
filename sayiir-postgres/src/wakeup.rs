@@ -79,9 +79,9 @@ pub(crate) async fn emit_task_ready(
 fn build_hint(snapshot: &sayiir_core::snapshot::WorkflowSnapshot) -> Option<TaskWakeupHint> {
     let task_id = snapshot.current_task_id()?;
     Some(TaskWakeupHint {
-        instance_id: snapshot.instance_id.clone(),
-        task_id: task_id.to_string(),
-        definition_hash: snapshot.definition_hash.clone(),
+        instance_id: snapshot.instance_id.to_string(),
+        task_id: *task_id.as_bytes(),
+        definition_hash: *snapshot.definition_hash.as_bytes(),
         tags: snapshot.current_task_tags().to_vec(),
     })
 }

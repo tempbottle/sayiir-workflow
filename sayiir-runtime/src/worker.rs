@@ -36,7 +36,8 @@ use tokio::sync::mpsc;
 use tokio::time;
 
 /// A list of workflow definitions keyed by their definition hash.
-pub type WorkflowRegistry<C, Input, M> = Vec<(String, Arc<Workflow<C, Input, M>>)>;
+pub type WorkflowRegistry<C, Input, M> =
+    Vec<(sayiir_core::DefinitionHash, Arc<Workflow<C, Input, M>>)>;
 
 /// Workflow definition for binding-friendly worker API.
 ///
@@ -46,31 +47,35 @@ pub type WorkflowRegistry<C, Input, M> = Vec<(String, Arc<Workflow<C, Input, M>>
 pub struct ExternalWorkflow {
     /// The continuation tree describing the workflow structure.
     pub continuation: Arc<WorkflowContinuation>,
-    /// The workflow definition identifier (e.g. workflow name/ID).
+    /// Per-workflow `TaskId → metadata` index. Built once when the workflow
+    /// is registered; replaces the O(N) tree walk + per-node SHA-256 that
+    /// the worker would otherwise do for every task dispatch.
+    pub task_index: Arc<sayiir_core::TaskIndex>,
+    /// Human-readable workflow name (for log/error display and FFI task executor).
     pub workflow_id: Arc<str>,
     /// Optional JSON-encoded workflow-level metadata.
     pub metadata_json: Option<Arc<str>>,
 }
 
 /// Workflow index keyed by definition hash for O(1) lookup during task dispatch.
-pub type WorkflowIndex = HashMap<String, ExternalWorkflow>;
+pub type WorkflowIndex = HashMap<sayiir_core::DefinitionHash, ExternalWorkflow>;
 
 /// Definition-hash containment over either [`WorkflowIndex`] (`HashMap`,
 /// O(1)) or [`WorkflowRegistry`] (`Vec`, O(n)). Lets `can_handle_hint`
 /// accept any worker-registered workflows collection uniformly instead
 /// of taking a hand-rolled closure per call site.
 pub(crate) trait WorkflowLookup {
-    fn contains_definition_hash(&self, hash: &str) -> bool;
+    fn contains_definition_hash(&self, hash: &sayiir_core::DefinitionHash) -> bool;
 }
 
 impl WorkflowLookup for WorkflowIndex {
-    fn contains_definition_hash(&self, hash: &str) -> bool {
+    fn contains_definition_hash(&self, hash: &sayiir_core::DefinitionHash) -> bool {
         self.contains_key(hash)
     }
 }
 
 impl<C, Input, M> WorkflowLookup for WorkflowRegistry<C, Input, M> {
-    fn contains_definition_hash(&self, hash: &str) -> bool {
+    fn contains_definition_hash(&self, hash: &sayiir_core::DefinitionHash) -> bool {
         self.iter().any(|(k, _)| k == hash)
     }
 }
@@ -155,8 +160,8 @@ impl<B> WorkerHandle<B> {
 /// No `Drop` impl — callers must explicitly call `release()` or `release_quietly()`.
 struct ActiveTaskClaim<'a, B> {
     backend: &'a B,
-    instance_id: String,
-    task_id: String,
+    instance_id: std::sync::Arc<str>,
+    task_id: sayiir_core::TaskId,
     worker_id: String,
 }
 
@@ -229,7 +234,7 @@ fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 /// let workflow = WorkflowBuilder::new(ctx)
 ///     .then("step1", |i: u32| async move { Ok(i + 1) })
 ///     .build()?;
-/// let workflows = vec![(workflow.definition_hash().to_string(), Arc::new(workflow))];
+/// let workflows = vec![(*workflow.definition_hash(), Arc::new(workflow))];
 ///
 /// // Spawn the worker and get a handle for lifecycle control
 /// let handle = worker.spawn(Duration::from_secs(1), workflows);
@@ -589,7 +594,8 @@ where
     /// True if the worker has the hint's workflow registered and its
     /// tag set covers the hint's tags.
     fn can_handle_hint(&self, hint: &TaskWakeupHint, workflows: &impl WorkflowLookup) -> bool {
-        if !workflows.contains_definition_hash(&hint.definition_hash) {
+        let hash = sayiir_core::DefinitionHash::from_bytes(hint.definition_hash);
+        if !workflows.contains_definition_hash(&hash) {
             return false;
         }
         hint.tags.iter().all(|t| self.tags.contains(t))
@@ -637,7 +643,7 @@ where
     async fn execute_external_task(
         &self,
         ext_wf: &ExternalWorkflow,
-        definition_hash: &str,
+        definition_hash: &sayiir_core::DefinitionHash,
         executor: &ExternalTaskExecutor,
         available_task: &AvailableTask,
     ) -> Result<WorkflowStatus, crate::error::RuntimeError> {
@@ -649,14 +655,13 @@ where
             let _ = tracing::Span::current().set_parent(remote_ctx);
         }
 
-        let continuation = &ext_wf.continuation;
         let mut snapshot = self
             .backend
             .load_snapshot(&available_task.instance_id)
             .await?;
         let already_completed = Self::validate_task_preconditions(
             definition_hash,
-            continuation,
+            &ext_wf.task_index,
             available_task,
             &snapshot,
         )?;
@@ -686,6 +691,7 @@ where
         self.settle_execution_result_ext(
             execution_result,
             &ext_wf.continuation,
+            &ext_wf.task_index,
             available_task,
             &mut snapshot,
             claim,
@@ -702,28 +708,34 @@ where
         snapshot: &mut WorkflowSnapshot,
         claim: &ActiveTaskClaim<'_, B>,
     ) -> ExecutionOutcome {
-        let continuation = &ext_wf.continuation;
-        let task_id = available_task.task_id.clone();
+        let task_id = available_task.task_id;
         let input = available_task.input.clone();
+        // Resolve the human-readable task name from the prebuilt index so the
+        // FFI executor can look up the Python/Node function by name. No tree
+        // walk and no per-node SHA-256 — this is a single hash-map probe.
+        let indexed_meta = ext_wf.task_index.get(&task_id);
+        let task_name: Arc<str> =
+            indexed_meta.map_or_else(|| Arc::from(task_id.to_hex()), |m| Arc::clone(m.name()));
 
-        let deadline = if let Some(timeout) = continuation.get_task_timeout(&task_id) {
-            snapshot.set_task_deadline(task_id.clone(), timeout);
-            let _ = self.backend.save_snapshot(snapshot).await;
-            snapshot.refresh_task_deadline();
-            snapshot.task_deadline.clone()
-        } else {
-            None
-        };
+        let deadline =
+            if let Some(timeout) = indexed_meta.and_then(sayiir_core::TaskNodeMetadata::timeout) {
+                snapshot.set_task_deadline(task_id, timeout);
+                let _ = self.backend.save_snapshot(snapshot).await;
+                snapshot.refresh_task_deadline();
+                snapshot.task_deadline.clone()
+            } else {
+                None
+            };
 
         let task_ctx = TaskExecutionContext {
             workflow_id: Arc::clone(&ext_wf.workflow_id),
-            instance_id: Arc::from(available_task.instance_id.as_str()),
-            task_id: Arc::from(available_task.task_id.as_str()),
-            metadata: continuation.build_task_metadata(&available_task.task_id),
+            instance_id: Arc::clone(&available_task.instance_id),
+            task_id: Arc::clone(&task_name),
+            metadata: ext_wf.task_index.build_task_metadata(&task_id),
             workflow_metadata_json: ext_wf.metadata_json.clone(),
         };
 
-        let execution_future = with_task_context(task_ctx, executor(&task_id, input));
+        let execution_future = with_task_context(task_ctx, executor(&task_name, input));
 
         let heartbeat_result = self
             .run_with_heartbeat(
@@ -753,6 +765,7 @@ where
         &self,
         outcome: ExecutionOutcome,
         continuation: &WorkflowContinuation,
+        task_index: &sayiir_core::TaskIndex,
         available_task: &AvailableTask,
         snapshot: &mut WorkflowSnapshot,
         claim: ActiveTaskClaim<'_, B>,
@@ -761,7 +774,7 @@ where
         match outcome {
             ExecutionOutcome::Timeout(err) => {
                 if let Ok(Some(status)) = self
-                    .try_schedule_retry(continuation, available_task, snapshot, &err.to_string())
+                    .try_schedule_retry(task_index, available_task, snapshot, &err.to_string())
                     .await
                 {
                     claim.release_quietly().await;
@@ -783,7 +796,7 @@ where
                 let panic_msg = extract_panic_message(&panic_payload);
 
                 if let Ok(Some(status)) = self
-                    .try_schedule_retry(continuation, available_task, snapshot, &panic_msg)
+                    .try_schedule_retry(task_index, available_task, snapshot, &panic_msg)
                     .await
                 {
                     claim.release_quietly().await;
@@ -801,7 +814,7 @@ where
             }
             ExecutionOutcome::TaskError(e) => {
                 if let Ok(Some(status)) = self
-                    .try_schedule_retry(continuation, available_task, snapshot, &e.to_string())
+                    .try_schedule_retry(task_index, available_task, snapshot, &e.to_string())
                     .await
                 {
                     claim.release_quietly().await;
@@ -915,6 +928,7 @@ where
                 if let Some((_, workflow)) = workflows
                     .iter()
                     .find(|(hash, _)| *hash == task.workflow_definition_hash)
+                // hash and task.workflow_definition_hash are both DefinitionHash
                 {
                     match self.execute_task(workflow.as_ref(), task).await {
                         Err(ref e) if e.is_timeout() => {
@@ -1026,7 +1040,7 @@ where
             .await?;
         let already_completed = Self::validate_task_preconditions(
             workflow.definition_hash(),
-            workflow.continuation(),
+            workflow.task_index(),
             &available_task,
             &snapshot,
         )?;
@@ -1087,31 +1101,38 @@ where
             + 'static,
     {
         let continuation = workflow.continuation();
-        let task_id = available_task.task_id.clone();
+        let task_index = workflow.task_index();
+        let task_id = available_task.task_id;
         let input = available_task.input.clone();
+        // Resolve human-readable task name from the prebuilt index for the
+        // task context exposed to user code (no tree walk, no rehashing).
+        let indexed_meta = task_index.get(&task_id);
+        let task_name: Arc<str> =
+            indexed_meta.map_or_else(|| Arc::from(task_id.to_hex()), |m| Arc::clone(m.name()));
 
         // Set deadline if task has a timeout configured
-        let deadline = if let Some(timeout) = continuation.get_task_timeout(&task_id) {
-            snapshot.set_task_deadline(task_id.clone(), timeout);
-            let _ = self.backend.save_snapshot(snapshot).await;
-            // Refresh deadline to now + timeout so it measures actual execution
-            // time, not time spent on the snapshot save above.
-            snapshot.refresh_task_deadline();
-            snapshot.task_deadline.clone()
-        } else {
-            None
-        };
+        let deadline =
+            if let Some(timeout) = indexed_meta.and_then(sayiir_core::TaskNodeMetadata::timeout) {
+                snapshot.set_task_deadline(task_id, timeout);
+                let _ = self.backend.save_snapshot(snapshot).await;
+                // Refresh deadline to now + timeout so it measures actual execution
+                // time, not time spent on the snapshot save above.
+                snapshot.refresh_task_deadline();
+                snapshot.task_deadline.clone()
+            } else {
+                None
+            };
 
         let task_ctx = TaskExecutionContext {
-            workflow_id: Arc::clone(&workflow.context().workflow_id),
-            instance_id: Arc::from(available_task.instance_id.as_str()),
-            task_id: Arc::from(task_id.as_str()),
-            metadata: continuation.build_task_metadata(&task_id),
+            workflow_id: Arc::from(workflow.context().workflow_id()),
+            instance_id: Arc::clone(&available_task.instance_id),
+            task_id: Arc::clone(&task_name),
+            metadata: task_index.build_task_metadata(&task_id),
             workflow_metadata_json: workflow.context().metadata_json.clone(),
         };
 
         let execution_future = with_task_context(task_ctx, async move {
-            Self::execute_task_by_id(continuation, &task_id, input).await
+            Self::execute_task_by_id(continuation, &task_name, input).await
         });
 
         let heartbeat_result = self
@@ -1134,18 +1155,18 @@ where
 
     /// Try to schedule a retry for a failed task.
     ///
-    /// Looks up the retry policy on the continuation. If retries are available,
+    /// Looks up the retry policy in the task index. If retries are available,
     /// records the retry state on the snapshot, clears the deadline, saves the
     /// snapshot, releases the claim, and returns `Ok(Some(InProgress))`.
     /// Otherwise returns `Ok(None)` (caller falls through to existing error handling).
     async fn try_schedule_retry(
         &self,
-        continuation: &WorkflowContinuation,
+        task_index: &sayiir_core::TaskIndex,
         available_task: &AvailableTask,
         snapshot: &mut WorkflowSnapshot,
         error_msg: &str,
     ) -> Result<Option<WorkflowStatus>, crate::error::RuntimeError> {
-        let Some(policy) = continuation.get_task_retry_policy(&available_task.task_id) else {
+        let Some(policy) = task_index.retry_policy(&available_task.task_id) else {
             return Ok(None);
         };
 
@@ -1154,7 +1175,7 @@ where
         }
 
         let next_retry_at = snapshot.record_retry(
-            &available_task.task_id,
+            available_task.task_id,
             policy,
             error_msg,
             Some(&self.worker_id),
@@ -1202,7 +1223,7 @@ where
             ExecutionOutcome::Timeout(err) => {
                 if let Ok(Some(status)) = self
                     .try_schedule_retry(
-                        workflow.continuation(),
+                        workflow.task_index(),
                         available_task,
                         snapshot,
                         &err.to_string(),
@@ -1228,12 +1249,7 @@ where
                 let panic_msg = extract_panic_message(&panic_payload);
 
                 if let Ok(Some(status)) = self
-                    .try_schedule_retry(
-                        workflow.continuation(),
-                        available_task,
-                        snapshot,
-                        &panic_msg,
-                    )
+                    .try_schedule_retry(workflow.task_index(), available_task, snapshot, &panic_msg)
                     .await
                 {
                     claim.release_quietly().await;
@@ -1252,7 +1268,7 @@ where
             ExecutionOutcome::TaskError(e) => {
                 if let Ok(Some(status)) = self
                     .try_schedule_retry(
-                        workflow.continuation(),
+                        workflow.task_index(),
                         available_task,
                         snapshot,
                         &e.to_string(),
@@ -1307,26 +1323,26 @@ where
     /// and that the task is not already completed in the snapshot.
     /// Returns `Ok(true)` if the task should be skipped (already completed).
     fn validate_task_preconditions(
-        definition_hash: &str,
-        continuation: &WorkflowContinuation,
+        definition_hash: &sayiir_core::DefinitionHash,
+        task_index: &sayiir_core::TaskIndex,
         available_task: &AvailableTask,
         snapshot: &WorkflowSnapshot,
     ) -> Result<bool, crate::error::RuntimeError> {
-        if available_task.workflow_definition_hash != definition_hash {
+        if available_task.workflow_definition_hash != *definition_hash {
             return Err(WorkflowError::DefinitionMismatch {
-                expected: definition_hash.to_string(),
-                found: available_task.workflow_definition_hash.clone(),
+                expected: *definition_hash,
+                found: available_task.workflow_definition_hash,
             }
             .into());
         }
 
-        if !Self::find_task_id_in_continuation(continuation, &available_task.task_id) {
+        if !task_index.contains(&available_task.task_id) {
             tracing::error!(
                 instance_id = %available_task.instance_id,
                 task_id = %available_task.task_id,
                 "Task does not exist in workflow"
             );
-            return Err(WorkflowError::TaskNotFound(available_task.task_id.clone()).into());
+            return Err(WorkflowError::TaskNotFound(available_task.task_id.to_hex()).into());
         }
 
         if snapshot.get_task_result(&available_task.task_id).is_some() {
@@ -1367,8 +1383,8 @@ where
             );
             Ok(Some(ActiveTaskClaim {
                 backend: &self.backend,
-                instance_id: available_task.instance_id.clone(),
-                task_id: available_task.task_id.clone(),
+                instance_id: Arc::clone(&available_task.instance_id),
+                task_id: available_task.task_id,
                 worker_id: self.worker_id.clone(),
             }))
         } else {
@@ -1392,7 +1408,7 @@ where
     ) -> Result<Option<WorkflowStatus>, crate::error::RuntimeError> {
         if self
             .backend
-            .check_and_cancel(&available_task.instance_id, Some(&available_task.task_id))
+            .check_and_cancel(&available_task.instance_id, Some(available_task.task_id))
             .await?
         {
             tracing::info!(
@@ -1471,7 +1487,7 @@ where
                             "Task deadline expired during heartbeat, cancelling"
                         );
                         return Err(WorkflowError::TaskTimedOut {
-                            task_id: dl.task_id.clone(),
+                            task_id: dl.task_id,
                             timeout: std::time::Duration::from_millis(dl.timeout_ms),
                         }
                         .into());
@@ -1512,7 +1528,7 @@ where
         output: Bytes,
         claim: ActiveTaskClaim<'_, B>,
     ) -> Result<(), crate::error::RuntimeError> {
-        snapshot.mark_task_completed(available_task.task_id.clone(), output);
+        snapshot.mark_task_completed(available_task.task_id, output);
         tracing::debug!(
             instance_id = %available_task.instance_id,
             task_id = %available_task.task_id,
@@ -1590,27 +1606,31 @@ where
 
     /// Find a task function in the workflow continuation and return a reference.
     ///
-    /// Note: We can't clone `UntypedCoreTask`, so we need to execute it directly
-    /// from the continuation structure. This method returns the task ID if found.
-    fn find_task_id_in_continuation(continuation: &WorkflowContinuation, task_id: &str) -> bool {
+    /// Tree-walk predicate: does `task_id` appear anywhere inside `continuation`?
+    ///
+    /// Only used by [`execute_task_by_id`] to pick which subtree to descend into
+    /// at a `Fork`/`Branch`/`Loop`/`ChildWorkflow` boundary. Validation on the
+    /// dispatch hot path uses [`sayiir_core::TaskIndex::contains`] instead.
+    fn find_task_id_in_continuation(
+        continuation: &WorkflowContinuation,
+        task_id: &sayiir_core::TaskId,
+    ) -> bool {
         match continuation {
             WorkflowContinuation::Task { id, next, .. }
             | WorkflowContinuation::Delay { id, next, .. }
             | WorkflowContinuation::AwaitSignal { id, next, .. } => {
-                if id == task_id {
+                if sayiir_core::TaskId::from(id.as_str()) == *task_id {
                     return true;
                 }
                 next.as_ref()
                     .is_some_and(|n| Self::find_task_id_in_continuation(n, task_id))
             }
             WorkflowContinuation::Fork { branches, join, .. } => {
-                // Check branches
                 for branch in branches {
                     if Self::find_task_id_in_continuation(branch, task_id) {
                         return true;
                     }
                 }
-                // Check join
                 if let Some(join_cont) = join {
                     Self::find_task_id_in_continuation(join_cont, task_id)
                 } else {
@@ -1662,12 +1682,14 @@ where
     ) -> impl std::future::Future<Output = Result<Bytes, crate::error::RuntimeError>> + Send + 'a
     {
         async move {
+            let task_id_hash = sayiir_core::TaskId::from(task_id);
+            let task_id = &task_id_hash;
             let mut current = continuation;
 
             loop {
                 match current {
                     WorkflowContinuation::Task { id, func, next, .. } => {
-                        if id == task_id {
+                        if sayiir_core::TaskId::from(id.as_str()) == *task_id {
                             let func = func
                                 .as_ref()
                                 .ok_or_else(|| WorkflowError::TaskNotImplemented(id.clone()))?;
@@ -1767,19 +1789,17 @@ where
     /// Update execution position after a task completes.
     fn update_position_after_task(
         continuation: &WorkflowContinuation,
-        completed_task_id: &str,
+        completed_task_id: &sayiir_core::TaskId,
         snapshot: &mut WorkflowSnapshot,
     ) {
         match continuation {
             WorkflowContinuation::Task { id, next, .. }
             | WorkflowContinuation::Delay { id, next, .. }
             | WorkflowContinuation::AwaitSignal { id, next, .. } => {
-                if id == completed_task_id {
+                if sayiir_core::TaskId::from(id.as_str()) == *completed_task_id {
                     if let Some(next_cont) = next {
                         let hint = next_cont.first_task_hint();
-                        snapshot.update_position(ExecutionPosition::AtTask {
-                            task_id: hint.id.clone(),
-                        });
+                        snapshot.update_position(ExecutionPosition::AtTask { task_id: hint.id });
                         snapshot.set_task_hint(&hint);
                     }
                 } else if let Some(next_cont) = next {
@@ -1872,6 +1892,7 @@ where
         Self::resolve_loops_recursive(continuation, snapshot, backend).await
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_loops_recursive<'a>(
         continuation: &'a WorkflowContinuation,
         snapshot: &'a mut WorkflowSnapshot,
@@ -1889,32 +1910,39 @@ where
                     next,
                 } => {
                     // Only resolve if the loop isn't already marked complete.
-                    if snapshot.get_task_result(id).is_none() {
+                    if snapshot
+                        .get_task_result(&sayiir_core::TaskId::from(id))
+                        .is_none()
+                    {
                         let terminal_id = body.terminal_task_id();
-                        if let Some(result) = snapshot.get_task_result(terminal_id) {
+                        if let Some(result) =
+                            snapshot.get_task_result(&sayiir_core::TaskId::from(terminal_id))
+                        {
                             let output = result.output.clone();
                             match crate::execution::decode_loop_envelope(&output) {
                                 Ok((LoopDecision::Done, inner)) => {
-                                    snapshot.clear_loop_iteration(id);
-                                    snapshot.mark_task_completed(id.clone(), inner);
+                                    snapshot.clear_loop_iteration(&sayiir_core::TaskId::from(id));
+                                    snapshot
+                                        .mark_task_completed(sayiir_core::TaskId::from(id), inner);
                                     backend.save_snapshot(snapshot).await?;
                                 }
                                 Ok((LoopDecision::Again, again_value)) => {
-                                    let current_iter = snapshot.loop_iteration(id);
+                                    let current_iter =
+                                        snapshot.loop_iteration(&sayiir_core::TaskId::from(id));
                                     let next_iter = current_iter + 1;
                                     if next_iter >= *max_iterations {
                                         match on_max {
                                             sayiir_core::workflow::MaxIterationsPolicy::Fail => {
                                                 return Err(WorkflowError::MaxIterationsExceeded {
-                                                    loop_id: id.clone(),
+                                                    loop_id: sayiir_core::TaskId::from(id),
                                                     max_iterations: *max_iterations,
                                                 }
                                                 .into());
                                             }
                                             sayiir_core::workflow::MaxIterationsPolicy::ExitWithLast => {
-                                                snapshot.clear_loop_iteration(id);
+                                                snapshot.clear_loop_iteration(&sayiir_core::TaskId::from(id));
                                                 snapshot.mark_task_completed(
-                                                    id.clone(),
+                                                    sayiir_core::TaskId::from(id.as_str()),
                                                     again_value,
                                                 );
                                                 backend.save_snapshot(snapshot).await?;
@@ -1925,15 +1953,20 @@ where
                                         // available for re-execution on the next poll.
                                         let body_ser = body.to_serializable();
                                         for tid in &body_ser.task_ids() {
-                                            snapshot.remove_task_result(tid);
+                                            snapshot.remove_task_result(
+                                                &sayiir_core::TaskId::from(*tid),
+                                            );
                                         }
-                                        snapshot.set_loop_iteration(id, next_iter);
+                                        snapshot.set_loop_iteration(
+                                            sayiir_core::TaskId::from(id),
+                                            next_iter,
+                                        );
                                         backend.save_snapshot(snapshot).await?;
                                     }
                                 }
                                 Err(e) => {
                                     return Err(CodecError::DecodeFailed {
-                                        task_id: id.clone(),
+                                        task_id: sayiir_core::TaskId::from(id),
                                         expected_type: "LoopEnvelope",
                                         source: e,
                                     }
@@ -1983,7 +2016,10 @@ where
         // Check if all tasks in the continuation are completed
         match continuation {
             WorkflowContinuation::Task { id, next, .. } => {
-                if snapshot.get_task_result(id).is_none() {
+                if snapshot
+                    .get_task_result(&sayiir_core::TaskId::from(id))
+                    .is_none()
+                {
                     return false;
                 }
                 if let Some(next_cont) = next {
@@ -1994,7 +2030,10 @@ where
             }
             WorkflowContinuation::Delay { id, next, .. }
             | WorkflowContinuation::AwaitSignal { id, next, .. } => {
-                if snapshot.get_task_result(id).is_none() {
+                if snapshot
+                    .get_task_result(&sayiir_core::TaskId::from(id))
+                    .is_none()
+                {
                     return false;
                 }
                 next.as_ref()
@@ -2016,7 +2055,10 @@ where
             }
             WorkflowContinuation::Branch { id, next, .. } => {
                 // Branch is complete when the branch node itself has a cached result
-                if snapshot.get_task_result(id).is_none() {
+                if snapshot
+                    .get_task_result(&sayiir_core::TaskId::from(id))
+                    .is_none()
+                {
                     return false;
                 }
                 next.as_ref()
@@ -2024,7 +2066,10 @@ where
             }
             WorkflowContinuation::Loop { id, next, .. } => {
                 // Loop is complete when the loop node itself has a cached result
-                if snapshot.get_task_result(id).is_none() {
+                if snapshot
+                    .get_task_result(&sayiir_core::TaskId::from(id))
+                    .is_none()
+                {
                     return false;
                 }
                 next.as_ref()
@@ -2032,7 +2077,10 @@ where
             }
             WorkflowContinuation::ChildWorkflow { id, next, .. } => {
                 // ChildWorkflow is complete when the node itself has a cached result
-                if snapshot.get_task_result(id).is_none() {
+                if snapshot
+                    .get_task_result(&sayiir_core::TaskId::from(id))
+                    .is_none()
+                {
                     return false;
                 }
                 next.as_ref()
@@ -2185,7 +2233,7 @@ mod tests {
         let registry = TaskRegistry::new();
 
         // Create a workflow snapshot so store_signal can validate it
-        let snapshot = WorkflowSnapshot::new("wf-1".to_string(), "hash-1".to_string());
+        let snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
         backend.save_snapshot(&snapshot).await.ok();
 
         let worker = PooledWorker::new("test-worker", backend, registry);

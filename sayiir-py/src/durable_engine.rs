@@ -100,7 +100,7 @@ impl PyDurableEngine {
         task_registry: Py<PyDict>,
     ) -> PyResult<PyWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
-        let definition_hash = workflow.definition_hash.clone();
+        let definition_hash = workflow.definition_hash;
         let first_task = continuation.first_task_hint();
         let registry = Arc::new(task_registry);
 
@@ -147,7 +147,7 @@ impl PyDurableEngine {
             py.detach(|| {
                 self.runtime.block_on(async {
                     let mut snapshot = match prepare_run(
-                        instance_id,
+                        &instance_id,
                         definition_hash,
                         input_bytes.clone(),
                         first_task,
@@ -208,7 +208,7 @@ impl PyDurableEngine {
         task_registry: Py<PyDict>,
     ) -> PyResult<PyWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
-        let definition_hash = workflow.definition_hash.clone();
+        let definition_hash = workflow.definition_hash;
         let workflow_id = workflow.workflow_id.clone();
         let workflow_metadata_json: Option<Arc<str>> =
             workflow.metadata_json.as_deref().map(Arc::from);
@@ -419,7 +419,7 @@ fn make_task_executor<'a>(
             workflow_id: Arc::from(workflow_id),
             instance_id: Arc::from(instance_id),
             task_id: Arc::from(task_id),
-            metadata: continuation.build_task_metadata(task_id),
+            metadata: continuation.build_task_metadata(&sayiir_core::TaskId::from(task_id)),
             workflow_metadata_json: workflow_metadata_json.clone(),
         };
         Box::pin(async move {

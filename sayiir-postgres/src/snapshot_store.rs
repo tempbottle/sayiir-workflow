@@ -31,7 +31,8 @@ where
         tracing::debug!("saving snapshot");
         let data = self.encode(snapshot)?;
         let status = snapshot.state.as_ref();
-        let task_id = snapshot.current_task_id().map(ToString::to_string);
+        let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
+        let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
         let error = snapshot.error_message().map(ToString::to_string);
         let terminal = snapshot.state.is_terminal();
@@ -81,10 +82,10 @@ where
                 updated_at = now()
              RETURNING history_version",
         )
-        .bind(&snapshot.instance_id) // $1
+        .bind(&*snapshot.instance_id) // $1
         .bind(status) // $2
-        .bind(&snapshot.definition_hash) // $3
-        .bind(&task_id) // $4
+        .bind(snapshot.definition_hash.as_bytes().as_slice()) // $3
+        .bind(task_id) // $4
         .bind(task_count) // $5
         .bind(&data) // $6
         .bind(&error) // $7
@@ -106,10 +107,10 @@ where
                 (instance_id, version, status, current_task_id, data)
              VALUES ($1, $2, $3, $4, $5)",
         )
-        .bind(&snapshot.instance_id)
+        .bind(&*snapshot.instance_id)
         .bind(history_version)
         .bind(status)
-        .bind(&task_id)
+        .bind(task_id)
         .bind(&data)
         .execute(&mut *tx)
         .await
@@ -118,7 +119,7 @@ where
         // --- Maintain sayiir_workflow_tasks lifecycle ---
 
         // If at a task, mark it as active
-        if let Some(ref tid) = task_id {
+        if let Some(tid) = task_id {
             sqlx::query(
                 "INSERT INTO sayiir_workflow_tasks (instance_id, task_id, status, started_at)
                  VALUES ($1, $2, 'active', now())
@@ -129,7 +130,7 @@ where
                     END,
                     started_at = COALESCE(sayiir_workflow_tasks.started_at, now())",
             )
-            .bind(&snapshot.instance_id)
+            .bind(&*snapshot.instance_id)
             .bind(tid)
             .execute(&mut *tx)
             .await
@@ -149,7 +150,7 @@ where
             )
             .bind(terminal_status)
             .bind(&error)
-            .bind(&snapshot.instance_id)
+            .bind(&*snapshot.instance_id)
             .execute(&mut *tx)
             .await
             .map_err(PgError)?;
@@ -170,7 +171,7 @@ where
     async fn save_task_result(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         output: bytes::Bytes,
     ) -> Result<(), BackendError> {
         tracing::debug!("saving task result");
@@ -188,11 +189,12 @@ where
 
         let raw: &[u8] = row.get("data");
         let mut snapshot = self.decode(raw)?;
-        snapshot.mark_task_completed(task_id.to_string(), output);
+        snapshot.mark_task_completed(*task_id, output);
 
         let data = self.encode(&snapshot)?;
         let status = snapshot.state.as_ref();
-        let current = snapshot.current_task_id().map(ToString::to_string);
+        let current_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
+        let current: Option<&[u8]> = current_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
 
         sqlx::query(
@@ -203,7 +205,7 @@ where
         )
         .bind(&data)
         .bind(status)
-        .bind(&current)
+        .bind(current)
         .bind(task_count)
         .bind(instance_id)
         .execute(&mut *tx)
@@ -218,7 +220,7 @@ where
                 status = 'completed', completed_at = now(), error = NULL",
         )
         .bind(instance_id)
-        .bind(task_id)
+        .bind(task_id.as_bytes().as_slice())
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;

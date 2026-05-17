@@ -93,7 +93,7 @@ impl PyWorkflowClient {
         instance_id: String,
         input: &Bound<'_, PyAny>,
     ) -> PyResult<PyWorkflowStatus> {
-        let definition_hash = workflow.definition_hash.clone();
+        let definition_hash = workflow.definition_hash;
         let first_task = workflow.continuation.first_task_hint();
         let conflict_policy = self.conflict_policy;
 
@@ -125,7 +125,7 @@ impl PyWorkflowClient {
             py.detach(|| {
                 self.runtime.block_on(async {
                     match prepare_run(
-                        instance_id,
+                        &instance_id,
                         definition_hash,
                         input_bytes,
                         first_task,
@@ -246,11 +246,15 @@ impl PyWorkflowClient {
         instance_id: String,
         task_id: String,
     ) -> PyResult<Option<Py<PyAny>>> {
-        let bytes = with_backend!(self, |backend| {
-            self.runtime
-                .block_on(backend.load_task_result(&instance_id, &task_id))
-                .map_err(backend_err_to_py)?
-        });
+        let bytes =
+            with_backend!(self, |backend| {
+                self.runtime
+                    .block_on(backend.load_task_result(
+                        &instance_id,
+                        &sayiir_core::TaskId::from(task_id.as_str()),
+                    ))
+                    .map_err(backend_err_to_py)?
+            });
         match bytes {
             Some(b) => Ok(Some(decode_to_pyobject(py, &b)?)),
             None => Ok(None),

@@ -36,8 +36,9 @@ pub struct NapiNodeInfo {
 #[napi]
 pub struct NapiWorkflow {
     pub(crate) workflow_id: String,
-    pub(crate) definition_hash: String,
+    pub(crate) definition_hash: sayiir_core::DefinitionHash,
     pub(crate) continuation: Arc<WorkflowContinuation>,
+    pub(crate) task_index: Arc<sayiir_core::TaskIndex>,
     pub(crate) metadata_json: Option<String>,
 }
 
@@ -49,8 +50,8 @@ impl NapiWorkflow {
     }
 
     #[napi(getter)]
-    pub fn definition_hash(&self) -> &str {
-        &self.definition_hash
+    pub fn definition_hash(&self) -> String {
+        self.definition_hash.to_hex()
     }
 
     #[napi(getter)]
@@ -267,10 +268,12 @@ impl NapiFlowBuilder {
             "workflow built"
         );
 
+        let task_index = Arc::new(sayiir_core::TaskIndex::build(&continuation));
         Ok(NapiWorkflow {
             workflow_id: self.workflow_id.clone(),
             definition_hash,
             continuation: Arc::new(continuation),
+            task_index,
             metadata_json: self.metadata_json.clone(),
         })
     }

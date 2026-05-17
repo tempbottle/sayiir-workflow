@@ -31,15 +31,16 @@ pub(crate) enum ResumeOutcome {
 /// Prepare to resume a workflow from a saved snapshot.
 pub(crate) async fn prepare_resume<B: SignalStore>(
     instance_id: &str,
-    definition_hash: &str,
+    definition_hash: &sayiir_core::DefinitionHash,
     backend: &B,
 ) -> Result<ResumeOutcome, wasm_bindgen::JsValue> {
+    sayiir_core::validate_instance_id(instance_id).map_err(to_js_error)?;
     let mut snapshot = backend
         .load_snapshot(instance_id)
         .await
         .map_err(to_js_error)?;
 
-    if snapshot.definition_hash != definition_hash {
+    if snapshot.definition_hash != *definition_hash {
         return Err(to_js_error(format!(
             "Definition mismatch: expected '{}', found '{}'",
             definition_hash, snapshot.definition_hash
@@ -81,12 +82,12 @@ pub(crate) async fn finalize_execution<B: SnapshotStore>(
                 WorkflowSnapshotState::InProgress {
                     position: ExecutionPosition::AtDelay { delay_id, .. },
                     ..
-                } => delay_id.clone(),
+                } => *delay_id,
                 WorkflowSnapshotState::InProgress {
                     position: ExecutionPosition::AtFork { fork_id, .. },
                     ..
-                } => fork_id.clone(),
-                _ => String::new(),
+                } => *fork_id,
+                _ => sayiir_core::TaskId::default(),
             };
             Ok((WorkflowStatus::Waiting { wake_at, delay_id }, None))
         }
@@ -187,12 +188,12 @@ async fn resolve_parked<B: SignalStore>(
                 },
             ..
         } => {
-            let delay_id = delay_id.clone();
+            let delay_id = *delay_id;
             let wake_at = *wake_at;
-            let next_task_id = next_task_id.clone();
+            let next_task_id = *next_task_id;
 
             // Check cancel/pause
-            if let Some(status) = check_cancel_pause(backend, instance_id, Some(&delay_id)).await? {
+            if let Some(status) = check_cancel_pause(backend, instance_id, Some(delay_id)).await? {
                 return Ok(Some(status));
             }
 
@@ -220,10 +221,10 @@ async fn resolve_parked<B: SignalStore>(
             },
             ..
         } => {
-            let fork_id = fork_id.clone();
+            let fork_id = *fork_id;
             let wake_at = *wake_at;
 
-            if let Some(status) = check_cancel_pause(backend, instance_id, Some(&fork_id)).await? {
+            if let Some(status) = check_cancel_pause(backend, instance_id, Some(fork_id)).await? {
                 return Ok(Some(status));
             }
 
@@ -253,13 +254,12 @@ async fn resolve_parked<B: SignalStore>(
                 },
             ..
         } => {
-            let signal_id = signal_id.clone();
+            let signal_id = *signal_id;
             let signal_name = signal_name.clone();
             let wake_at = *wake_at;
-            let next_task_id = next_task_id.clone();
+            let next_task_id = *next_task_id;
 
-            if let Some(status) = check_cancel_pause(backend, instance_id, Some(&signal_id)).await?
-            {
+            if let Some(status) = check_cancel_pause(backend, instance_id, Some(signal_id)).await? {
                 return Ok(Some(status));
             }
 
@@ -272,7 +272,7 @@ async fn resolve_parked<B: SignalStore>(
                 .await
                 .map_err(to_js_error)?
             {
-                snapshot.mark_task_completed(signal_id.clone(), payload);
+                snapshot.mark_task_completed(signal_id, payload);
                 if let Some(next_id) = next_task_id {
                     snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
                 } else {
@@ -318,7 +318,7 @@ async fn resolve_parked<B: SignalStore>(
 async fn check_cancel_pause<B: SignalStore>(
     backend: &B,
     instance_id: &str,
-    scope: Option<&str>,
+    scope: Option<sayiir_core::TaskId>,
 ) -> Result<Option<WorkflowStatus>, wasm_bindgen::JsValue> {
     if backend
         .check_and_cancel(instance_id, scope)

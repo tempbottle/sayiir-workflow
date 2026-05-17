@@ -34,14 +34,16 @@ pub enum PrepareRunOutcome {
 /// Reasons [`prepare_run`] may reject a call.
 #[derive(Debug)]
 pub enum RunConflict {
+    /// The supplied `instance_id` failed the API-boundary length check.
+    InvalidInstanceId(sayiir_core::InvalidInstanceId),
     /// `Fail` policy and the instance id is already in use.
     AlreadyExists(String),
     /// The existing snapshot was produced from a different workflow definition.
     DefinitionMismatch {
         /// Definition hash the caller expected.
-        expected: String,
+        expected: sayiir_core::DefinitionHash,
         /// Definition hash actually stored.
-        found: String,
+        found: sayiir_core::DefinitionHash,
     },
     /// Backend I/O error.
     Backend(BackendError),
@@ -53,12 +55,19 @@ impl From<BackendError> for RunConflict {
     }
 }
 
+impl From<sayiir_core::InvalidInstanceId> for RunConflict {
+    fn from(e: sayiir_core::InvalidInstanceId) -> Self {
+        Self::InvalidInstanceId(e)
+    }
+}
+
 impl std::fmt::Display for RunConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Names are the canonical strum-serialized forms, which both the
         // Rust `ConflictPolicy::*` variants and the JS `conflictPolicy:`
         // engine option accept.
         match self {
+            Self::InvalidInstanceId(e) => std::fmt::Display::fmt(e, f),
             Self::AlreadyExists(id) => write!(
                 f,
                 "Workflow instance '{id}' already exists. Use conflict policy 'use_existing' or 'terminate_existing' to override, or resume() instead.",
@@ -75,6 +84,7 @@ impl std::fmt::Display for RunConflict {
 impl std::error::Error for RunConflict {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::InvalidInstanceId(e) => Some(e),
             Self::Backend(e) => Some(e),
             _ => None,
         }
@@ -106,8 +116,8 @@ impl std::error::Error for RunConflict {
 /// Returns [`RunConflict`] for policy rejections, definition mismatches,
 /// or backend I/O failures.
 pub async fn prepare_run<B>(
-    instance_id: String,
-    definition_hash: String,
+    instance_id: &str,
+    definition_hash: sayiir_core::DefinitionHash,
     input_bytes: Bytes,
     first_task: TaskHint,
     backend: &B,
@@ -116,7 +126,8 @@ pub async fn prepare_run<B>(
 where
     B: SnapshotStore + SignalStore,
 {
-    match backend.load_snapshot(&instance_id).await {
+    sayiir_core::validate_instance_id(instance_id)?;
+    match backend.load_snapshot(instance_id).await {
         Ok(existing) => {
             if existing.definition_hash != definition_hash {
                 return Err(RunConflict::DefinitionMismatch {
@@ -125,7 +136,9 @@ where
                 });
             }
             match conflict_policy {
-                ConflictPolicy::Fail => return Err(RunConflict::AlreadyExists(instance_id)),
+                ConflictPolicy::Fail => {
+                    return Err(RunConflict::AlreadyExists(instance_id.to_string()));
+                }
                 ConflictPolicy::UseExisting => {
                     let output = existing.state.completed_output().cloned();
                     return Ok(PrepareRunOutcome::ExistingStatus(
@@ -134,13 +147,11 @@ where
                     ));
                 }
                 ConflictPolicy::TerminateExisting => {
-                    backend.delete_snapshot(&instance_id).await?;
+                    backend.delete_snapshot(instance_id).await?;
                     backend
-                        .clear_signal(&instance_id, SignalKind::Cancel)
+                        .clear_signal(instance_id, SignalKind::Cancel)
                         .await?;
-                    backend
-                        .clear_signal(&instance_id, SignalKind::Pause)
-                        .await?;
+                    backend.clear_signal(instance_id, SignalKind::Pause).await?;
                 }
             }
         }
@@ -151,7 +162,7 @@ where
     let mut snapshot =
         WorkflowSnapshot::with_initial_input(instance_id, definition_hash, input_bytes);
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: first_task.id.clone(),
+        task_id: first_task.id,
     });
     snapshot.set_task_hint(&first_task);
     backend.save_snapshot(&snapshot).await?;

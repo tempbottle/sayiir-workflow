@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
 import {
   task,
   flow,
@@ -7,6 +8,9 @@ import {
   sendSignal,
   InMemoryBackend,
 } from "../src/index.js";
+
+const taskIdHex = (name: string): string =>
+  createHash("sha256").update(name).digest("hex");
 
 describe("delay", () => {
   it("builds a workflow with a delay step", () => {
@@ -29,10 +33,12 @@ describe("delay", () => {
 
     const status = runDurableWorkflow(wf, "delay-1", 5, backend);
 
-    // Should hit the delay and return waiting with structured fields
+    // Should hit the delay and return waiting with structured fields.
+    // Identifiers are exposed as 32-byte SHA-256 hex at the FFI surface;
+    // the human-readable node id ("wait") only lives in the workflow definition.
     expect(status.status).toBe("waiting");
     if (status.status === "waiting") {
-      expect(status.delayId).toBe("wait");
+      expect(status.delayId).toBe(taskIdHex("wait"));
       expect(status.wakeAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     }
   });
@@ -57,11 +63,13 @@ describe("signals", () => {
       .build();
     const backend = new InMemoryBackend();
 
-    // First run — should park at signal with structured fields
+    // First run — should park at signal with structured fields.
+    // `signalId` is the SHA-256 hex of the node id ("approval"); `signalName`
+    // remains the human-readable signal-channel name.
     const status1 = runDurableWorkflow(wf, "sig-1", 5, backend);
     expect(status1.status).toBe("awaiting_signal");
     if (status1.status === "awaiting_signal") {
-      expect(status1.signalId).toBe("approval");
+      expect(status1.signalId).toBe(taskIdHex("approval"));
       expect(status1.signalName).toBe("user_approval");
     }
 

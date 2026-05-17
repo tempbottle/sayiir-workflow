@@ -48,7 +48,7 @@ where
     async fn claim_task(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
         ttl: Option<Duration>,
     ) -> Result<Option<TaskClaim>, BackendError> {
@@ -67,22 +67,34 @@ where
                        EXTRACT(EPOCH FROM expires_at)::BIGINT AS expires_epoch",
         )
         .bind(instance_id)
-        .bind(task_id)
+        .bind(task_id.as_bytes().as_slice())
         .bind(worker_id)
         .bind(expires_at)
         .fetch_optional(&self.pool)
         .await
         .map_err(PgError)?;
 
-        Ok(row.map(|r| TaskClaim {
-            instance_id: r.get("instance_id"),
-            task_id: r.get("task_id"),
-            worker_id: r.get("worker_id"),
-            claimed_at: r.get::<i64, _>("claimed_epoch").cast_unsigned(),
-            expires_at: r
-                .get::<Option<i64>, _>("expires_epoch")
-                .map(i64::cast_unsigned),
-        }))
+        row.map(|r| {
+            let task_id_bytes: &[u8] = r.get("task_id");
+            // Fail loudly on a malformed (wrong-length) task_id column —
+            // silently defaulting would cause incorrect claim ownership.
+            let task_id = sayiir_core::TaskId::from_slice(task_id_bytes).map_err(|e| {
+                BackendError::Backend(format!(
+                    "invalid task_id bytes in sayiir_task_claims (len={}): {e}",
+                    task_id_bytes.len(),
+                ))
+            })?;
+            Ok(TaskClaim {
+                instance_id: std::sync::Arc::from(r.get::<&str, _>("instance_id")),
+                task_id,
+                worker_id: r.get("worker_id"),
+                claimed_at: r.get::<i64, _>("claimed_epoch").cast_unsigned(),
+                expires_at: r
+                    .get::<Option<i64>, _>("expires_epoch")
+                    .map(i64::cast_unsigned),
+            })
+        })
+        .transpose()
     }
 
     #[tracing::instrument(
@@ -94,7 +106,7 @@ where
     async fn release_task_claim(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
     ) -> Result<(), BackendError> {
         tracing::debug!("releasing task claim");
@@ -103,7 +115,7 @@ where
             "SELECT worker_id FROM sayiir_task_claims WHERE instance_id = $1 AND task_id = $2",
         )
         .bind(instance_id)
-        .bind(task_id)
+        .bind(task_id.as_bytes().as_slice())
         .fetch_optional(&self.pool)
         .await
         .map_err(PgError)?
@@ -121,7 +133,7 @@ where
              WHERE instance_id = $1 AND task_id = $2 AND worker_id = $3",
         )
         .bind(instance_id)
-        .bind(task_id)
+        .bind(task_id.as_bytes().as_slice())
         .bind(worker_id)
         .execute(&self.pool)
         .await
@@ -139,7 +151,7 @@ where
     async fn extend_task_claim(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
         additional_duration: Duration,
     ) -> Result<(), BackendError> {
@@ -149,7 +161,7 @@ where
              WHERE instance_id = $1 AND task_id = $2",
         )
         .bind(instance_id)
-        .bind(task_id)
+        .bind(task_id.as_bytes().as_slice())
         .fetch_optional(&self.pool)
         .await
         .map_err(PgError)?
@@ -175,7 +187,7 @@ where
             )
             .bind(new_exp)
             .bind(instance_id)
-            .bind(task_id)
+            .bind(task_id.as_bytes().as_slice())
             .execute(&self.pool)
             .await
             .map_err(PgError)?;
@@ -289,7 +301,7 @@ where
                         },
                     ..
                 } if Utc::now() >= *wake_at => {
-                    if let Some(next_id) = next_task_id.clone() {
+                    if let Some(next_id) = *next_task_id {
                         snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
                         self.save_snapshot(&snapshot).await?;
 
@@ -366,7 +378,9 @@ where
         fields(
             db.system = "postgresql",
             instance_id = %hint.instance_id,
-            task_id = %hint.task_id,
+            // Display via the `TaskId` newtype so the span field renders as
+            // 64-char hex like every other task_id log line.
+            task_id = %sayiir_core::TaskId::from_bytes(hint.task_id),
         ),
         err(level = tracing::Level::ERROR),
     )]
@@ -391,7 +405,7 @@ where
         );
         let row = sqlx::query(&query)
             .bind(&hint.instance_id)
-            .bind(&hint.task_id)
+            .bind(hint.task_id.as_slice())
             .fetch_optional(&self.pool)
             .await
             .map_err(PgError)?;
@@ -412,13 +426,15 @@ where
         else {
             return Ok(None);
         };
-        if task_id != &hint.task_id || completed_tasks.contains_key(task_id) {
+        // hint.task_id is 32 raw bytes from the NOTIFY payload — wrap and compare.
+        let hint_task_id = sayiir_core::TaskId::from_bytes(hint.task_id);
+        if *task_id != hint_task_id || completed_tasks.contains_key(task_id) {
             return Ok(None);
         }
 
         Ok(build_available_task(
             &snapshot,
-            &hint.task_id,
+            &hint_task_id,
             completed_tasks,
         ))
     }
@@ -427,8 +443,11 @@ where
 /// Build an [`AvailableTask`] from a snapshot at a task position.
 fn build_available_task(
     snapshot: &WorkflowSnapshot,
-    task_id: &str,
-    completed_tasks: &std::collections::HashMap<String, sayiir_core::snapshot::TaskResult>,
+    task_id: &sayiir_core::TaskId,
+    completed_tasks: &std::collections::HashMap<
+        sayiir_core::TaskId,
+        sayiir_core::snapshot::TaskResult,
+    >,
 ) -> Option<AvailableTask> {
     let input = if completed_tasks.is_empty() {
         snapshot.initial_input_bytes()
@@ -438,9 +457,9 @@ fn build_available_task(
 
     input.map(|input_bytes| AvailableTask {
         instance_id: snapshot.instance_id.clone(),
-        task_id: task_id.to_string(),
+        task_id: *task_id,
         input: input_bytes,
-        workflow_definition_hash: snapshot.definition_hash.clone(),
+        workflow_definition_hash: snapshot.definition_hash,
         trace_parent: snapshot.trace_parent.clone(),
     })
 }

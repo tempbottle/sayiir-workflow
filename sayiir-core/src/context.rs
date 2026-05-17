@@ -19,11 +19,16 @@ use crate::task::TaskMetadata;
 /// language-specific context APIs (Python/Node.js).
 #[derive(Clone, Debug)]
 pub struct TaskExecutionContext {
-    /// The workflow definition identifier.
+    /// The workflow definition identifier (human-readable name).
+    ///
+    /// Carried as `Arc<str>` because the external task executor (Python /
+    /// Node FFI) needs to look up the task function by its registered name.
+    /// The runtime's hot map lookups happen against the hashed
+    /// [`WorkflowId`](crate::WorkflowId) elsewhere; here we keep the name.
     pub workflow_id: Arc<str>,
     /// The workflow instance identifier.
     pub instance_id: Arc<str>,
-    /// The current task identifier.
+    /// The current task identifier (human-readable name).
     pub task_id: Arc<str>,
     /// Task metadata (timeout, retry policy, version, etc.).
     pub metadata: TaskMetadata,
@@ -34,10 +39,14 @@ pub struct TaskExecutionContext {
 /// Workflow execution context that provides access to metadata and codec.
 ///
 /// This context is always available as a plain struct used during workflow
-/// building and by the runner for codec/metadata access.
+/// building and by the runner for codec/metadata access. The `workflow_id`
+/// is kept as both a hash ([`WorkflowId`](crate::WorkflowId)) for fast
+/// runtime comparison and an `Arc<str>` for log/error display.
 pub struct WorkflowContext<C, M> {
-    /// The unique workflow identifier.
-    pub workflow_id: Arc<str>,
+    /// SHA-256 hash of the workflow identifier (for fast comparison and maps).
+    pub workflow_id: crate::WorkflowId,
+    /// Human-readable workflow name (for logs / error messages).
+    pub workflow_name: Arc<str>,
     /// The codec used for serialization/deserialization.
     pub codec: Arc<C>,
     /// Immutable metadata attached to the workflow.
@@ -49,7 +58,8 @@ pub struct WorkflowContext<C, M> {
 impl<C, M> Clone for WorkflowContext<C, M> {
     fn clone(&self) -> Self {
         Self {
-            workflow_id: Arc::clone(&self.workflow_id),
+            workflow_id: self.workflow_id,
+            workflow_name: Arc::clone(&self.workflow_name),
             codec: Arc::clone(&self.codec),
             metadata: Arc::clone(&self.metadata),
             metadata_json: self.metadata_json.clone(),
@@ -59,19 +69,28 @@ impl<C, M> Clone for WorkflowContext<C, M> {
 
 impl<C, M> WorkflowContext<C, M> {
     /// Create a new workflow context.
-    pub fn new(workflow_id: impl Into<Arc<str>>, codec: Arc<C>, metadata: Arc<M>) -> Self {
+    pub fn new(workflow_name: impl Into<Arc<str>>, codec: Arc<C>, metadata: Arc<M>) -> Self {
+        let workflow_name: Arc<str> = workflow_name.into();
+        let workflow_id = crate::WorkflowId::from(workflow_name.as_ref());
         Self {
-            workflow_id: workflow_id.into(),
+            workflow_id,
+            workflow_name,
             codec,
             metadata,
             metadata_json: None,
         }
     }
 
-    /// Returns the workflow identifier.
+    /// Returns the workflow human-readable name.
     #[must_use]
     pub fn workflow_id(&self) -> &str {
-        &self.workflow_id
+        &self.workflow_name
+    }
+
+    /// Returns the workflow identifier hash.
+    #[must_use]
+    pub fn workflow_id_hash(&self) -> crate::WorkflowId {
+        self.workflow_id
     }
 
     /// Returns a clone of the codec `Arc`.

@@ -183,7 +183,7 @@ impl SnapshotStore for BackendKind {
     async fn save_task_result(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         output: bytes::Bytes,
     ) -> Result<(), BackendError> {
         dispatch!(self, |b| b
@@ -250,7 +250,7 @@ impl TaskClaimStore for BackendKind {
     async fn claim_task(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
         ttl: Option<chrono::Duration>,
     ) -> Result<Option<TaskClaim>, BackendError> {
@@ -262,7 +262,7 @@ impl TaskClaimStore for BackendKind {
     async fn release_task_claim(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
     ) -> Result<(), BackendError> {
         dispatch!(self, |b| b
@@ -273,7 +273,7 @@ impl TaskClaimStore for BackendKind {
     async fn extend_task_claim(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
         additional_duration: chrono::Duration,
     ) -> Result<(), BackendError> {
@@ -299,7 +299,7 @@ impl TaskResultStore for BackendKind {
     async fn load_task_result(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
     ) -> Result<Option<bytes::Bytes>, BackendError> {
         dispatch!(self, |b| b.load_task_result(instance_id, task_id).await)
     }
