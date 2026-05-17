@@ -2371,7 +2371,7 @@ mod tests {
         let wf2: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx2)
             .with_registry()
             .then("step1", |i: u32| async move { Ok(i + 1) })
-            .delay("wait", Duration::from_secs(60))
+            .delay("wait", Duration::from_mins(1))
             .build()
             .unwrap();
 

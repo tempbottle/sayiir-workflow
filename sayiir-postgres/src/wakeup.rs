@@ -43,7 +43,7 @@ const RECONNECT_MIN_DELAY: Duration = Duration::from_secs(5);
 
 /// Ceiling on the reconnect delay — even after many failures the listener
 /// retries at least this often, so a recovered PG is picked up promptly.
-const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(60);
+const RECONNECT_MAX_DELAY: Duration = Duration::from_mins(1);
 
 /// Fire `pg_notify(sayiir_task_ready, <hint bytes>)` on the given connection.
 ///

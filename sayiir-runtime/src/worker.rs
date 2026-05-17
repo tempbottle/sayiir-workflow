@@ -2248,12 +2248,12 @@ mod tests {
         let registry = TaskRegistry::new();
         let worker = PooledWorker::builder(backend, registry)
             .worker_id("w1")
-            .claim_ttl(Some(Duration::from_secs(120)))
+            .claim_ttl(Some(Duration::from_mins(2)))
             .batch_size(NonZeroUsize::new(8).unwrap())
             .build();
 
         assert_eq!(worker.worker_id, "w1");
-        assert_eq!(worker.claim_ttl, Some(Duration::from_secs(120)));
+        assert_eq!(worker.claim_ttl, Some(Duration::from_mins(2)));
         assert_eq!(worker.batch_size.get(), 8);
     }
 
