@@ -15,8 +15,11 @@ use std::sync::{Arc, RwLock};
 
 /// Signal requests indexed by workflow instance.
 type SignalsByInstance = HashMap<Arc<str>, HashMap<SignalKind, SignalRequest>>;
-/// FIFO event queues indexed by `(instance_id, signal_name)`.
-type EventsBySignal = HashMap<(Arc<str>, String), VecDeque<bytes::Bytes>>;
+/// FIFO event queues indexed by instance, then signal name.
+///
+/// Nested instead of tuple-keyed so reads can `Borrow`-lookup by `&str` without
+/// re-allocating an `Arc<str>` just to satisfy the key type.
+type EventsBySignal = HashMap<Arc<str>, HashMap<String, VecDeque<bytes::Bytes>>>;
 /// Cached task results for terminal workflows, indexed by instance.
 type TaskResultsByInstance = HashMap<Arc<str>, HashMap<sayiir_core::TaskId, TaskResult>>;
 
@@ -233,8 +236,13 @@ impl SignalStore for InMemoryBackend {
         payload: bytes::Bytes,
     ) -> Result<(), BackendError> {
         let mut events = self.events.write().map_err(Self::lock_error)?;
-        events
-            .entry((Arc::from(instance_id), signal_name.to_string()))
+        // Allocate Arc<str> only on first event for this instance.
+        let by_signal = match events.get_mut(instance_id) {
+            Some(m) => m,
+            None => events.entry(Arc::from(instance_id)).or_default(),
+        };
+        by_signal
+            .entry(signal_name.to_string())
             .or_default()
             .push_back(payload);
         Ok(())
@@ -246,11 +254,16 @@ impl SignalStore for InMemoryBackend {
         signal_name: &str,
     ) -> Result<Option<bytes::Bytes>, BackendError> {
         let mut events = self.events.write().map_err(Self::lock_error)?;
-        let key = (Arc::<str>::from(instance_id), signal_name.to_string());
-        let payload = events.get_mut(&key).and_then(VecDeque::pop_front);
+        let Some(by_signal) = events.get_mut(instance_id) else {
+            return Ok(None);
+        };
+        let payload = by_signal.get_mut(signal_name).and_then(VecDeque::pop_front);
         // Clean up empty queues
-        if events.get(&key).is_some_and(VecDeque::is_empty) {
-            events.remove(&key);
+        if by_signal.get(signal_name).is_some_and(VecDeque::is_empty) {
+            by_signal.remove(signal_name);
+        }
+        if by_signal.is_empty() {
+            events.remove(instance_id);
         }
         Ok(payload)
     }
@@ -525,8 +538,11 @@ impl TaskClaimStore for InMemoryBackend {
                             },
                         ..
                     } => {
-                        let key = (instance_id.clone(), signal_name.clone());
-                        if events.get(&key).is_some_and(|q| !q.is_empty()) {
+                        let has_payload = events
+                            .get(&**instance_id)
+                            .and_then(|m| m.get(signal_name))
+                            .is_some_and(|q| !q.is_empty());
+                        if has_payload {
                             // Signal arrived — advance
                             signal_advances.push((
                                 instance_id.clone(),
@@ -571,14 +587,19 @@ impl TaskClaimStore for InMemoryBackend {
             {
                 let mut events = self.events.write().map_err(Self::lock_error)?;
                 for (instance_id, signal_name, next_task_id) in &signal_advances {
-                    let key = (instance_id.clone(), signal_name.clone());
                     let payload = events
-                        .get_mut(&key)
+                        .get_mut(&**instance_id)
+                        .and_then(|m| m.get_mut(signal_name))
                         .and_then(VecDeque::pop_front)
                         .unwrap_or_default();
                     // Clean up empty queues
-                    if events.get(&key).is_some_and(VecDeque::is_empty) {
-                        events.remove(&key);
+                    if let Some(by_signal) = events.get_mut(&**instance_id) {
+                        if by_signal.get(signal_name).is_some_and(VecDeque::is_empty) {
+                            by_signal.remove(signal_name);
+                        }
+                        if by_signal.is_empty() {
+                            events.remove(&**instance_id);
+                        }
                     }
                     if let Some(snapshot) = snapshots.get_mut(instance_id) {
                         // Store signal payload as a task result so the next step can use it

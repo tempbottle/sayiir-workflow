@@ -1385,7 +1385,7 @@ where
             );
             Ok(Some(ActiveTaskClaim {
                 backend: &self.backend,
-                instance_id: available_task.instance_id.clone(),
+                instance_id: Arc::clone(&available_task.instance_id),
                 task_id: available_task.task_id,
                 worker_id: self.worker_id.clone(),
             }))

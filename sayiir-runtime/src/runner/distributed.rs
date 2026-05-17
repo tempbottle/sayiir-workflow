@@ -733,12 +733,13 @@ where
     {
         let mut set: tokio::task::JoinSet<Result<(String, Bytes), RuntimeError>> =
             tokio::task::JoinSet::new();
+        let shared_instance_id: Arc<str> = Arc::from(instance_id);
         for branch in branches {
             let id = branch.id().to_string();
             let branch = Arc::clone(branch);
             let branch_input = input.clone();
             let branch_backend = Arc::clone(backend);
-            let branch_instance_id: Arc<str> = Arc::from(instance_id);
+            let branch_instance_id = Arc::clone(&shared_instance_id);
             let ctx_for_work = context.clone();
 
             set.spawn(async move {
