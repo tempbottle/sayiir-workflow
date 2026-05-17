@@ -142,9 +142,9 @@ impl PyWorker {
                 // Create a fresh backend on worker's runtime (PgPool affinity).
                 let backend_kind = match postgres {
                     Some((url, options)) => {
-                        match runtime.block_on(
-                            PostgresBackend::<JsonCodec>::connect_with_options(&url, options),
-                        ) {
+                        match runtime.block_on(PostgresBackend::<JsonCodec>::connect_with_options(
+                            &url, options,
+                        )) {
                             Ok(b) => BackendKind::Postgres(Arc::new(b)),
                             Err(e) => {
                                 let _ = handle_tx.send(Err(e.to_string()));

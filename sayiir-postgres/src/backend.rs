@@ -137,11 +137,9 @@ where
                     }
                     if let Some(d) = idle_tx_to {
                         let ms = duration_to_ms(d);
-                        sqlx::query(&format!(
-                            "SET idle_in_transaction_session_timeout = {ms}"
-                        ))
-                        .execute(&mut *conn)
-                        .await?;
+                        sqlx::query(&format!("SET idle_in_transaction_session_timeout = {ms}"))
+                            .execute(&mut *conn)
+                            .await?;
                     }
                     Ok(())
                 })
