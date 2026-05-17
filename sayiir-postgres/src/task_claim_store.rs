@@ -10,6 +10,28 @@ use sqlx::Row;
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
 
+/// SQL fragment that gates a snapshot row to "claimable right now":
+/// no active claim on the named task, and no signal pending on the
+/// instance. Shared between `find_available_tasks` (polling scan,
+/// `claim_task_id_expr = s.current_task_id`) and `find_hinted_task`
+/// (single-row lookup, `claim_task_id_expr = $N` bind parameter) so a
+/// future change to the eligibility rules can't silently desynchronise
+/// the two paths.
+fn eligibility_predicate(claim_task_id_expr: &str) -> String {
+    format!(
+        "NOT EXISTS (
+            SELECT 1 FROM sayiir_task_claims c
+            WHERE c.instance_id = s.instance_id
+              AND c.task_id = {claim_task_id_expr}
+              AND (c.expires_at IS NULL OR c.expires_at > now())
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM sayiir_workflow_signals sig
+            WHERE sig.instance_id = s.instance_id
+        )"
+    )
+}
+
 impl<C> TaskClaimStore for PostgresBackend<C>
 where
     C: Encoder
@@ -217,9 +239,8 @@ where
         // scope dedup: two pollers issuing this SELECT at the exact same
         // instant will tend to receive disjoint row sets instead of fully
         // overlapping ones, reducing wasted snapshot decodes when fleet
-        // size is high. If real cross-statement dedup is ever needed, the
-        // SELECT and the conflict-resolving INSERT have to share a
-        // transaction — see the audit for the trade-offs.
+        // size is high.
+        let eligibility = eligibility_predicate("s.current_task_id");
         let query = format!(
             "SELECT s.instance_id, s.data, s.trace_parent
              FROM sayiir_workflow_snapshots s
@@ -230,16 +251,7 @@ where
                        AND s.delay_wake_at IS NOT NULL
                        AND s.delay_wake_at <= now())
                )
-               AND NOT EXISTS (
-                   SELECT 1 FROM sayiir_task_claims c
-                   WHERE c.instance_id = s.instance_id
-                     AND c.task_id = s.current_task_id
-                     AND (c.expires_at IS NULL OR c.expires_at > now())
-               )
-               AND NOT EXISTS (
-                   SELECT 1 FROM sayiir_workflow_signals sig
-                   WHERE sig.instance_id = s.instance_id
-               )
+               AND {eligibility}
                {tag_filter}
              ORDER BY
                (s.task_priority - EXTRACT(EPOCH FROM (now() - s.updated_at)) / $2) ASC,
@@ -287,7 +299,7 @@ where
                             ..
                         } = &snapshot.state
                             && let Some(task) =
-                                build_available_task(&snapshot, task_id, completed_tasks, worker_id)
+                                build_available_task(&snapshot, task_id, completed_tasks)
                         {
                             let bias = snapshot.has_failed_on_worker(task_id, worker_id);
                             available.push((bias, task));
@@ -318,9 +330,7 @@ where
                         continue;
                     }
 
-                    if let Some(task) =
-                        build_available_task(&snapshot, task_id, completed_tasks, worker_id)
-                    {
+                    if let Some(task) = build_available_task(&snapshot, task_id, completed_tasks) {
                         let bias = snapshot.has_failed_on_worker(task_id, worker_id);
                         available.push((bias, task));
                     }
@@ -342,6 +352,76 @@ where
         tracing::debug!(count = available.len(), "available tasks found");
         Ok(available.into_iter().map(|(_, task)| task).collect())
     }
+
+    async fn wait_for_wakeup(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<sayiir_persistence::TaskWakeupHint>, BackendError> {
+        Ok(self.wakeup.wait(timeout).await)
+    }
+
+    #[tracing::instrument(
+        name = "db.find_hinted_task",
+        skip(self, hint),
+        fields(
+            db.system = "postgresql",
+            instance_id = %hint.instance_id,
+            task_id = %hint.task_id,
+        ),
+        err(level = tracing::Level::ERROR),
+    )]
+    async fn find_hinted_task(
+        &self,
+        hint: &sayiir_persistence::TaskWakeupHint,
+    ) -> Result<Option<AvailableTask>, BackendError> {
+        // Single-row eligibility check: skip the priority-ordered scan
+        // in find_available_tasks and verify just the hinted row. No
+        // claim happens here — the caller runs the AvailableTask
+        // through the normal execute pipeline (which claims atomically
+        // against the race). On any negative outcome — claim held,
+        // signal blocking, snapshot advanced, no row — return None so
+        // the caller falls back to the full poll.
+        let query = format!(
+            "SELECT s.data, s.trace_parent
+             FROM sayiir_workflow_snapshots s
+             WHERE s.instance_id = $1
+               AND s.status = 'InProgress'
+               AND {eligibility}",
+            eligibility = eligibility_predicate("$2"),
+        );
+        let row = sqlx::query(&query)
+            .bind(&hint.instance_id)
+            .bind(&hint.task_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(PgError)?;
+
+        let Some(row) = row else { return Ok(None) };
+
+        let raw: &[u8] = row.get("data");
+        let mut snapshot = self.decode(raw)?;
+        snapshot.trace_parent = row.get("trace_parent");
+
+        // The snapshot must still be at the hinted task — otherwise the
+        // hint is stale (workflow moved on between NOTIFY and our read).
+        let WorkflowSnapshotState::InProgress {
+            position: ExecutionPosition::AtTask { task_id },
+            completed_tasks,
+            ..
+        } = &snapshot.state
+        else {
+            return Ok(None);
+        };
+        if task_id != &hint.task_id || completed_tasks.contains_key(task_id) {
+            return Ok(None);
+        }
+
+        Ok(build_available_task(
+            &snapshot,
+            &hint.task_id,
+            completed_tasks,
+        ))
+    }
 }
 
 /// Build an [`AvailableTask`] from a snapshot at a task position.
@@ -349,7 +429,6 @@ fn build_available_task(
     snapshot: &WorkflowSnapshot,
     task_id: &str,
     completed_tasks: &std::collections::HashMap<String, sayiir_core::snapshot::TaskResult>,
-    _worker_id: &str,
 ) -> Option<AvailableTask> {
     let input = if completed_tasks.is_empty() {
         snapshot.initial_input_bytes()

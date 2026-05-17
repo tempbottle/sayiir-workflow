@@ -1344,8 +1344,7 @@ impl SerializableContinuation {
 
         let mut hasher = Sha256::new();
         hash_continuation(self, &mut hasher);
-        let result = hasher.finalize();
-        format!("{result:x}")
+        hex::encode(hasher.finalize())
     }
 }
 
