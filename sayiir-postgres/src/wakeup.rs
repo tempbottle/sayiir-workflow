@@ -192,7 +192,7 @@ async fn connect_and_listen(
     }
 }
 
-/// Drain `recv()` into the broadcast channel until cancellation or
+/// Drain `recv()` into the mpmc wakeup queue until cancellation or
 /// non-recoverable error. sqlx auto-reconnects internally on transient
 /// socket failures and replays the LISTEN; `Err` here means recovery is
 /// exhausted. `Break` = exit; `Continue` = caller should reconnect.
