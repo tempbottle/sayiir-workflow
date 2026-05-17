@@ -115,6 +115,20 @@ export interface NapiInMemoryBackend {}
 
 export interface NapiPostgresBackend {}
 
+/**
+ * Connection-pool tuning for `NapiPostgresBackend.connect`. Durations are in
+ * seconds. Unset fields fall back to sqlx pool defaults.
+ */
+export interface NapiPgPoolOptions {
+  maxConnections?: number;
+  minConnections?: number;
+  acquireTimeoutSecs?: number;
+  idleTimeoutSecs?: number;
+  maxLifetimeSecs?: number;
+  statementTimeoutSecs?: number;
+  idleInTransactionTimeoutSecs?: number;
+}
+
 export interface NapiDurableEngine {
   run(
     workflow: NapiWorkflow,
@@ -193,7 +207,9 @@ export interface NativeAddon {
     input: unknown,
   ) => NapiContinuationStepper;
   NapiInMemoryBackend: new () => NapiInMemoryBackend;
-  NapiPostgresBackend: { connect(url: string): NapiPostgresBackend };
+  NapiPostgresBackend: {
+    connect(url: string, options?: NapiPgPoolOptions): NapiPostgresBackend;
+  };
   NapiDurableEngine: {
     withInMemory(backend: NapiInMemoryBackend, conflictPolicy?: string): NapiDurableEngine;
     withPostgres(backend: NapiPostgresBackend, conflictPolicy?: string): NapiDurableEngine;
