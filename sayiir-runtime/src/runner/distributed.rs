@@ -317,11 +317,11 @@ where
 
                     if let Some(next_cont) = current.get_next() {
                         let next_id = next_cont.first_task_id().to_string();
-                        snapshot.set_task_hint(&TaskHint {
-                            id: next_id.clone(),
-                            priority: continuation.get_task_priority(&next_id),
-                            tags: continuation.get_task_tags(&next_id),
-                        });
+                        snapshot.set_task_hint(&TaskHint::new(
+                            next_id.clone(),
+                            continuation.get_task_priority(&next_id),
+                            continuation.get_task_tags(&next_id),
+                        ));
                         snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
                     }
                     backend.save_snapshot(snapshot).await?;
@@ -369,11 +369,11 @@ where
                                 snapshot.mark_task_completed(id.clone(), payload);
                                 if let Some(next_cont) = next.as_deref() {
                                     let next_id = next_cont.first_task_id().to_string();
-                                    snapshot.set_task_hint(&TaskHint {
-                                        id: next_id.clone(),
-                                        priority: continuation.get_task_priority(&next_id),
-                                        tags: continuation.get_task_tags(&next_id),
-                                    });
+                                    snapshot.set_task_hint(&TaskHint::new(
+                                        next_id.clone(),
+                                        continuation.get_task_priority(&next_id),
+                                        continuation.get_task_tags(&next_id),
+                                    ));
                                     snapshot.update_position(ExecutionPosition::AtTask {
                                         task_id: next_id,
                                     });
@@ -1382,7 +1382,7 @@ mod tests {
 
         let workflow = WorkflowBuilder::new(ctx())
             .then("step1", |i: u32| async move { Ok(i + 1) })
-            .delay("wait_1h", std::time::Duration::from_secs(3600))
+            .delay("wait_1h", std::time::Duration::from_hours(1))
             .then("step2", |i: u32| async move { Ok(i * 2) })
             .build()
             .unwrap();
@@ -1428,7 +1428,7 @@ mod tests {
 
         let workflow = WorkflowBuilder::new(ctx())
             .then("step1", |i: u32| async move { Ok(i + 1) })
-            .delay("wait_1h", std::time::Duration::from_secs(3600))
+            .delay("wait_1h", std::time::Duration::from_hours(1))
             .then("step2", |i: u32| async move { Ok(i * 2) })
             .build()
             .unwrap();
@@ -1486,7 +1486,7 @@ mod tests {
 
         let workflow = WorkflowBuilder::new(ctx())
             .then("step1", |i: u32| async move { Ok(i + 1) })
-            .delay("wait_1h", std::time::Duration::from_secs(3600))
+            .delay("wait_1h", std::time::Duration::from_hours(1))
             .then("step2", |i: u32| async move { Ok(i * 2) })
             .build()
             .unwrap();

@@ -851,6 +851,260 @@ async fn works_on_minimum_pg_version() {
     assert!(claim.is_some());
 }
 
+// ─── LISTEN/NOTIFY ──────────────────────────────────────────────────────────
+
+/// `save_snapshot` must wake listening workers iff the new state is
+/// `InProgress AtTask` — the only position `find_hinted_task` can
+/// target. Terminal, paused, not-yet-started, or any non-AtTask
+/// in-progress position must not fire (those rely on the worker's
+/// timer-tick fallback poll).
+#[tokio::test]
+async fn save_snapshot_emits_notify_only_when_poll_eligible() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+
+    let container = Postgres::default()
+        .with_tag(DEFAULT_PG_VERSION)
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgresql://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPool::connect(&url).await.unwrap();
+    let backend = PostgresBackend::<JsonCodec>::connect_with(pool)
+        .await
+        .unwrap();
+
+    let mut listener = PgListener::connect(&url).await.unwrap();
+    listener.listen("sayiir_task_ready").await.unwrap();
+
+    // 1) Fresh NotStarted snapshot — must not notify.
+    let snapshot = WorkflowSnapshot::new("wf-notify".into(), "h".into());
+    backend.save_snapshot(&snapshot).await.unwrap();
+    let no_notify = tokio::time::timeout(Duration::from_millis(150), listener.recv()).await;
+    assert!(
+        no_notify.is_err(),
+        "NotStarted save should not emit a NOTIFY; got {:?}",
+        no_notify.ok()
+    );
+
+    // 2) Transition to AtTask — must notify with a base64-wrapped
+    //    nanoserde-encoded TaskWakeupHint carrying instance_id + task_id +
+    //    definition_hash.
+    let mut snapshot = backend.load_snapshot("wf-notify").await.unwrap();
+    snapshot.update_position(ExecutionPosition::AtTask {
+        task_id: "step-1".into(),
+    });
+    backend.save_snapshot(&snapshot).await.unwrap();
+    let notif = tokio::time::timeout(Duration::from_secs(1), listener.recv())
+        .await
+        .expect("AtTask save should emit a NOTIFY within 1s")
+        .expect("listener recv failed");
+    assert_eq!(notif.channel(), "sayiir_task_ready");
+    let hint = sayiir_persistence::TaskWakeupHint::decode(notif.payload())
+        .expect("payload must decode to a TaskWakeupHint");
+    assert_eq!(hint.instance_id, "wf-notify");
+    assert_eq!(hint.task_id, "step-1");
+    assert_eq!(hint.definition_hash, "h");
+
+    // 3) Terminal completion — must not notify.
+    let mut snapshot = backend.load_snapshot("wf-notify").await.unwrap();
+    snapshot.mark_completed(Bytes::from("done"));
+    backend.save_snapshot(&snapshot).await.unwrap();
+    let no_notify = tokio::time::timeout(Duration::from_millis(150), listener.recv()).await;
+    assert!(
+        no_notify.is_err(),
+        "Completed save should not emit a NOTIFY; got {:?}",
+        no_notify.ok()
+    );
+}
+
+/// `wait_for_wakeup` must return promptly once a `NOTIFY` is emitted by a
+/// concurrent `save_snapshot`. The timeout is a ceiling; under normal
+/// operation the listener delivers in <100 ms.
+#[tokio::test]
+async fn wait_for_wakeup_returns_on_notify() {
+    use std::time::{Duration, Instant};
+    use tokio::time::sleep;
+
+    let (_c, backend) = setup().await;
+    let backend2 = backend.clone();
+
+    // Give the LISTEN task a brief moment to actually subscribe before we
+    // race a NOTIFY against it. The listener spawns in `init` but the
+    // socket-level LISTEN registration is racy without this nudge.
+    sleep(Duration::from_millis(100)).await;
+
+    let producer = tokio::spawn(async move {
+        sleep(Duration::from_millis(150)).await;
+        let mut snapshot = WorkflowSnapshot::new("wf-wake".into(), "h".into());
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "step-1".into(),
+        });
+        backend2.save_snapshot(&snapshot).await.unwrap();
+    });
+
+    let started = Instant::now();
+    backend
+        .wait_for_wakeup(Duration::from_secs(5))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    producer.await.unwrap();
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "expected NOTIFY-driven wakeup within 2s, took {elapsed:?}",
+    );
+}
+
+/// With no NOTIFY traffic, `wait_for_wakeup` must respect its timeout and
+/// return at the deadline — this is the fallback poll guarantee.
+#[tokio::test]
+async fn wait_for_wakeup_respects_timeout() {
+    use std::time::{Duration, Instant};
+
+    let (_c, backend) = setup().await;
+    // Let the listener subscribe so a real Notify is in place — the
+    // timeout path must hold even when the channel is actively listened.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let started = Instant::now();
+    backend
+        .wait_for_wakeup(Duration::from_millis(300))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(280),
+        "expected ~300ms timeout, returned in {elapsed:?}",
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "expected timeout near 300ms, got {elapsed:?}",
+    );
+}
+
+/// `wait_for_wakeup` must return the parsed `TaskWakeupHint` when a
+/// NOTIFY arrives, not just signal that something happened.
+#[tokio::test]
+async fn wait_for_wakeup_delivers_parsed_hint() {
+    use std::time::Duration;
+    use tokio::time::sleep;
+
+    let (_c, backend) = setup().await;
+    let backend2 = backend.clone();
+    sleep(Duration::from_millis(100)).await;
+
+    let producer = tokio::spawn(async move {
+        sleep(Duration::from_millis(100)).await;
+        let mut snapshot = WorkflowSnapshot::new("wf-hinted".into(), "h-xyz".into());
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "task-a".into(),
+        });
+        backend2.save_snapshot(&snapshot).await.unwrap();
+    });
+
+    let hint = backend
+        .wait_for_wakeup(Duration::from_secs(2))
+        .await
+        .unwrap()
+        .expect("expected a hint from the NOTIFY");
+    producer.await.unwrap();
+
+    assert_eq!(hint.instance_id, "wf-hinted");
+    assert_eq!(hint.task_id, "task-a");
+    assert_eq!(hint.definition_hash, "h-xyz");
+}
+
+/// `find_hinted_task` must return an `AvailableTask` when the snapshot
+/// is still at the hinted task with no claim or signal block.
+#[tokio::test]
+async fn find_hinted_task_returns_available_task() {
+    use sayiir_persistence::TaskWakeupHint;
+
+    let (_c, backend) = setup().await;
+    let mut snapshot = WorkflowSnapshot::with_initial_input(
+        "wf-hint-found".into(),
+        "h".into(),
+        Bytes::from_static(b"\"input\""),
+    );
+    snapshot.update_position(ExecutionPosition::AtTask {
+        task_id: "first".into(),
+    });
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let hint = TaskWakeupHint {
+        instance_id: "wf-hint-found".into(),
+        task_id: "first".into(),
+        definition_hash: "h".into(),
+        tags: vec![],
+    };
+    let task = backend
+        .find_hinted_task(&hint)
+        .await
+        .unwrap()
+        .expect("hinted task should still be eligible");
+    assert_eq!(task.instance_id, "wf-hint-found");
+    assert_eq!(task.task_id, "first");
+    assert_eq!(task.workflow_definition_hash, sayiir_core::DefinitionHash::from("h"));
+}
+
+/// `find_hinted_task` must return `None` when the snapshot already
+/// moved past the hinted task (stale hint) — caller falls back to
+/// the full poll, no claim happens.
+#[tokio::test]
+async fn find_hinted_task_returns_none_when_stale() {
+    use sayiir_persistence::TaskWakeupHint;
+
+    let (_c, backend) = setup().await;
+    let mut snapshot = WorkflowSnapshot::new("wf-stale".into(), "h".into());
+    snapshot.update_position(ExecutionPosition::AtTask {
+        task_id: "second".into(),
+    });
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    // Hint targets a task the workflow is no longer at — should be skipped.
+    let hint = TaskWakeupHint {
+        instance_id: "wf-stale".into(),
+        task_id: "first".into(),
+        definition_hash: "h".into(),
+        tags: vec![],
+    };
+    assert!(backend.find_hinted_task(&hint).await.unwrap().is_none());
+}
+
+/// `find_hinted_task` must return `None` when an active claim already
+/// holds the task — preserving the find_available_tasks invariant that
+/// claimed work is never re-handed-out.
+#[tokio::test]
+async fn find_hinted_task_returns_none_when_claimed() {
+    use sayiir_persistence::TaskWakeupHint;
+
+    let (_c, backend) = setup().await;
+    let mut snapshot = WorkflowSnapshot::new("wf-claimed".into(), "h".into());
+    snapshot.update_position(ExecutionPosition::AtTask {
+        task_id: "first".into(),
+    });
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    backend
+        .claim_task("wf-claimed", "first", "other-worker", None)
+        .await
+        .unwrap()
+        .expect("first claim should succeed");
+
+    let hint = TaskWakeupHint {
+        instance_id: "wf-claimed".into(),
+        task_id: "first".into(),
+        definition_hash: "h".into(),
+        tags: vec![],
+    };
+    assert!(backend.find_hinted_task(&hint).await.unwrap().is_none());
+}
+
 /// `connect_with` must reject PostgreSQL versions below the minimum (13).
 #[tokio::test]
 async fn rejects_unsupported_pg_version() {

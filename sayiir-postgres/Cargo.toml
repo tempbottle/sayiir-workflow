@@ -24,6 +24,12 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+tokio-util = { version = "0.7", default-features = false }
+backon = { workspace = true }
+# `Receiver: Clone` + `recv_async(&self)` means we can hand a shared
+# receiver to every backend clone without wrapping in a mutex.
+flume = { workspace = true }
 
 [[bench]]
 name = "postgres"

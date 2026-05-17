@@ -483,11 +483,11 @@ impl WorkflowContinuation {
     /// `prepare_run` and `ParkReason`.
     #[must_use]
     pub fn first_task_hint(&self) -> crate::snapshot::TaskHint {
-        crate::snapshot::TaskHint {
-            id: self.first_task_id().to_string(),
-            priority: self.first_task_priority(),
-            tags: self.first_task_tags(),
-        }
+        crate::snapshot::TaskHint::new(
+            self.first_task_id().to_string(),
+            self.first_task_priority(),
+            self.first_task_tags(),
+        )
     }
 
     /// Get the terminal task ID of this continuation chain.
@@ -2374,7 +2374,7 @@ mod tests {
         let wf2: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx2)
             .with_registry()
             .then("step1", |i: u32| async move { Ok(i + 1) })
-            .delay("wait", Duration::from_secs(60))
+            .delay("wait", Duration::from_mins(1))
             .build()
             .unwrap();
 
@@ -2418,7 +2418,7 @@ mod tests {
         let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
         let workflow = WorkflowBuilder::new(ctx)
             .then("fetch", |i: u32| async move { Ok(i) })
-            .delay("wait_24h", Duration::from_secs(86400))
+            .delay("wait_24h", Duration::from_hours(24))
             .then("process", |i: u32| async move { Ok(i + 1) })
             .build()
             .unwrap();
@@ -2470,7 +2470,7 @@ mod tests {
                 id, duration, next, ..
             } => {
                 assert_eq!(id, "wait");
-                assert_eq!(duration, std::time::Duration::from_millis(5000));
+                assert_eq!(duration, std::time::Duration::from_secs(5));
                 assert!(next.is_none());
             }
             _ => panic!("Expected Delay variant"),

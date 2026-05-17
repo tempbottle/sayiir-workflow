@@ -15,14 +15,46 @@ use crate::task::RetryPolicy;
 ///
 /// Carried through `ParkReason` and `prepare_run` so that persistence-layer
 /// advancement inherits priority and tags without re-reading the continuation.
+///
+/// Both forms of the id are kept here: [`id`] is the human-readable name
+/// (used to populate [`ExecutionPosition::AtTask::task_id`] for snapshot
+/// readability), and [`task_id_hash`] is the SHA-256 [`TaskId`] used for
+/// fast O(1) comparison and `HashMap` probes — precomputed once at
+/// hint-build time so downstream consumers don't pay the hash cost on every
+/// check.
+///
+/// [`id`]: TaskHint::id
+/// [`task_id_hash`]: TaskHint::task_id_hash
+/// [`TaskId`]: crate::TaskId
 #[derive(Debug, Clone, Default)]
 pub struct TaskHint {
-    /// The task identifier.
+    /// The task identifier (human-readable name).
     pub id: String,
+    /// Precomputed [`crate::TaskId`] = SHA-256 of `id`.
+    ///
+    /// Built once when the hint is created so callers that need a fast id
+    /// comparison (e.g. claim matching, dispatch routing) can avoid
+    /// re-hashing the name on every call.
+    pub task_id_hash: crate::TaskId,
     /// Optional execution priority (lower = higher priority).
     pub priority: Option<u8>,
     /// Affinity tags for worker routing.
     pub tags: Vec<String>,
+}
+
+impl TaskHint {
+    /// Build a hint from a task name, precomputing the [`crate::TaskId`].
+    #[must_use]
+    pub fn new(id: impl Into<String>, priority: Option<u8>, tags: Vec<String>) -> Self {
+        let id = id.into();
+        let task_id_hash = crate::TaskId::from(id.as_str());
+        Self {
+            id,
+            task_id_hash,
+            priority,
+            tags,
+        }
+    }
 }
 
 /// A persisted deadline for a running task.

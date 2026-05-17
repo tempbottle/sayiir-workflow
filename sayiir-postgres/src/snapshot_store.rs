@@ -7,6 +7,7 @@ use sqlx::Row;
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
+use crate::wakeup::emit_task_ready;
 
 impl<C> SnapshotStore for PostgresBackend<C>
 where
@@ -154,6 +155,8 @@ where
             .map_err(PgError)?;
         }
 
+        emit_task_ready(&mut tx, snapshot).await.map_err(PgError)?;
+
         tx.commit().await.map_err(PgError)?;
         Ok(())
     }
@@ -219,6 +222,8 @@ where
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;
+
+        emit_task_ready(&mut tx, &snapshot).await.map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
         Ok(())

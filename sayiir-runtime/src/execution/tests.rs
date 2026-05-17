@@ -597,10 +597,7 @@ async fn test_prepare_run_creates_snapshot() {
         "inst-1".into(),
         "hash-1".into(),
         Bytes::from("input"),
-        sayiir_core::snapshot::TaskHint {
-            id: "task-1".into(),
-            ..Default::default()
-        },
+        sayiir_core::snapshot::TaskHint::new("task-1", None, vec![]),
         &backend,
         sayiir_core::workflow::ConflictPolicy::Fail,
     )
@@ -1185,7 +1182,7 @@ async fn test_checkpointing_delay_returns_waiting() {
     let next_task = stub_node("process", None);
     let delay = WorkflowContinuation::Delay {
         id: "wait_1h".into(),
-        duration: std::time::Duration::from_secs(3600),
+        duration: std::time::Duration::from_hours(1),
         next: Some(Box::new(next_task)),
     };
 
@@ -1245,7 +1242,7 @@ async fn test_checkpointing_delay_skip_on_resume() {
     let process = stub_node("process", None);
     let delay = WorkflowContinuation::Delay {
         id: "wait".into(),
-        duration: std::time::Duration::from_secs(3600),
+        duration: std::time::Duration::from_hours(1),
         next: Some(Box::new(process)),
     };
 
@@ -1299,7 +1296,7 @@ async fn test_checkpointing_delay_cancellation() {
 
     let delay = WorkflowContinuation::Delay {
         id: "wait".into(),
-        duration: std::time::Duration::from_secs(3600),
+        duration: std::time::Duration::from_hours(1),
         next: None,
     };
 
@@ -1377,7 +1374,7 @@ fn fork_with_delay_in_branch() -> WorkflowContinuation {
     let after_delay = stub_node("after_delay", None);
     let delay = WorkflowContinuation::Delay {
         id: "branch_delay".into(),
-        duration: std::time::Duration::from_secs(3600),
+        duration: std::time::Duration::from_hours(1),
         next: Some(Box::new(after_delay)),
     };
     let branch_b = Arc::new(stub_node("before_delay", Some(Box::new(delay))));
@@ -1636,7 +1633,7 @@ async fn test_fork_normal_branch_completes_delayed_branch_parks() {
     let branch_a = Arc::new(stub_node("branch_a", None));
     let delay = WorkflowContinuation::Delay {
         id: "branch_delay".into(),
-        duration: std::time::Duration::from_secs(3600),
+        duration: std::time::Duration::from_hours(1),
         next: None,
     };
     let branch_b = Arc::new(delay);
@@ -2344,7 +2341,7 @@ async fn test_checkpointing_delay_terminal_parks() {
 
     let delay = WorkflowContinuation::Delay {
         id: "final_wait".into(),
-        duration: std::time::Duration::from_secs(3600),
+        duration: std::time::Duration::from_hours(1),
         next: None,
     };
 

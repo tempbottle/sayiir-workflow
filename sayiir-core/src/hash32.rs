@@ -20,8 +20,9 @@ use sha2::{Digest, Sha256};
 /// A 32-byte fixed-length identifier, typically the output of SHA-256.
 ///
 /// Stored inline as `[u8; 32]` — no heap allocation, no length prefix, `Copy`,
-/// and trivially `Hash`/`Eq` (one memcmp).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// and trivially `Hash`/`Eq` (one memcmp). `Default` returns [`Hash32::ZERO`]
+/// (all-zero bytes) so semantic newtypes wrapping it can be `Default` too.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Hash32([u8; 32]);
 
 impl Hash32 {
@@ -202,115 +203,135 @@ impl<'de> Deserialize<'de> for Hash32 {
 }
 
 // ============================================================================
-// DefinitionHash — semantic newtype for workflow-definition fingerprints.
+// Semantic newtypes — `DefinitionHash` and `TaskId`.
+//
+// Both are `Hash32`-backed but distinct at the type level so the compiler
+// catches mixups. The macro keeps their surface in lock-step.
 // ============================================================================
 
-/// SHA-256 fingerprint of a workflow's structural definition.
-///
-/// Computed from the workflow's continuation tree (task IDs, retry policies,
-/// fork shapes, delays, signals, loops, child workflows). Used by the runtime
-/// to detect when a serialised snapshot was written against a different
-/// workflow definition than the one currently in memory.
-///
-/// Compares in a single 32-byte memcmp instead of a 64-character string
-/// equality, and hashes to one `u64` instead of per-character siphash.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DefinitionHash(Hash32);
+/// Define a `Hash32`-backed semantic newtype with the standard surface:
+/// `Copy`/`Eq`/`Hash`, hex `Display`, hex `FromStr`, transparent serde,
+/// and `From<&str>`/`From<String>` that **hash** the input via SHA-256
+/// (not hex-parse). The hex round-trip path is `from_hex` / `to_hex`.
+macro_rules! hash32_newtype {
+    (
+        $(#[$attr:meta])*
+        $name:ident
+    ) => {
+        $(#[$attr])*
+        #[derive(
+            Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+        )]
+        #[serde(transparent)]
+        pub struct $name(Hash32);
 
-impl DefinitionHash {
-    /// Construct from a [`Hash32`].
-    #[must_use]
-    pub const fn from_hash(hash: Hash32) -> Self {
-        Self(hash)
-    }
+        impl $name {
+            #[doc = concat!("Construct a [`", stringify!($name), "`] from a [`Hash32`].")]
+            #[must_use]
+            pub const fn from_hash(hash: Hash32) -> Self { Self(hash) }
 
-    /// Construct from raw 32 bytes.
-    #[must_use]
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(Hash32::from_bytes(bytes))
-    }
+            #[doc = concat!("Construct a [`", stringify!($name), "`] from raw 32 bytes.")]
+            #[must_use]
+            pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+                Self(Hash32::from_bytes(bytes))
+            }
 
-    /// Hash the given input with SHA-256 and wrap the result.
-    #[must_use]
-    pub fn sha256(input: impl AsRef<[u8]>) -> Self {
-        Self(Hash32::sha256(input))
-    }
+            /// SHA-256-hash the given input and wrap the result.
+            ///
+            /// This is the canonical way to mint a fresh id from a
+            /// human-readable name at construction time.
+            #[must_use]
+            pub fn sha256(input: impl AsRef<[u8]>) -> Self {
+                Self(Hash32::sha256(input))
+            }
 
-    /// Borrow the underlying hash.
-    #[must_use]
-    pub const fn as_hash(&self) -> &Hash32 {
-        &self.0
-    }
+            /// Borrow the underlying [`Hash32`].
+            #[must_use]
+            pub const fn as_hash(&self) -> &Hash32 { &self.0 }
 
-    /// Borrow the raw bytes.
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        self.0.as_bytes()
-    }
+            /// Borrow the raw 32 bytes.
+            #[must_use]
+            pub const fn as_bytes(&self) -> &[u8; 32] { self.0.as_bytes() }
 
-    /// Lowercase hex encoding (64 chars).
-    #[must_use]
-    pub fn to_hex(&self) -> String {
-        self.0.to_hex()
-    }
+            /// Lowercase hex encoding (64 chars).
+            #[must_use]
+            pub fn to_hex(&self) -> String { self.0.to_hex() }
 
-    /// Parse from a 64-character hex string.
+            /// Parse from a 64-character hex string.
+            ///
+            /// # Errors
+            ///
+            /// See [`Hash32::from_hex`].
+            pub fn from_hex(s: &str) -> Result<Self, Hash32ParseError> {
+                Hash32::from_hex(s).map(Self)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Display::fmt(&self.0, f)
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, concat!(stringify!($name), "({})"), self.0)
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = Hash32ParseError;
+            fn from_str(s: &str) -> Result<Self, Self::Err> { Self::from_hex(s) }
+        }
+
+        impl From<Hash32> for $name {
+            fn from(h: Hash32) -> Self { Self(h) }
+        }
+
+        impl From<$name> for Hash32 {
+            fn from(h: $name) -> Self { h.0 }
+        }
+
+        // NOTE: `From<&str>` / `From<String>` SHA-256-hash the input. They do
+        // **not** parse a hex hash — use `from_hex` for that. These impls keep
+        // builder APIs and test fixtures (`"task-1".into()`) ergonomic.
+        impl From<&str> for $name {
+            fn from(s: &str) -> Self { Self::sha256(s.as_bytes()) }
+        }
+
+        impl From<String> for $name {
+            fn from(s: String) -> Self { Self::sha256(s.as_bytes()) }
+        }
+    };
+}
+
+hash32_newtype! {
+    /// SHA-256 fingerprint of a workflow's structural definition.
     ///
-    /// # Errors
+    /// Computed from the workflow's continuation tree (task IDs, retry
+    /// policies, fork shapes, delays, signals, loops, child workflows). Used
+    /// by the runtime to detect when a serialised snapshot was written
+    /// against a different workflow definition than the one currently in
+    /// memory.
     ///
-    /// See [`Hash32::from_hex`].
-    pub fn from_hex(s: &str) -> Result<Self, Hash32ParseError> {
-        Hash32::from_hex(s).map(Self)
-    }
+    /// Compares in a single 32-byte memcmp instead of a 64-character string
+    /// equality, and hashes to one `u64` instead of per-character siphash.
+    DefinitionHash
 }
 
-impl fmt::Display for DefinitionHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
-    }
-}
-
-impl fmt::Debug for DefinitionHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DefinitionHash({})", self.0)
-    }
-}
-
-impl FromStr for DefinitionHash {
-    type Err = Hash32ParseError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_hex(s)
-    }
-}
-
-impl From<Hash32> for DefinitionHash {
-    fn from(h: Hash32) -> Self {
-        Self(h)
-    }
-}
-
-impl From<DefinitionHash> for Hash32 {
-    fn from(h: DefinitionHash) -> Self {
-        h.0
-    }
-}
-
-// NOTE: `From<&str>` / `From<String>` SHA-256-hash the input — they do NOT
-// parse a hex hash. For parsing an existing hex hash use [`DefinitionHash::from_hex`].
-// These impls exist to keep tests/fixtures (`"hash-1".into()`) ergonomic; in
-// production, `DefinitionHash` is produced by `compute_definition_hash` or
-// deserialised via serde.
-impl From<&str> for DefinitionHash {
-    fn from(s: &str) -> Self {
-        Self::sha256(s.as_bytes())
-    }
-}
-
-impl From<String> for DefinitionHash {
-    fn from(s: String) -> Self {
-        Self::sha256(s.as_bytes())
-    }
+hash32_newtype! {
+    /// SHA-256 hash of a task's user-facing name (e.g. `"validate"`).
+    ///
+    /// Used as a precomputed lookup key alongside the human-readable id on
+    /// hot data structures (e.g. [`TaskHint`](crate::snapshot::TaskHint)). The
+    /// runtime stores the name (`String`) on
+    /// [`ExecutionPosition`](crate::snapshot::ExecutionPosition) variants for
+    /// readability of serialised snapshots; the `TaskId` is what comparisons
+    /// and map probes use when callers have access to it.
+    ///
+    /// 32-byte memcmp + single-`u64` hash, same wins as
+    /// [`DefinitionHash`].
+    TaskId
 }
 
 #[cfg(test)]

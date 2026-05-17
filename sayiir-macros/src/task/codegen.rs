@@ -122,7 +122,7 @@ fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
             .backoff
             .as_ref()
             .map(|d| d.to_tokens())
-            .unwrap_or_else(|| quote! { ::std::time::Duration::from_millis(1000) });
+            .unwrap_or_else(|| quote! { ::std::time::Duration::from_secs(1) });
         let multiplier = attrs.backoff_multiplier.unwrap_or(2.0_f32);
 
         Some(quote! {

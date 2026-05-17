@@ -30,7 +30,11 @@ use crate::flow::PyWorkflow;
 /// Args:
 ///     `worker_id`: Unique identifier for this worker node
 ///     backend: Either `InMemoryBackend()` or `PostgresBackend(url)`
-///     `poll_interval_secs`: Seconds between polls (default: 5.0)
+///     `poll_interval_secs`: Seconds between fallback polls (default: 30.0).
+///         For PG backends, LISTEN/NOTIFY wakes the worker within ms of
+///         a task transitioning to claimable, so this only bounds the
+///         worst-case latency for events NOTIFY can't cover (delay
+///         expiry, expired claims, lost LISTEN connections).
 ///     `claim_ttl_secs`: Task claim TTL in seconds (default: 300.0)
 #[pyclass]
 pub struct PyWorker {
@@ -45,7 +49,7 @@ pub struct PyWorker {
 #[pymethods]
 impl PyWorker {
     #[new]
-    #[pyo3(signature = (worker_id, backend, poll_interval_secs=5.0, claim_ttl_secs=300.0, tags=None))]
+    #[pyo3(signature = (worker_id, backend, poll_interval_secs=30.0, claim_ttl_secs=300.0, tags=None))]
     fn new(
         worker_id: String,
         backend: &Bound<'_, PyAny>,
