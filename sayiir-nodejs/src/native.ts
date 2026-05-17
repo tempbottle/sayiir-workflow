@@ -126,7 +126,7 @@ export interface NapiPgPoolOptions {
   idleTimeoutSecs?: number;
   maxLifetimeSecs?: number;
   statementTimeoutSecs?: number;
-  idleInTransactionTimeoutSecs?: number;
+  idleInTransactionSessionTimeoutSecs?: number;
 }
 
 export interface NapiDurableEngine {

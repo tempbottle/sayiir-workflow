@@ -207,12 +207,19 @@ where
         // are ignored by this routine. See `position_kind_strings_are_stable`
         // in sayiir-core for the literal pin.
         //
-        // FOR UPDATE OF s SKIP LOCKED deduplicates concurrent pollers within
-        // the statement window. The polling SELECT runs outside an enclosing
-        // transaction, so the locks are released immediately after the
-        // statement finishes — the claim race is still resolved by the
-        // INSERT … ON CONFLICT in `claim_task`. SKIP LOCKED here trims the
-        // wasted snapshot decodes when many workers poll simultaneously.
+        // FOR UPDATE OF s SKIP LOCKED has **marginal** benefit here, and is
+        // intentionally narrow. This SELECT runs through sqlx without an
+        // enclosing transaction, so the row locks are released as soon as
+        // the statement completes — they do NOT persist across the caller's
+        // subsequent `claim_task` INSERT. The actual claim race is resolved
+        // by the `INSERT … ON CONFLICT` in `claim_task`, which is the sole
+        // arbiter for "who owns this task." All we get here is statement-
+        // scope dedup: two pollers issuing this SELECT at the exact same
+        // instant will tend to receive disjoint row sets instead of fully
+        // overlapping ones, reducing wasted snapshot decodes when fleet
+        // size is high. If real cross-statement dedup is ever needed, the
+        // SELECT and the conflict-resolving INSERT have to share a
+        // transaction — see the audit for the trade-offs.
         let query = format!(
             "SELECT s.instance_id, s.data, s.trace_parent
              FROM sayiir_workflow_snapshots s

@@ -52,8 +52,11 @@ export interface PgPoolOptions {
   maxLifetimeSecs?: number;
   /** PG `statement_timeout` (seconds) applied per connection. */
   statementTimeoutSecs?: number;
-  /** PG `idle_in_transaction_session_timeout` (seconds) applied per connection. */
-  idleInTransactionTimeoutSecs?: number;
+  /**
+   * PG `idle_in_transaction_session_timeout` (seconds) applied per connection.
+   * Named to match the underlying Postgres GUC for discoverability.
+   */
+  idleInTransactionSessionTimeoutSecs?: number;
 }
 
 /** PostgreSQL persistence backend for durable production workflows. */

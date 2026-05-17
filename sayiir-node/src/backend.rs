@@ -31,8 +31,9 @@ pub struct NapiPgPoolOptions {
     /// PG `statement_timeout` (seconds) set on every new connection.
     pub statement_timeout_secs: Option<f64>,
     /// PG `idle_in_transaction_session_timeout` (seconds) set on every new
-    /// connection.
-    pub idle_in_transaction_timeout_secs: Option<f64>,
+    /// connection. Named to match the underlying Postgres GUC for
+    /// discoverability.
+    pub idle_in_transaction_session_timeout_secs: Option<f64>,
 }
 
 impl From<NapiPgPoolOptions> for PoolOptions {
@@ -45,7 +46,7 @@ impl From<NapiPgPoolOptions> for PoolOptions {
             max_lifetime: o.max_lifetime_secs.map(Duration::from_secs_f64),
             statement_timeout: o.statement_timeout_secs.map(Duration::from_secs_f64),
             idle_in_transaction_session_timeout: o
-                .idle_in_transaction_timeout_secs
+                .idle_in_transaction_session_timeout_secs
                 .map(Duration::from_secs_f64),
         }
     }

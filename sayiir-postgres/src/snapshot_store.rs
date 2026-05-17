@@ -46,13 +46,22 @@ where
 
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
+        // `history_version` is intentionally omitted from the column list
+        // and VALUES — the INSERT branch lets the column DEFAULT (1, set in
+        // migration 008) supply the first version. The ON CONFLICT branch
+        // does the increment from the locked existing value. RETURNING then
+        // hands the chosen version to the history insert below.
+        //
+        // Keeping the literal out of the SQL means the "first version is 1"
+        // invariant lives in exactly one place (the column default), not
+        // duplicated between INSERT and UPDATE.
         let upsert_row = sqlx::query(
             "INSERT INTO sayiir_workflow_snapshots
                 (instance_id, status, definition_hash, current_task_id,
                  completed_task_count, data, error, position_kind, delay_wake_at,
-                 trace_parent, task_priority, task_tags, history_version,
+                 trace_parent, task_priority, task_tags,
                  completed_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $9, $10, $11, $12, $13, 1,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $9, $10, $11, $12, $13,
                      CASE WHEN $8 THEN now() ELSE NULL END, now())
              ON CONFLICT (instance_id) DO UPDATE SET
                 status = $2,

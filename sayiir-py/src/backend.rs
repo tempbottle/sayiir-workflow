@@ -61,9 +61,10 @@ impl PyPostgresBackend {
     ///     `max_lifetime_secs`: Recycle connections older than this.
     ///     `statement_timeout_secs`: PG `statement_timeout` applied to every
     ///         connection. Aborts queries exceeding this duration.
-    ///     `idle_in_transaction_timeout_secs`: PG
+    ///     `idle_in_transaction_session_timeout_secs`: PG
     ///         `idle_in_transaction_session_timeout` applied to every
-    ///         connection. Aborts transactions sitting idle.
+    ///         connection. Aborts transactions sitting idle. Named to match
+    ///         the underlying Postgres GUC for discoverability.
     #[new]
     #[pyo3(signature = (
         url, *,
@@ -73,7 +74,7 @@ impl PyPostgresBackend {
         idle_timeout_secs=None,
         max_lifetime_secs=None,
         statement_timeout_secs=None,
-        idle_in_transaction_timeout_secs=None,
+        idle_in_transaction_session_timeout_secs=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -84,7 +85,7 @@ impl PyPostgresBackend {
         idle_timeout_secs: Option<f64>,
         max_lifetime_secs: Option<f64>,
         statement_timeout_secs: Option<f64>,
-        idle_in_transaction_timeout_secs: Option<f64>,
+        idle_in_transaction_session_timeout_secs: Option<f64>,
     ) -> PyResult<Self> {
         tracing::info!("connecting to PostgreSQL backend");
         tracing::debug!(url, "PostgreSQL connection URL");
@@ -96,7 +97,7 @@ impl PyPostgresBackend {
             idle_timeout: idle_timeout_secs.map(Duration::from_secs_f64),
             max_lifetime: max_lifetime_secs.map(Duration::from_secs_f64),
             statement_timeout: statement_timeout_secs.map(Duration::from_secs_f64),
-            idle_in_transaction_session_timeout: idle_in_transaction_timeout_secs
+            idle_in_transaction_session_timeout: idle_in_transaction_session_timeout_secs
                 .map(Duration::from_secs_f64),
         };
 

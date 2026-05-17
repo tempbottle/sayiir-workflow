@@ -38,12 +38,20 @@ pub struct PoolOptions {
     pub idle_timeout: Option<Duration>,
     /// Recycle connections older than this regardless of idle state.
     pub max_lifetime: Option<Duration>,
-    /// `SET statement_timeout` value applied to every connection.
-    /// Aborts queries that run longer than this duration.
+    /// `statement_timeout` value applied to every connection. Aborts queries
+    /// that run longer than this duration.
+    ///
+    /// Note: sub-millisecond and zero durations are floored at 1 ms, because
+    /// PG interprets a `0` value as "timeout disabled" — the opposite of
+    /// what such a tight bound would suggest. Pass `None` to leave the
+    /// server default in place (typically no timeout).
     pub statement_timeout: Option<Duration>,
-    /// `SET idle_in_transaction_session_timeout` value applied to every
+    /// `idle_in_transaction_session_timeout` value applied to every
     /// connection. Aborts transactions that sit idle for longer than this
     /// duration, releasing the connection and unblocking VACUUM.
+    ///
+    /// Subject to the same sub-millisecond floor as [`statement_timeout`](
+    /// Self::statement_timeout).
     pub idle_in_transaction_session_timeout: Option<Duration>,
 }
 
@@ -120,26 +128,34 @@ where
             builder = builder.max_lifetime(d);
         }
 
-        // Session-level SET statements run on every new connection so the
-        // limits apply uniformly across the pool, including when the pool
-        // recycles a connection. Values are passed in milliseconds — both
-        // settings interpret integer literals as ms when no unit is given.
+        // Session-level GUCs applied on every new connection so the limits
+        // hold uniformly across the pool, including across recycles.
+        //
+        // PG's `SET` is a utility statement and does not accept bind
+        // parameters, so we go through `set_config(name, value, is_local)`
+        // — a regular function call that does — to keep the safe-by-default
+        // pattern of never interpolating values into SQL text. `is_local =
+        // false` makes the setting session-scoped (equivalent to `SET`).
+        // The value is passed as text in milliseconds; both timeouts treat a
+        // bare integer string as ms.
         let stmt_to = options.statement_timeout;
         let idle_tx_to = options.idle_in_transaction_session_timeout;
         if stmt_to.is_some() || idle_tx_to.is_some() {
             builder = builder.after_connect(move |conn, _meta| {
                 Box::pin(async move {
                     if let Some(d) = stmt_to {
-                        let ms = duration_to_ms(d);
-                        sqlx::query(&format!("SET statement_timeout = {ms}"))
+                        sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+                            .bind(duration_to_ms(d).to_string())
                             .execute(&mut *conn)
                             .await?;
                     }
                     if let Some(d) = idle_tx_to {
-                        let ms = duration_to_ms(d);
-                        sqlx::query(&format!("SET idle_in_transaction_session_timeout = {ms}"))
-                            .execute(&mut *conn)
-                            .await?;
+                        sqlx::query(
+                            "SELECT set_config('idle_in_transaction_session_timeout', $1, false)",
+                        )
+                        .bind(duration_to_ms(d).to_string())
+                        .execute(&mut *conn)
+                        .await?;
                     }
                     Ok(())
                 })
@@ -233,8 +249,22 @@ async fn check_pg_version(pool: &PgPool) -> Result<(), BackendError> {
     Ok(())
 }
 
-/// Convert a [`Duration`] to a millisecond count safe to embed in a PG `SET`
-/// statement (PG uses signed 4-byte integers for these settings).
+/// Convert a [`Duration`] to a millisecond count usable as a PG GUC value.
+///
+/// PG accepts these timeouts as signed 4-byte integers (ms). Two edge cases:
+///
+/// * Any `Duration` smaller than 1 ms (including [`Duration::ZERO`]) would
+///   quantize to `0`, which Postgres interprets as **disabling** the timeout
+///   — the opposite of a caller asking for "as tight as possible." We floor
+///   at 1 ms so sub-millisecond inputs still produce an active timeout.
+/// * Durations longer than `i32::MAX` ms (~24.8 days) saturate at the
+///   max representable value. No realistic configuration hits this in
+///   practice, but it's an explicit choice over a panic or wraparound.
 fn duration_to_ms(d: Duration) -> i32 {
-    i32::try_from(d.as_millis()).unwrap_or(i32::MAX)
+    let ms = d.as_millis();
+    if ms == 0 {
+        1
+    } else {
+        i32::try_from(ms).unwrap_or(i32::MAX)
+    }
 }

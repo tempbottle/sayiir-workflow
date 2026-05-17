@@ -358,8 +358,11 @@ declare module "sayiir" {
     maxLifetimeSecs?: number;
     /** PG `statement_timeout` applied per connection. */
     statementTimeoutSecs?: number;
-    /** PG `idle_in_transaction_session_timeout` applied per connection. */
-    idleInTransactionTimeoutSecs?: number;
+    /**
+     * PG `idle_in_transaction_session_timeout` applied per connection. Named
+     * to match the underlying Postgres GUC for discoverability.
+     */
+    idleInTransactionSessionTimeoutSecs?: number;
   }
 
   /** PostgreSQL backend for production. */
