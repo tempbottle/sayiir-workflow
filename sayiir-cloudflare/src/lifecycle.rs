@@ -34,6 +34,7 @@ pub(crate) async fn prepare_resume<B: SignalStore>(
     definition_hash: &sayiir_core::DefinitionHash,
     backend: &B,
 ) -> Result<ResumeOutcome, wasm_bindgen::JsValue> {
+    sayiir_core::validate_instance_id(instance_id).map_err(to_js_error)?;
     let mut snapshot = backend
         .load_snapshot(instance_id)
         .await

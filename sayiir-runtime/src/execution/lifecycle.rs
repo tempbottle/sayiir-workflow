@@ -39,6 +39,7 @@ pub async fn check_existing_instance<B>(
 where
     B: SnapshotStore,
 {
+    sayiir_core::validate_instance_id(instance_id)?;
     if matches!(conflict_policy, ConflictPolicy::TerminateExisting) {
         return Ok(None);
     }
@@ -95,6 +96,7 @@ pub async fn prepare_run<B>(
 where
     B: SnapshotStore + SignalStore,
 {
+    sayiir_core::validate_instance_id(instance_id)?;
     if matches!(conflict_policy, ConflictPolicy::TerminateExisting) {
         // Best-effort cleanup — if nothing exists the deletes are no-ops.
         match backend.load_snapshot(instance_id).await {
@@ -147,6 +149,7 @@ pub async fn prepare_resume<B>(
 where
     B: SignalStore,
 {
+    sayiir_core::validate_instance_id(instance_id)?;
     tracing::debug!("preparing workflow resume");
     let mut snapshot = backend.load_snapshot(instance_id).await?;
 

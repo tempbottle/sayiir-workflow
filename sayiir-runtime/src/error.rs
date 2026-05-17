@@ -1,5 +1,6 @@
 //! Typed error for the sayiir runtime layer.
 
+use sayiir_core::InvalidInstanceId;
 use sayiir_core::error::{BoxError, BuildError, BuildErrors, CodecError, WorkflowError};
 use sayiir_persistence::{BackendError, RunConflict};
 
@@ -36,6 +37,10 @@ pub enum RuntimeError {
     /// A workflow instance with this ID already exists (conflict policy = Fail).
     #[error("Workflow instance already exists: {0}")]
     InstanceAlreadyExists(String),
+
+    /// The supplied workflow `instance_id` failed the API-boundary length check.
+    #[error(transparent)]
+    InvalidInstanceId(#[from] InvalidInstanceId),
 }
 
 impl From<BoxError> for RuntimeError {
@@ -56,6 +61,7 @@ impl From<BuildError> for RuntimeError {
 impl From<RunConflict> for RuntimeError {
     fn from(error: RunConflict) -> Self {
         match error {
+            RunConflict::InvalidInstanceId(e) => Self::InvalidInstanceId(e),
             RunConflict::AlreadyExists(id) => Self::InstanceAlreadyExists(id),
             RunConflict::DefinitionMismatch { expected, found } => {
                 Self::Workflow(WorkflowError::DefinitionMismatch { expected, found })

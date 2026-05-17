@@ -88,9 +88,11 @@ pub mod snapshot;
 pub mod task;
 pub mod task_claim;
 pub mod task_index;
+pub mod validation;
 pub mod workflow;
 
 pub use hash32::{DefinitionHash, Hash32, TaskId, WorkflowId};
 pub use loop_result::LoopResult;
 pub use task_index::{TaskIndex, TaskNodeMetadata};
+pub use validation::{InvalidInstanceId, MAX_INSTANCE_ID_LEN, validate_instance_id};
 pub use workflow::MaxIterationsPolicy;
