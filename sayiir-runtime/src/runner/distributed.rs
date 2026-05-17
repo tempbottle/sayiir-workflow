@@ -166,7 +166,7 @@ where
         let first_task = workflow.continuation().first_task_hint();
 
         let mut snapshot = match prepare_run(
-            instance_id,
+            &instance_id,
             definition_hash,
             input_bytes.clone(),
             first_task,
@@ -738,7 +738,7 @@ where
             let branch = Arc::clone(branch);
             let branch_input = input.clone();
             let branch_backend = Arc::clone(backend);
-            let branch_instance_id = instance_id.to_string();
+            let branch_instance_id: Arc<str> = Arc::from(instance_id);
             let ctx_for_work = context.clone();
 
             set.spawn(async move {
@@ -774,7 +774,7 @@ where
         continuation: &WorkflowContinuation,
         input: Bytes,
         backend: Arc<B>,
-        instance_id: String,
+        instance_id: Arc<str>,
         context: WorkflowContext<C, M>,
     ) -> impl std::future::Future<Output = Result<Bytes, RuntimeError>> + Send + '_
     where
@@ -1286,7 +1286,7 @@ mod tests {
 
         // Manually create in-progress snapshot with workflow1's hash
         let mut snapshot = WorkflowSnapshot::with_initial_input(
-            "inst-2".into(),
+            "inst-2",
             *workflow1.definition_hash(),
             Bytes::from(serde_json::to_vec(&5u32).unwrap()),
         );
@@ -1329,7 +1329,7 @@ mod tests {
         // Set up a snapshot as if it's in progress
         let input_bytes = Arc::new(JsonCodec).encode(&1u32).unwrap();
         let mut snapshot = WorkflowSnapshot::with_initial_input(
-            "inst-cancel".into(),
+            "inst-cancel",
             *workflow.definition_hash(),
             input_bytes,
         );
@@ -1373,7 +1373,7 @@ mod tests {
         // Save initial snapshot and request cancellation before running
         let input_bytes = Arc::new(JsonCodec).encode(&1u32).unwrap();
         let mut snapshot = WorkflowSnapshot::with_initial_input(
-            "inst-precancel".into(),
+            "inst-precancel",
             *workflow.definition_hash(),
             input_bytes,
         );

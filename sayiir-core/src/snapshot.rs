@@ -8,6 +8,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::task::RetryPolicy;
 
@@ -506,7 +507,7 @@ impl WorkflowSnapshotState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowSnapshot {
     /// Unique identifier for this workflow instance.
-    pub instance_id: String,
+    pub instance_id: Arc<str>,
     /// Hash of the workflow definition (for validation).
     pub definition_hash: crate::DefinitionHash,
     /// Current state of execution.
@@ -562,7 +563,8 @@ impl WorkflowSnapshot {
 
     /// Create a new snapshot for a workflow instance.
     #[must_use]
-    pub fn new(instance_id: String, definition_hash: crate::DefinitionHash) -> Self {
+    pub fn new(instance_id: &str, definition_hash: crate::DefinitionHash) -> Self {
+        let instance_id: Arc<str> = Arc::from(instance_id);
         let now = Self::current_timestamp();
         Self {
             instance_id,
@@ -586,10 +588,11 @@ impl WorkflowSnapshot {
 
     /// Create a new snapshot with initial input.
     pub fn with_initial_input(
-        instance_id: String,
+        instance_id: &str,
         definition_hash: crate::DefinitionHash,
         initial_input: Bytes,
     ) -> Self {
+        let instance_id: Arc<str> = Arc::from(instance_id);
         let now = Self::current_timestamp();
         Self {
             instance_id,
@@ -1074,8 +1077,8 @@ mod tests {
 
     #[test]
     fn test_new_snapshot_in_progress() {
-        let snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        assert_eq!(snapshot.instance_id, "inst-1");
+        let snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
+        assert_eq!(&*snapshot.instance_id, "inst-1");
         assert_eq!(
             snapshot.definition_hash,
             crate::DefinitionHash::from("hash-1")
@@ -1154,18 +1157,15 @@ mod tests {
 
     #[test]
     fn test_snapshot_with_initial_input() {
-        let snapshot = WorkflowSnapshot::with_initial_input(
-            "inst-1".into(),
-            "hash-1".into(),
-            Bytes::from("hello"),
-        );
+        let snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), Bytes::from("hello"));
         assert_eq!(snapshot.initial_input_bytes(), Some(Bytes::from("hello")));
         assert!(snapshot.state.is_in_progress());
     }
 
     #[test]
     fn test_mark_task_completed_and_retrieve() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("output1"));
 
         let result = snapshot.get_task_result(&crate::TaskId::from("task-1"));
@@ -1176,7 +1176,7 @@ mod tests {
 
     #[test]
     fn test_get_last_task_output() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         assert!(snapshot.get_last_task_output().is_none());
 
         snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
@@ -1188,7 +1188,7 @@ mod tests {
 
     #[test]
     fn test_get_task_result_bytes() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("data"));
         assert_eq!(
             snapshot.get_task_result_bytes(&crate::TaskId::from("task-1")),
@@ -1203,7 +1203,7 @@ mod tests {
 
     #[test]
     fn test_mark_completed() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_completed(Bytes::from("final"));
         assert!(snapshot.state.is_completed());
         assert!(snapshot.state.is_terminal());
@@ -1213,7 +1213,7 @@ mod tests {
 
     #[test]
     fn test_mark_failed() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_failed("something went wrong".into());
         assert!(snapshot.state.is_failed());
         assert!(snapshot.state.is_terminal());
@@ -1223,7 +1223,7 @@ mod tests {
 
     #[test]
     fn test_mark_cancelled_preserves_completed_tasks() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("output1"));
         snapshot.mark_cancelled(
             Some("user request".into()),
@@ -1243,7 +1243,7 @@ mod tests {
 
     #[test]
     fn test_cancellation_details() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         assert!(snapshot.state.cancellation_details().is_none());
 
         snapshot.mark_cancelled(Some("timeout".into()), Some("system".into()), None);
@@ -1256,7 +1256,7 @@ mod tests {
 
     #[test]
     fn test_update_position() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: crate::TaskId::from("task-1"),
         });
@@ -1273,7 +1273,7 @@ mod tests {
 
     #[test]
     fn test_update_position_noop_on_terminal() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_completed(Bytes::from("done"));
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: crate::TaskId::from("task-1"),
@@ -1284,7 +1284,7 @@ mod tests {
 
     #[test]
     fn test_mark_task_completed_noop_on_terminal() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_completed(Bytes::from("done"));
         snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("output"));
         // Should not crash, just be a no-op
@@ -1293,7 +1293,7 @@ mod tests {
 
     #[test]
     fn test_get_task_result_on_completed_state() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_completed(Bytes::from("done"));
         assert!(
             snapshot
@@ -1304,7 +1304,7 @@ mod tests {
 
     #[test]
     fn test_get_task_result_on_failed_state() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_failed("err".into());
         assert!(
             snapshot
@@ -1315,7 +1315,7 @@ mod tests {
 
     #[test]
     fn test_get_all_task_results_in_progress() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
         snapshot.mark_task_completed(crate::TaskId::from("task-2"), Bytes::from("out2"));
 
@@ -1335,7 +1335,7 @@ mod tests {
 
     #[test]
     fn test_get_all_task_results_cancelled() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
         snapshot.mark_cancelled(Some("reason".into()), None, Some("task-2".into()));
 
@@ -1350,7 +1350,7 @@ mod tests {
 
     #[test]
     fn test_get_all_task_results_paused() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
         let request = PauseRequest::new(Some("maintenance".into()), None);
         snapshot.mark_paused(&request);
@@ -1362,7 +1362,7 @@ mod tests {
 
     #[test]
     fn test_get_all_task_results_completed() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
         snapshot.mark_completed(Bytes::from("final"));
         assert!(snapshot.get_all_task_results().is_none());
@@ -1370,7 +1370,7 @@ mod tests {
 
     #[test]
     fn test_get_all_task_results_failed() {
-        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
         snapshot.mark_failed("error".into());
         assert!(snapshot.get_all_task_results().is_none());
@@ -1415,7 +1415,7 @@ mod tests {
 
     #[test]
     fn test_timestamps_are_set() {
-        let snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         assert!(snapshot.created_at > 0);
         assert!(snapshot.updated_at > 0);
         assert_eq!(snapshot.created_at, snapshot.updated_at);

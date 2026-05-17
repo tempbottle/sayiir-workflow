@@ -156,7 +156,7 @@ impl<B> WorkerHandle<B> {
 /// No `Drop` impl — callers must explicitly call `release()` or `release_quietly()`.
 struct ActiveTaskClaim<'a, B> {
     backend: &'a B,
-    instance_id: String,
+    instance_id: std::sync::Arc<str>,
     task_id: sayiir_core::TaskId,
     worker_id: String,
 }
@@ -729,7 +729,7 @@ where
 
         let task_ctx = TaskExecutionContext {
             workflow_id: Arc::clone(&ext_wf.workflow_id),
-            instance_id: Arc::from(available_task.instance_id.as_str()),
+            instance_id: Arc::clone(&available_task.instance_id),
             task_id: Arc::clone(&task_name),
             metadata: continuation.build_task_metadata(&task_id),
             workflow_metadata_json: ext_wf.metadata_json.clone(),
@@ -1122,7 +1122,7 @@ where
 
         let task_ctx = TaskExecutionContext {
             workflow_id: Arc::from(workflow.context().workflow_id()),
-            instance_id: Arc::from(available_task.instance_id.as_str()),
+            instance_id: Arc::clone(&available_task.instance_id),
             task_id: Arc::clone(&task_name),
             metadata: continuation.build_task_metadata(&task_id),
             workflow_metadata_json: workflow.context().metadata_json.clone(),
@@ -2234,7 +2234,7 @@ mod tests {
         let registry = TaskRegistry::new();
 
         // Create a workflow snapshot so store_signal can validate it
-        let snapshot = WorkflowSnapshot::new("wf-1".to_string(), "hash-1".into());
+        let snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
         backend.save_snapshot(&snapshot).await.ok();
 
         let worker = PooledWorker::new("test-worker", backend, registry);

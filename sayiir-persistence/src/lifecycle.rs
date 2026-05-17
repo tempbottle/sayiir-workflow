@@ -106,7 +106,7 @@ impl std::error::Error for RunConflict {
 /// Returns [`RunConflict`] for policy rejections, definition mismatches,
 /// or backend I/O failures.
 pub async fn prepare_run<B>(
-    instance_id: String,
+    instance_id: &str,
     definition_hash: sayiir_core::DefinitionHash,
     input_bytes: Bytes,
     first_task: TaskHint,
@@ -116,7 +116,7 @@ pub async fn prepare_run<B>(
 where
     B: SnapshotStore + SignalStore,
 {
-    match backend.load_snapshot(&instance_id).await {
+    match backend.load_snapshot(instance_id).await {
         Ok(existing) => {
             if existing.definition_hash != definition_hash {
                 return Err(RunConflict::DefinitionMismatch {
@@ -125,7 +125,9 @@ where
                 });
             }
             match conflict_policy {
-                ConflictPolicy::Fail => return Err(RunConflict::AlreadyExists(instance_id)),
+                ConflictPolicy::Fail => {
+                    return Err(RunConflict::AlreadyExists(instance_id.to_string()));
+                }
                 ConflictPolicy::UseExisting => {
                     let output = existing.state.completed_output().cloned();
                     return Ok(PrepareRunOutcome::ExistingStatus(
@@ -134,13 +136,11 @@ where
                     ));
                 }
                 ConflictPolicy::TerminateExisting => {
-                    backend.delete_snapshot(&instance_id).await?;
+                    backend.delete_snapshot(instance_id).await?;
                     backend
-                        .clear_signal(&instance_id, SignalKind::Cancel)
+                        .clear_signal(instance_id, SignalKind::Cancel)
                         .await?;
-                    backend
-                        .clear_signal(&instance_id, SignalKind::Pause)
-                        .await?;
+                    backend.clear_signal(instance_id, SignalKind::Pause).await?;
                 }
             }
         }

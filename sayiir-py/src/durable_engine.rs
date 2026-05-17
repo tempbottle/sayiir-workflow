@@ -147,7 +147,7 @@ impl PyDurableEngine {
             py.detach(|| {
                 self.runtime.block_on(async {
                     let mut snapshot = match prepare_run(
-                        instance_id,
+                        &instance_id,
                         definition_hash,
                         input_bytes.clone(),
                         first_task,

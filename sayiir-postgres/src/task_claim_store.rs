@@ -75,7 +75,7 @@ where
         .map_err(PgError)?;
 
         Ok(row.map(|r| TaskClaim {
-            instance_id: r.get("instance_id"),
+            instance_id: std::sync::Arc::from(r.get::<&str, _>("instance_id")),
             task_id: sayiir_core::TaskId::from_hex(r.get::<&str, _>("task_id")).unwrap_or_default(),
             worker_id: r.get("worker_id"),
             claimed_at: r.get::<i64, _>("claimed_epoch").cast_unsigned(),

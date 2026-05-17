@@ -5,6 +5,7 @@
 
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// A claim on a task by a worker node.
 ///
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskClaim {
     /// The workflow instance ID (not to be confused with the workflow ID)
-    pub instance_id: String,
+    pub instance_id: Arc<str>,
     /// The task ID being claimed.
     pub task_id: crate::TaskId,
     /// The worker node ID that claimed this task.
@@ -30,11 +31,12 @@ impl TaskClaim {
     /// Create a new task claim.
     #[must_use]
     pub fn new(
-        instance_id: String,
+        instance_id: &str,
         task_id: crate::TaskId,
         worker_id: String,
         ttl: Option<Duration>,
     ) -> Self {
+        let instance_id: Arc<str> = Arc::from(instance_id);
         let now = Utc::now();
         let claimed_at = now.timestamp() as u64;
         let expires_at = ttl.and_then(|duration| {
@@ -126,7 +128,7 @@ mod tests {
     #[test]
     fn new_with_ttl_sets_expiry() {
         let c = TaskClaim::new(
-            "i".into(),
+            "i",
             crate::TaskId::from("t"),
             "w".into(),
             Some(Duration::seconds(60)),
@@ -137,7 +139,7 @@ mod tests {
 
     #[test]
     fn new_without_ttl_has_no_expiry() {
-        let c = TaskClaim::new("i".into(), crate::TaskId::from("t"), "w".into(), None);
+        let c = TaskClaim::new("i", crate::TaskId::from("t"), "w".into(), None);
         assert!(c.expires_at.is_none());
     }
 }
@@ -146,7 +148,7 @@ mod tests {
 #[derive(Debug, Clone)]
 pub struct AvailableTask {
     /// The workflow instance ID.
-    pub instance_id: String,
+    pub instance_id: Arc<str>,
     /// The task ID.
     pub task_id: crate::TaskId,
     /// The input data for the task (serialized).

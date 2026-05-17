@@ -513,8 +513,7 @@ async fn test_checkpointing_task_timeout() {
     };
 
     let input = encode_u32(1);
-    let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
+    let mut snapshot = WorkflowSnapshot::with_initial_input("inst-1", "hash".into(), input.clone());
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("slow"),
     });
@@ -560,8 +559,7 @@ async fn test_checkpointing_skipped_tasks_bypass_timeout() {
     };
 
     let output = encode_u32(42);
-    let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), encode_u32(1));
+    let mut snapshot = WorkflowSnapshot::with_initial_input("inst-1", "hash".into(), encode_u32(1));
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("cached"),
     });
@@ -600,7 +598,7 @@ async fn test_prepare_run_creates_snapshot() {
     // `check_existing_instance` (called via client.rs / distributed.rs).
     let backend = InMemoryBackend::new();
     let outcome = sayiir_persistence::prepare_run(
-        "inst-1".into(),
+        "inst-1",
         "hash-1".into(),
         Bytes::from("input"),
         sayiir_core::snapshot::TaskHint::new("task-1", None, vec![]),
@@ -617,7 +615,7 @@ async fn test_prepare_run_creates_snapshot() {
         }
     };
 
-    assert_eq!(snapshot.instance_id, "inst-1");
+    assert_eq!(&*snapshot.instance_id, "inst-1");
     assert_eq!(
         snapshot.definition_hash,
         sayiir_core::DefinitionHash::from("hash-1")
@@ -625,17 +623,14 @@ async fn test_prepare_run_creates_snapshot() {
     assert!(snapshot.state.is_in_progress());
 
     let loaded = backend.load_snapshot("inst-1").await.unwrap();
-    assert_eq!(loaded.instance_id, "inst-1");
+    assert_eq!(&*loaded.instance_id, "inst-1");
 }
 
 #[tokio::test]
 async fn test_prepare_resume_ready() {
     let backend = InMemoryBackend::new();
-    let snapshot = WorkflowSnapshot::with_initial_input(
-        "inst-1".into(),
-        "hash-1".into(),
-        Bytes::from("input"),
-    );
+    let snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), Bytes::from("input"));
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
@@ -646,7 +641,7 @@ async fn test_prepare_resume_ready() {
             snapshot,
             input_bytes,
         } => {
-            assert_eq!(snapshot.instance_id, "inst-1");
+            assert_eq!(&*snapshot.instance_id, "inst-1");
             assert_eq!(input_bytes, Bytes::from("input"));
         }
         _ => panic!("Expected Ready outcome"),
@@ -656,11 +651,8 @@ async fn test_prepare_resume_ready() {
 #[tokio::test]
 async fn test_prepare_resume_with_completed_tasks() {
     let backend = InMemoryBackend::new();
-    let mut snapshot = WorkflowSnapshot::with_initial_input(
-        "inst-1".into(),
-        "hash-1".into(),
-        Bytes::from("initial"),
-    );
+    let mut snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), Bytes::from("initial"));
     snapshot.mark_task_completed(
         sayiir_core::TaskId::from("task-1"),
         Bytes::from("task1_output"),
@@ -682,7 +674,7 @@ async fn test_prepare_resume_with_completed_tasks() {
 #[tokio::test]
 async fn test_prepare_resume_already_completed() {
     let backend = InMemoryBackend::new();
-    let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     snapshot.mark_completed(Bytes::from("result"));
     backend.save_snapshot(&snapshot).await.unwrap();
 
@@ -698,7 +690,7 @@ async fn test_prepare_resume_already_completed() {
 #[tokio::test]
 async fn test_prepare_resume_already_failed() {
     let backend = InMemoryBackend::new();
-    let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     snapshot.mark_failed("err".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
@@ -714,7 +706,7 @@ async fn test_prepare_resume_already_failed() {
 #[tokio::test]
 async fn test_prepare_resume_already_cancelled() {
     let backend = InMemoryBackend::new();
-    let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     snapshot.mark_cancelled(Some("reason".into()), Some("admin".into()), None);
     backend.save_snapshot(&snapshot).await.unwrap();
 
@@ -732,7 +724,7 @@ async fn test_prepare_resume_already_cancelled() {
 #[tokio::test]
 async fn test_prepare_resume_hash_mismatch() {
     let backend = InMemoryBackend::new();
-    let snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+    let snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let result = prepare_resume("inst-1", &"wrong-hash".into(), &backend).await;
@@ -743,7 +735,7 @@ async fn test_prepare_resume_hash_mismatch() {
 #[tokio::test]
 async fn test_finalize_execution_success() {
     let backend = InMemoryBackend::new();
-    let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let (status, output) = finalize_execution(Ok(Bytes::from("output")), &mut snapshot, &backend)
@@ -763,7 +755,7 @@ async fn test_finalize_execution_success() {
 #[tokio::test]
 async fn test_finalize_execution_failure() {
     let backend = InMemoryBackend::new();
-    let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let (status, output) = finalize_execution(
@@ -789,13 +781,13 @@ async fn test_finalize_execution_failure() {
 #[tokio::test]
 async fn test_finalize_execution_cancellation() {
     let backend = InMemoryBackend::new();
-    let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     // Mark as cancelled in backend so finalize can reload details
     snapshot.mark_cancelled(Some("timeout".into()), Some("system".into()), None);
     backend.save_snapshot(&snapshot).await.unwrap();
 
     // Reset local snapshot to in-progress for finalize logic
-    let mut local_snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+    let mut local_snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
 
     let (status, output) = finalize_execution(
         Err(WorkflowError::cancelled().into()),
@@ -828,7 +820,7 @@ async fn test_checkpointing_single_task() {
     let input = encode_u32(5);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let cont = stub_node("add_one", None);
@@ -869,7 +861,7 @@ async fn test_checkpointing_chain() {
     let input = encode_u32(10);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let double = stub_node("double", None);
@@ -917,7 +909,7 @@ async fn test_checkpointing_skips_completed_tasks() {
     let input = encode_u32(10);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     // Pre-mark task as completed (simulates resume)
     snapshot.mark_task_completed(sayiir_core::TaskId::from("add_one"), encode_u32(11));
     backend.save_snapshot(&snapshot).await.unwrap();
@@ -967,7 +959,7 @@ async fn test_checkpointing_fork_sequential() {
     let input = encode_u32(10);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let branch_a = Arc::new(stub_node("branch_a", None));
@@ -1020,7 +1012,7 @@ async fn test_checkpointing_cancellation() {
     let input = encode_u32(5);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     // Request cancellation before execution
@@ -1065,22 +1057,16 @@ async fn test_checkpointing_cancellation() {
 
 #[test]
 fn test_get_resume_input_no_completed_tasks() {
-    let snapshot = WorkflowSnapshot::with_initial_input(
-        "inst-1".into(),
-        "hash-1".into(),
-        Bytes::from("initial"),
-    );
+    let snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), Bytes::from("initial"));
     let input = get_resume_input(&snapshot).unwrap();
     assert_eq!(input, Bytes::from("initial"));
 }
 
 #[test]
 fn test_get_resume_input_with_completed_tasks() {
-    let mut snapshot = WorkflowSnapshot::with_initial_input(
-        "inst-1".into(),
-        "hash-1".into(),
-        Bytes::from("initial"),
-    );
+    let mut snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), Bytes::from("initial"));
     snapshot.mark_task_completed(
         sayiir_core::TaskId::from("task-1"),
         Bytes::from("task1_out"),
@@ -1091,7 +1077,7 @@ fn test_get_resume_input_with_completed_tasks() {
 
 #[test]
 fn test_get_resume_input_not_in_progress() {
-    let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     snapshot.mark_completed(Bytes::from("done"));
     let result = get_resume_input(&snapshot);
     assert!(result.is_err());
@@ -1099,7 +1085,7 @@ fn test_get_resume_input_not_in_progress() {
 
 #[test]
 fn test_get_resume_input_no_initial_input() {
-    let snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+    let snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     let result = get_resume_input(&snapshot);
     assert!(result.is_err());
     assert!(
@@ -1200,7 +1186,7 @@ async fn test_checkpointing_delay_returns_waiting() {
     let input = encode_u32(42);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let next_task = stub_node("process", None);
@@ -1260,7 +1246,7 @@ async fn test_checkpointing_delay_skip_on_resume() {
     let input = encode_u32(42);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     // Pre-mark delay as completed (simulates resume after delay expired)
     snapshot.mark_task_completed(sayiir_core::TaskId::from("wait"), encode_u32(42));
     backend.save_snapshot(&snapshot).await.unwrap();
@@ -1304,7 +1290,7 @@ async fn test_checkpointing_delay_cancellation() {
     let input = encode_u32(10);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     // Request cancellation
@@ -1349,7 +1335,7 @@ async fn test_checkpointing_delay_cancellation() {
 #[tokio::test]
 async fn test_finalize_execution_waiting() {
     let backend = InMemoryBackend::new();
-    let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
 
     // Set up the snapshot as if it's parked at a delay
     let now = chrono::Utc::now();
@@ -1446,7 +1432,7 @@ async fn test_fork_with_delay_parks_at_fork() {
     let input = encode_u32(10);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let fork = fork_with_delay_in_branch();
@@ -1514,7 +1500,7 @@ async fn test_fork_with_delay_resumes_after_expiry() {
     let input = encode_u32(10);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     // Use a very short delay so it expires immediately
@@ -1579,7 +1565,7 @@ async fn test_fork_with_delays_in_multiple_branches() {
     let input = encode_u32(5);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     // Both branches have delays
@@ -1663,7 +1649,7 @@ async fn test_fork_normal_branch_completes_delayed_branch_parks() {
     let input = encode_u32(10);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     // branch_a: normal task (completes immediately)
@@ -1982,8 +1968,7 @@ async fn test_checkpointing_retry_succeeds_after_failure() {
     let backend = InMemoryBackend::new();
     let input = encode_u32(10);
 
-    let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
+    let mut snapshot = WorkflowSnapshot::with_initial_input("inst-1", "hash".into(), input.clone());
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("flaky"),
     });
@@ -2038,8 +2023,7 @@ async fn test_checkpointing_retry_exhaustion() {
     let backend = InMemoryBackend::new();
     let input = encode_u32(1);
 
-    let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
+    let mut snapshot = WorkflowSnapshot::with_initial_input("inst-1", "hash".into(), input.clone());
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("always_fail"),
     });
@@ -2078,8 +2062,7 @@ async fn test_checkpointing_retry_state_persisted() {
     let backend = InMemoryBackend::new();
     let input = encode_u32(10);
 
-    let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
+    let mut snapshot = WorkflowSnapshot::with_initial_input("inst-1", "hash".into(), input.clone());
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("flaky"),
     });
@@ -2138,8 +2121,7 @@ async fn test_checkpointing_retry_with_timeout() {
     let backend = InMemoryBackend::new();
     let input = encode_u32(10);
 
-    let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
+    let mut snapshot = WorkflowSnapshot::with_initial_input("inst-1", "hash".into(), input.clone());
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("slow_then_fast"),
     });
@@ -2187,8 +2169,7 @@ async fn test_checkpointing_retry_in_chain() {
     let backend = InMemoryBackend::new();
     let input = encode_u32(5);
 
-    let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
+    let mut snapshot = WorkflowSnapshot::with_initial_input("inst-1", "hash".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let double = stub_node("double", None);
@@ -2331,8 +2312,7 @@ async fn test_checkpointing_timeout_mid_chain() {
     let backend = InMemoryBackend::new();
     let input = encode_u32(5);
 
-    let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
+    let mut snapshot = WorkflowSnapshot::with_initial_input("inst-1", "hash".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     // fast_task → slow_task (times out)
@@ -2408,7 +2388,7 @@ async fn test_checkpointing_delay_terminal_parks() {
     let input = encode_u32(42);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let delay = WorkflowContinuation::Delay {
@@ -2466,7 +2446,7 @@ async fn test_checkpointing_delay_after_task_chain() {
     let input = encode_u32(10);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let process = stub_node("process", None);
@@ -2703,7 +2683,7 @@ mod proptests {
             cancelled_by in prop::option::of("[a-zA-Z0-9 ]{0,32}"),
             output_data in proptest::collection::vec(any::<u8>(), 0..32),
         ) {
-            let mut snapshot = WorkflowSnapshot::new("inst".into(), "hash".into());
+            let mut snapshot = WorkflowSnapshot::new("inst", "hash".into());
             match variant {
                 0 => snapshot.mark_completed(Bytes::from(output_data)),
                 1 => snapshot.mark_failed(error_msg),
@@ -2723,7 +2703,7 @@ mod proptests {
         ) {
             let initial = Bytes::from(input_data);
             let snapshot = WorkflowSnapshot::with_initial_input(
-                "inst".into(),
+                "inst",
                 "hash".into(),
                 initial.clone(),
             );
@@ -2922,7 +2902,7 @@ async fn test_checkpointing_loop_basic() {
     let input = encode_u32(3);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let body = stub_node("countdown", None);
@@ -2968,7 +2948,7 @@ async fn test_checkpointing_loop_resumes_from_iteration() {
     let input = encode_u32(5);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
 
     // Simulate: 2 iterations already completed. Next input should be 3 (5→4→3).
     snapshot.set_loop_iteration(sayiir_core::TaskId::from("loop_0"), 2);
@@ -3373,7 +3353,7 @@ async fn test_checkpointing_loop_caches_result_on_exit() {
     let input = encode_u32(2);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let body = stub_node("countdown", None);
@@ -3419,7 +3399,7 @@ async fn test_checkpointing_loop_short_circuits_when_cached() {
     let input = encode_u32(99);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
 
     // Pre-cache a result for the loop node.
     let cached_output = encode_u32(42);
@@ -3467,7 +3447,7 @@ async fn test_checkpointing_loop_exit_with_last() {
     let input = encode_u32(0);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let body = stub_node("always_again", None);
@@ -3519,7 +3499,7 @@ async fn test_checkpointing_loop_in_chain() {
     let input = encode_u32(2);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let double = stub_node("double", None);
@@ -3578,7 +3558,7 @@ async fn test_checkpointing_loop_inside_fork_branch() {
     let input = encode_u32(2);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let body = stub_node("countdown", None);
@@ -3649,7 +3629,7 @@ async fn test_checkpointing_loop_iteration_counter_persisted() {
     let input = encode_u32(5);
 
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let body = stub_node("countdown", None);

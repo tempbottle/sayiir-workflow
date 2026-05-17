@@ -130,7 +130,7 @@ where
         let first_task = workflow.continuation().first_task_hint();
 
         match prepare_run(
-            instance_id,
+            &instance_id,
             definition_hash,
             input_bytes,
             first_task,

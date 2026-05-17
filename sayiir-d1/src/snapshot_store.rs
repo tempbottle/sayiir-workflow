@@ -51,7 +51,7 @@ where
 
         let exec = self.exec();
         sqlx::query(upsert_sql.as_str())
-            .bind(&snapshot.instance_id) // ?1
+            .bind(&*snapshot.instance_id) // ?1
             .bind(status) // ?2
             .bind(snapshot.definition_hash.to_hex()) // ?3
             .bind(&task_id) // ?4
@@ -76,7 +76,7 @@ where
              )";
 
         sqlx::query(history_sql)
-            .bind(&snapshot.instance_id)
+            .bind(&*snapshot.instance_id)
             .bind(status)
             .bind(&task_id)
             .bind(&data)

@@ -125,7 +125,7 @@ impl PyWorkflowClient {
             py.detach(|| {
                 self.runtime.block_on(async {
                     match prepare_run(
-                        instance_id,
+                        &instance_id,
                         definition_hash,
                         input_bytes,
                         first_task,

@@ -85,7 +85,7 @@ where
     fields(%instance_id),
 )]
 pub async fn prepare_run<B>(
-    instance_id: String,
+    instance_id: &str,
     definition_hash: sayiir_core::DefinitionHash,
     input_bytes: Bytes,
     first_task: TaskHint,
@@ -97,16 +97,14 @@ where
 {
     if matches!(conflict_policy, ConflictPolicy::TerminateExisting) {
         // Best-effort cleanup — if nothing exists the deletes are no-ops.
-        match backend.load_snapshot(&instance_id).await {
+        match backend.load_snapshot(instance_id).await {
             Ok(_existing) => {
                 tracing::info!("terminating existing instance before restart");
-                backend.delete_snapshot(&instance_id).await?;
+                backend.delete_snapshot(instance_id).await?;
                 backend
-                    .clear_signal(&instance_id, SignalKind::Cancel)
+                    .clear_signal(instance_id, SignalKind::Cancel)
                     .await?;
-                backend
-                    .clear_signal(&instance_id, SignalKind::Pause)
-                    .await?;
+                backend.clear_signal(instance_id, SignalKind::Pause).await?;
             }
             Err(sayiir_persistence::BackendError::NotFound(_)) => {}
             Err(e) => return Err(e.into()),

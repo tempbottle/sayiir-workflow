@@ -81,7 +81,7 @@ where
                 updated_at = now()
              RETURNING history_version",
         )
-        .bind(&snapshot.instance_id) // $1
+        .bind(&*snapshot.instance_id) // $1
         .bind(status) // $2
         .bind(snapshot.definition_hash.to_hex()) // $3
         .bind(&task_id) // $4
@@ -106,7 +106,7 @@ where
                 (instance_id, version, status, current_task_id, data)
              VALUES ($1, $2, $3, $4, $5)",
         )
-        .bind(&snapshot.instance_id)
+        .bind(&*snapshot.instance_id)
         .bind(history_version)
         .bind(status)
         .bind(&task_id)
@@ -129,7 +129,7 @@ where
                     END,
                     started_at = COALESCE(sayiir_workflow_tasks.started_at, now())",
             )
-            .bind(&snapshot.instance_id)
+            .bind(&*snapshot.instance_id)
             .bind(tid)
             .execute(&mut *tx)
             .await
@@ -149,7 +149,7 @@ where
             )
             .bind(terminal_status)
             .bind(&error)
-            .bind(&snapshot.instance_id)
+            .bind(&*snapshot.instance_id)
             .execute(&mut *tx)
             .await
             .map_err(PgError)?;

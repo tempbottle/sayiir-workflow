@@ -138,7 +138,7 @@ async fn cancel_and_resume() {
     // Set up snapshot in-progress and request cancellation
     let input_bytes = Arc::new(JsonCodec).encode(&1u32).unwrap();
     let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
-        "inst-cancel".into(),
+        "inst-cancel",
         *workflow.definition_hash(),
         input_bytes,
     );
@@ -186,7 +186,7 @@ async fn pause_unpause_resume() {
     // Create an in-progress snapshot
     let input_bytes = Arc::new(JsonCodec).encode(&5u32).unwrap();
     let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
-        "inst-pause".into(),
+        "inst-pause",
         *workflow.definition_hash(),
         input_bytes,
     );
@@ -542,7 +542,7 @@ async fn definition_hash_mismatch_on_resume() {
     // Create an in-progress snapshot with v1's hash
     let input_bytes = Arc::new(JsonCodec).encode(&5u32).unwrap();
     let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
-        "inst-mismatch".into(),
+        "inst-mismatch",
         *workflow_v1.definition_hash(),
         input_bytes,
     );
@@ -591,7 +591,7 @@ async fn task_version_change_causes_hash_mismatch() {
     // Create an in-progress snapshot with v1's hash
     let input_bytes = Arc::new(JsonCodec).encode(&5u32).unwrap();
     let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
-        "inst-version".into(),
+        "inst-version",
         *workflow_v1.definition_hash(),
         input_bytes,
     );
@@ -663,7 +663,7 @@ async fn task_version_none_vs_some_causes_hash_mismatch() {
     // Create snapshot with v1
     let input_bytes = Arc::new(JsonCodec).encode(&5u32).unwrap();
     let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
-        "inst-version-none".into(),
+        "inst-version-none",
         *workflow_v1.definition_hash(),
         input_bytes,
     );

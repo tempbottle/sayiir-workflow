@@ -51,12 +51,12 @@ async fn setup() -> (
 #[tokio::test]
 async fn save_and_load_snapshot() {
     let (_c, backend) = setup().await;
-    let snapshot = WorkflowSnapshot::new("test-1".into(), "hash-1".into());
+    let snapshot = WorkflowSnapshot::new("test-1", "hash-1".into());
 
     backend.save_snapshot(&snapshot).await.unwrap();
     let loaded = backend.load_snapshot("test-1").await.unwrap();
 
-    assert_eq!(loaded.instance_id, "test-1");
+    assert_eq!(&*loaded.instance_id, "test-1");
     assert_eq!(
         loaded.definition_hash,
         sayiir_core::DefinitionHash::from("hash-1")
@@ -74,7 +74,7 @@ async fn load_not_found() {
 #[tokio::test]
 async fn save_snapshot_overwrites() {
     let (_c, backend) = setup().await;
-    let mut snapshot = WorkflowSnapshot::new("test-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("test-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     snapshot.update_position(ExecutionPosition::AtTask {
@@ -98,7 +98,7 @@ async fn save_snapshot_overwrites() {
 #[tokio::test]
 async fn delete_snapshot() {
     let (_c, backend) = setup().await;
-    let snapshot = WorkflowSnapshot::new("test-1".into(), "hash-1".into());
+    let snapshot = WorkflowSnapshot::new("test-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     backend.delete_snapshot("test-1").await.unwrap();
@@ -118,11 +118,11 @@ async fn list_snapshots() {
     let (_c, backend) = setup().await;
 
     backend
-        .save_snapshot(&WorkflowSnapshot::new("wf-1".into(), "h".into()))
+        .save_snapshot(&WorkflowSnapshot::new("wf-1", "h".into()))
         .await
         .unwrap();
     backend
-        .save_snapshot(&WorkflowSnapshot::new("wf-2".into(), "h".into()))
+        .save_snapshot(&WorkflowSnapshot::new("wf-2", "h".into()))
         .await
         .unwrap();
 
@@ -134,7 +134,7 @@ async fn list_snapshots() {
 #[tokio::test]
 async fn save_task_result() {
     let (_c, backend) = setup().await;
-    let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("task-1"),
     });
@@ -160,7 +160,7 @@ async fn save_task_result() {
 #[tokio::test]
 async fn store_and_get_cancel_signal() {
     let (_c, backend) = setup().await;
-    let snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     backend
@@ -198,7 +198,7 @@ async fn store_signal_on_nonexistent_workflow() {
 #[tokio::test]
 async fn store_cancel_on_completed_workflow() {
     let (_c, backend) = setup().await;
-    let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     snapshot.mark_completed(Bytes::from("result"));
     backend.save_snapshot(&snapshot).await.unwrap();
 
@@ -211,7 +211,7 @@ async fn store_cancel_on_completed_workflow() {
 #[tokio::test]
 async fn store_pause_on_completed_workflow() {
     let (_c, backend) = setup().await;
-    let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     snapshot.mark_completed(Bytes::from("result"));
     backend.save_snapshot(&snapshot).await.unwrap();
 
@@ -224,7 +224,7 @@ async fn store_pause_on_completed_workflow() {
 #[tokio::test]
 async fn clear_signal() {
     let (_c, backend) = setup().await;
-    let snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     backend
@@ -263,7 +263,7 @@ async fn get_signal_returns_none_when_absent() {
 #[tokio::test]
 async fn check_and_cancel_success() {
     let (_c, backend) = setup().await;
-    let snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     backend
@@ -299,7 +299,7 @@ async fn check_and_cancel_success() {
 #[tokio::test]
 async fn check_and_cancel_no_signal() {
     let (_c, backend) = setup().await;
-    let snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let cancelled = backend.check_and_cancel("wf-1", None).await.unwrap();
@@ -312,7 +312,7 @@ async fn check_and_cancel_no_signal() {
 #[tokio::test]
 async fn check_and_pause_success() {
     let (_c, backend) = setup().await;
-    let snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     backend
@@ -338,7 +338,7 @@ async fn check_and_pause_success() {
 #[tokio::test]
 async fn unpause_success() {
     let (_c, backend) = setup().await;
-    let snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     // Pause it first
@@ -378,7 +378,7 @@ async fn claim_task_success() {
 
     assert!(claim.is_some());
     let claim = claim.unwrap();
-    assert_eq!(claim.instance_id, "wf-1");
+    assert_eq!(&*claim.instance_id, "wf-1");
     assert_eq!(claim.task_id, sayiir_core::TaskId::from("task-1"));
     assert_eq!(claim.worker_id, "worker-1");
     assert!(claim.expires_at.is_some());
@@ -585,11 +585,8 @@ async fn extend_task_claim_wrong_worker() {
 async fn find_available_tasks_basic() {
     let (_c, backend) = setup().await;
 
-    let mut snapshot = WorkflowSnapshot::with_initial_input(
-        "wf-1".into(),
-        "hash-1".into(),
-        Bytes::from(r#""input""#),
-    );
+    let mut snapshot =
+        WorkflowSnapshot::with_initial_input("wf-1", "hash-1".into(), Bytes::from(r#""input""#));
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("task-1"),
     });
@@ -600,7 +597,7 @@ async fn find_available_tasks_basic() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].instance_id, "wf-1");
+    assert_eq!(&*tasks[0].instance_id, "wf-1");
     assert_eq!(tasks[0].task_id, sayiir_core::TaskId::from("task-1"));
 }
 
@@ -609,11 +606,8 @@ async fn find_available_tasks_skips_cancelled() {
     let (_c, backend) = setup().await;
 
     // Workflow 1: in-progress with pending cancel signal
-    let mut snapshot1 = WorkflowSnapshot::with_initial_input(
-        "wf-1".into(),
-        "hash-1".into(),
-        Bytes::from(r#""input""#),
-    );
+    let mut snapshot1 =
+        WorkflowSnapshot::with_initial_input("wf-1", "hash-1".into(), Bytes::from(r#""input""#));
     snapshot1.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("task-1"),
     });
@@ -624,11 +618,8 @@ async fn find_available_tasks_skips_cancelled() {
         .unwrap();
 
     // Workflow 2: in-progress, no signals
-    let mut snapshot2 = WorkflowSnapshot::with_initial_input(
-        "wf-2".into(),
-        "hash-1".into(),
-        Bytes::from(r#""input""#),
-    );
+    let mut snapshot2 =
+        WorkflowSnapshot::with_initial_input("wf-2", "hash-1".into(), Bytes::from(r#""input""#));
     snapshot2.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("task-2"),
     });
@@ -638,15 +629,15 @@ async fn find_available_tasks_skips_cancelled() {
         .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
         .await
         .unwrap();
-    assert!(!tasks.iter().any(|t| t.instance_id == "wf-1"));
-    assert!(tasks.iter().any(|t| t.instance_id == "wf-2"));
+    assert!(!tasks.iter().any(|t| &*t.instance_id == "wf-1"));
+    assert!(tasks.iter().any(|t| &*t.instance_id == "wf-2"));
 }
 
 #[tokio::test]
 async fn find_available_tasks_skips_completed() {
     let (_c, backend) = setup().await;
 
-    let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     snapshot.mark_completed(Bytes::from("done"));
     backend.save_snapshot(&snapshot).await.unwrap();
 
@@ -665,7 +656,7 @@ async fn find_available_tasks_filters_by_worker_tags() {
 
     // Task tagged ["gpu"]
     let mut snap1 =
-        WorkflowSnapshot::with_initial_input("wf-gpu".into(), "h1".into(), Bytes::from(r#""1""#));
+        WorkflowSnapshot::with_initial_input("wf-gpu", "h1".into(), Bytes::from(r#""1""#));
     snap1.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("t1"),
     });
@@ -674,7 +665,7 @@ async fn find_available_tasks_filters_by_worker_tags() {
 
     // Task tagged ["cpu"]
     let mut snap2 =
-        WorkflowSnapshot::with_initial_input("wf-cpu".into(), "h1".into(), Bytes::from(r#""2""#));
+        WorkflowSnapshot::with_initial_input("wf-cpu", "h1".into(), Bytes::from(r#""2""#));
     snap2.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("t2"),
     });
@@ -687,18 +678,15 @@ async fn find_available_tasks_filters_by_worker_tags() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].instance_id, "wf-gpu");
+    assert_eq!(&*tasks[0].instance_id, "wf-gpu");
 }
 
 #[tokio::test]
 async fn find_available_tasks_untagged_worker_accepts_all() {
     let (_c, backend) = setup().await;
 
-    let mut snap1 = WorkflowSnapshot::with_initial_input(
-        "wf-tagged".into(),
-        "h1".into(),
-        Bytes::from(r#""1""#),
-    );
+    let mut snap1 =
+        WorkflowSnapshot::with_initial_input("wf-tagged", "h1".into(), Bytes::from(r#""1""#));
     snap1.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("t1"),
     });
@@ -706,7 +694,7 @@ async fn find_available_tasks_untagged_worker_accepts_all() {
     backend.save_snapshot(&snap1).await.unwrap();
 
     let mut snap2 =
-        WorkflowSnapshot::with_initial_input("wf-plain".into(), "h1".into(), Bytes::from(r#""2""#));
+        WorkflowSnapshot::with_initial_input("wf-plain", "h1".into(), Bytes::from(r#""2""#));
     snap2.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("t2"),
     });
@@ -726,7 +714,7 @@ async fn find_available_tasks_untagged_tasks_accepted_by_tagged_worker() {
 
     // Untagged task
     let mut snap =
-        WorkflowSnapshot::with_initial_input("wf-plain".into(), "h1".into(), Bytes::from(r#""1""#));
+        WorkflowSnapshot::with_initial_input("wf-plain", "h1".into(), Bytes::from(r#""1""#));
     snap.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("t1"),
     });
@@ -738,7 +726,7 @@ async fn find_available_tasks_untagged_tasks_accepted_by_tagged_worker() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].instance_id, "wf-plain");
+    assert_eq!(&*tasks[0].instance_id, "wf-plain");
 }
 
 #[tokio::test]
@@ -747,7 +735,7 @@ async fn find_available_tasks_multi_tag_subset() {
 
     // Task requiring ["gpu", "cuda"]
     let mut snap1 =
-        WorkflowSnapshot::with_initial_input("wf-multi".into(), "h1".into(), Bytes::from(r#""1""#));
+        WorkflowSnapshot::with_initial_input("wf-multi", "h1".into(), Bytes::from(r#""1""#));
     snap1.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("t1"),
     });
@@ -755,11 +743,8 @@ async fn find_available_tasks_multi_tag_subset() {
     backend.save_snapshot(&snap1).await.unwrap();
 
     // Task requiring only ["gpu"]
-    let mut snap2 = WorkflowSnapshot::with_initial_input(
-        "wf-single".into(),
-        "h1".into(),
-        Bytes::from(r#""2""#),
-    );
+    let mut snap2 =
+        WorkflowSnapshot::with_initial_input("wf-single", "h1".into(), Bytes::from(r#""2""#));
     snap2.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("t2"),
     });
@@ -772,7 +757,7 @@ async fn find_available_tasks_multi_tag_subset() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].instance_id, "wf-single");
+    assert_eq!(&*tasks[0].instance_id, "wf-single");
 
     // Worker with ["gpu","cuda","fast"] can run both (superset of both)
     let tasks = backend
@@ -791,11 +776,8 @@ async fn find_available_tasks_multi_tag_subset() {
 async fn find_available_tasks_tags_persist_through_save_load() {
     let (_c, backend) = setup().await;
 
-    let mut snap = WorkflowSnapshot::with_initial_input(
-        "wf-persist".into(),
-        "h1".into(),
-        Bytes::from(r#""1""#),
-    );
+    let mut snap =
+        WorkflowSnapshot::with_initial_input("wf-persist", "h1".into(), Bytes::from(r#""1""#));
     snap.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("t1"),
     });
@@ -816,7 +798,7 @@ async fn find_available_tasks_disjoint_tags_no_match() {
 
     // Task tagged ["cpu"]
     let mut snap =
-        WorkflowSnapshot::with_initial_input("wf-cpu".into(), "h1".into(), Bytes::from(r#""1""#));
+        WorkflowSnapshot::with_initial_input("wf-cpu", "h1".into(), Bytes::from(r#""1""#));
     snap.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("t1"),
     });
@@ -836,7 +818,7 @@ async fn find_available_tasks_disjoint_tags_no_match() {
 #[tokio::test]
 async fn load_task_result_in_progress() {
     let (_c, backend) = setup().await;
-    let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     snapshot.mark_task_completed(
         sayiir_core::TaskId::from("task-1"),
         Bytes::from(r#""out1""#),
@@ -853,7 +835,7 @@ async fn load_task_result_in_progress() {
 #[tokio::test]
 async fn load_task_result_not_found() {
     let (_c, backend) = setup().await;
-    let snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let result = backend
@@ -877,7 +859,7 @@ async fn load_task_result_after_completion() {
     let (_c, backend) = setup().await;
 
     // Create workflow with a completed task
-    let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash-1".into());
+    let mut snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
     snapshot.mark_task_completed(
         sayiir_core::TaskId::from("task-1"),
         Bytes::from(r#""out1""#),
@@ -905,14 +887,14 @@ async fn works_on_minimum_pg_version() {
     let (_c, backend) = setup_with(MIN_PG_VERSION).await;
 
     // Snapshot CRUD
-    let snapshot = WorkflowSnapshot::new("min-pg-1".into(), "hash".into());
+    let snapshot = WorkflowSnapshot::new("min-pg-1", "hash".into());
     backend.save_snapshot(&snapshot).await.unwrap();
     let loaded = backend.load_snapshot("min-pg-1").await.unwrap();
-    assert_eq!(loaded.instance_id, "min-pg-1");
+    assert_eq!(&*loaded.instance_id, "min-pg-1");
     backend.delete_snapshot("min-pg-1").await.unwrap();
 
     // Signals
-    let snapshot = WorkflowSnapshot::new("min-pg-2".into(), "hash".into());
+    let snapshot = WorkflowSnapshot::new("min-pg-2", "hash".into());
     backend.save_snapshot(&snapshot).await.unwrap();
     backend
         .store_signal(
@@ -969,7 +951,7 @@ async fn save_snapshot_emits_notify_only_when_poll_eligible() {
     listener.listen("sayiir_task_ready").await.unwrap();
 
     // 1) Fresh NotStarted snapshot — must not notify.
-    let snapshot = WorkflowSnapshot::new("wf-notify".into(), "h".into());
+    let snapshot = WorkflowSnapshot::new("wf-notify", "h".into());
     backend.save_snapshot(&snapshot).await.unwrap();
     let no_notify = tokio::time::timeout(Duration::from_millis(150), listener.recv()).await;
     assert!(
@@ -993,7 +975,7 @@ async fn save_snapshot_emits_notify_only_when_poll_eligible() {
     assert_eq!(notif.channel(), "sayiir_task_ready");
     let hint = sayiir_persistence::TaskWakeupHint::decode(notif.payload())
         .expect("payload must decode to a TaskWakeupHint");
-    assert_eq!(hint.instance_id, "wf-notify");
+    assert_eq!(&*hint.instance_id, "wf-notify");
     assert_eq!(hint.task_id, "step-1");
     assert_eq!(hint.definition_hash, "h");
 
@@ -1027,7 +1009,7 @@ async fn wait_for_wakeup_returns_on_notify() {
 
     let producer = tokio::spawn(async move {
         sleep(Duration::from_millis(150)).await;
-        let mut snapshot = WorkflowSnapshot::new("wf-wake".into(), "h".into());
+        let mut snapshot = WorkflowSnapshot::new("wf-wake", "h".into());
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("step-1"),
         });
@@ -1090,7 +1072,7 @@ async fn wait_for_wakeup_delivers_parsed_hint() {
 
     let producer = tokio::spawn(async move {
         sleep(Duration::from_millis(100)).await;
-        let mut snapshot = WorkflowSnapshot::new("wf-hinted".into(), "h-xyz".into());
+        let mut snapshot = WorkflowSnapshot::new("wf-hinted", "h-xyz".into());
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("task-a"),
         });
@@ -1104,7 +1086,7 @@ async fn wait_for_wakeup_delivers_parsed_hint() {
         .expect("expected a hint from the NOTIFY");
     producer.await.unwrap();
 
-    assert_eq!(hint.instance_id, "wf-hinted");
+    assert_eq!(&*hint.instance_id, "wf-hinted");
     assert_eq!(hint.task_id, "task-a");
     assert_eq!(hint.definition_hash, "h-xyz");
 }
@@ -1117,7 +1099,7 @@ async fn find_hinted_task_returns_available_task() {
 
     let (_c, backend) = setup().await;
     let mut snapshot = WorkflowSnapshot::with_initial_input(
-        "wf-hint-found".into(),
+        "wf-hint-found",
         "h".into(),
         Bytes::from_static(b"\"input\""),
     );
@@ -1137,7 +1119,7 @@ async fn find_hinted_task_returns_available_task() {
         .await
         .unwrap()
         .expect("hinted task should still be eligible");
-    assert_eq!(task.instance_id, "wf-hint-found");
+    assert_eq!(&*task.instance_id, "wf-hint-found");
     assert_eq!(task.task_id, sayiir_core::TaskId::from("first"));
     assert_eq!(
         task.workflow_definition_hash,
@@ -1153,7 +1135,7 @@ async fn find_hinted_task_returns_none_when_stale() {
     use sayiir_persistence::TaskWakeupHint;
 
     let (_c, backend) = setup().await;
-    let mut snapshot = WorkflowSnapshot::new("wf-stale".into(), "h".into());
+    let mut snapshot = WorkflowSnapshot::new("wf-stale", "h".into());
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("second"),
     });
@@ -1177,7 +1159,7 @@ async fn find_hinted_task_returns_none_when_claimed() {
     use sayiir_persistence::TaskWakeupHint;
 
     let (_c, backend) = setup().await;
-    let mut snapshot = WorkflowSnapshot::new("wf-claimed".into(), "h".into());
+    let mut snapshot = WorkflowSnapshot::new("wf-claimed", "h".into());
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("first"),
     });

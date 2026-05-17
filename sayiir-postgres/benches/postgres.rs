@@ -130,7 +130,7 @@ fn fork_join(n_branches: usize) -> WorkflowContinuation {
 fn snapshot_with_tasks(n: usize) -> WorkflowSnapshot {
     let input = encode(0);
     let mut snapshot =
-        WorkflowSnapshot::with_initial_input("bench-inst".into(), "bench-hash".into(), input);
+        WorkflowSnapshot::with_initial_input("bench-inst", "bench-hash".into(), input);
     for i in 0..n {
         snapshot.mark_task_completed(
             sayiir_core::TaskId::from(format!("task_{i}").as_str()),
@@ -213,7 +213,7 @@ fn checkpointing(c: &mut Criterion) {
     group.bench_function("linear_5_tasks", |b| {
         b.to_async(rt).iter(|| async {
             let mut snapshot = WorkflowSnapshot::with_initial_input(
-                "bench-ckpt".into(),
+                "bench-ckpt",
                 "bench-hash".into(),
                 input.clone(),
             );
