@@ -31,7 +31,8 @@ where
         tracing::debug!("saving snapshot");
         let data = self.encode(snapshot)?;
         let status = snapshot.state.as_ref();
-        let task_id = snapshot.current_task_id().map(|t| t.to_hex());
+        let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
+        let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
         let error = snapshot.error_message().map(ToString::to_string);
         let terminal = snapshot.state.is_terminal();
@@ -83,8 +84,8 @@ where
         )
         .bind(&*snapshot.instance_id) // $1
         .bind(status) // $2
-        .bind(snapshot.definition_hash.to_hex()) // $3
-        .bind(&task_id) // $4
+        .bind(snapshot.definition_hash.as_bytes().as_slice()) // $3
+        .bind(task_id) // $4
         .bind(task_count) // $5
         .bind(&data) // $6
         .bind(&error) // $7
@@ -109,7 +110,7 @@ where
         .bind(&*snapshot.instance_id)
         .bind(history_version)
         .bind(status)
-        .bind(&task_id)
+        .bind(task_id)
         .bind(&data)
         .execute(&mut *tx)
         .await
@@ -118,7 +119,7 @@ where
         // --- Maintain sayiir_workflow_tasks lifecycle ---
 
         // If at a task, mark it as active
-        if let Some(ref tid) = task_id {
+        if let Some(tid) = task_id {
             sqlx::query(
                 "INSERT INTO sayiir_workflow_tasks (instance_id, task_id, status, started_at)
                  VALUES ($1, $2, 'active', now())
@@ -192,7 +193,8 @@ where
 
         let data = self.encode(&snapshot)?;
         let status = snapshot.state.as_ref();
-        let current = snapshot.current_task_id().map(|t| t.to_hex());
+        let current_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
+        let current: Option<&[u8]> = current_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
 
         sqlx::query(
@@ -203,7 +205,7 @@ where
         )
         .bind(&data)
         .bind(status)
-        .bind(&current)
+        .bind(current)
         .bind(task_count)
         .bind(instance_id)
         .execute(&mut *tx)
@@ -218,7 +220,7 @@ where
                 status = 'completed', completed_at = now(), error = NULL",
         )
         .bind(instance_id)
-        .bind(task_id.to_hex())
+        .bind(task_id.as_bytes().as_slice())
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;

@@ -38,6 +38,22 @@ impl Hash32 {
         Self(bytes)
     }
 
+    /// Construct from a byte slice, validating the length.
+    ///
+    /// Use this on the wire/storage boundary — e.g. decoding a `BYTEA`
+    /// column from sqlx — where you have a `&[u8]` rather than a
+    /// fixed-size array.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Hash32ParseError::WrongLength`] if `bytes.len() != 32`.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, Hash32ParseError> {
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| Hash32ParseError::WrongLength(bytes.len()))?;
+        Ok(Self(arr))
+    }
+
     /// Borrow the underlying bytes.
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
@@ -236,6 +252,18 @@ macro_rules! hash32_newtype {
             #[must_use]
             pub const fn from_bytes(bytes: [u8; 32]) -> Self {
                 Self(Hash32::from_bytes(bytes))
+            }
+
+            #[doc = concat!(
+                "Construct a [`", stringify!($name),
+                "`] from a length-checked byte slice. See [`Hash32::from_slice`]."
+            )]
+            ///
+            /// # Errors
+            ///
+            /// Returns [`Hash32ParseError::WrongLength`] if `bytes.len() != 32`.
+            pub fn from_slice(bytes: &[u8]) -> Result<Self, Hash32ParseError> {
+                Hash32::from_slice(bytes).map(Self)
             }
 
             /// SHA-256-hash the given input and wrap the result.

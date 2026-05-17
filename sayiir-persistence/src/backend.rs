@@ -17,6 +17,16 @@ use sayiir_core::snapshot::{
 };
 use sayiir_core::task_claim::{AvailableTask, TaskClaim};
 
+/// Wire-side representation of a 32-byte SHA-256 hash.
+///
+/// The semantic newtypes [`sayiir_core::TaskId`] / [`sayiir_core::DefinitionHash`]
+/// don't cross this boundary as-is (would couple `sayiir-core` to nanoserde).
+/// Producers convert with `*hash.as_bytes()`; consumers wrap back with
+/// `TaskId::from_bytes(field)` / `DefinitionHash::from_bytes(field)`. The
+/// type-system guarantees live on either side of this alias — over the wire
+/// the payload is just 32 raw bytes.
+pub type HashBytes = [u8; 32];
+
 /// Routing-and-eligibility hint a producer attaches to a "task ready"
 /// wakeup. Workers consume it to:
 ///
@@ -26,16 +36,19 @@ use sayiir_core::task_claim::{AvailableTask, TaskClaim};
 /// * **Direct-claim** — call [`TaskClaimStore::find_hinted_task`] to skip
 ///   the full `find_available_tasks` scan on the happy path; the producer
 ///   already named the task that just became ready.
-///
 #[derive(Debug, Clone, PartialEq, Eq, nanoserde::SerBin, nanoserde::DeBin)]
 pub struct TaskWakeupHint {
-    /// Workflow instance the task belongs to.
+    /// Workflow instance the task belongs to (user-supplied, human-readable
+    /// — *not* a hash; this is the same string the user passes to
+    /// `runner.run("…")` and that appears in Postgres `instance_id` columns
+    /// and log spans).
     pub instance_id: String,
-    /// Task id that's claimable as of the producer's commit.
-    pub task_id: String,
-    /// `definition_hash` of the workflow — workers without this hash
-    /// registered can drop the wake without touching the DB.
-    pub definition_hash: String,
+    /// SHA-256 of the task node id — wraps to [`sayiir_core::TaskId`].
+    pub task_id: HashBytes,
+    /// SHA-256 of the workflow definition — wraps to [`sayiir_core::DefinitionHash`].
+    /// Workers without this definition registered drop the wake without
+    /// touching the DB.
+    pub definition_hash: HashBytes,
     /// Task tags. A worker can handle the task only if its tag set is a
     /// superset of `tags` (untagged tasks are claimable by anyone).
     pub tags: Vec<String>,
@@ -45,7 +58,7 @@ pub struct TaskWakeupHint {
 /// any breaking change to [`TaskWakeupHint`]'s field layout so decoders
 /// reject payloads they don't understand instead of silently
 /// misparsing them.
-const HINT_WIRE_VERSION: u8 = 1;
+const HINT_WIRE_VERSION: u8 = 2;
 
 impl TaskWakeupHint {
     /// Encode to a base64-wrapped binary blob, suitable for any text-only
@@ -97,8 +110,8 @@ mod hint_tests {
     fn sample() -> TaskWakeupHint {
         TaskWakeupHint {
             instance_id: "wf-abc-123".to_string(),
-            task_id: "step-1".to_string(),
-            definition_hash: "hash-xyz".to_string(),
+            task_id: [0x42; 32],
+            definition_hash: [0xab; 32],
             tags: vec!["gpu".to_string(), "cuda-12".to_string()],
         }
     }

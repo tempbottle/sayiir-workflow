@@ -67,7 +67,7 @@ where
                        EXTRACT(EPOCH FROM expires_at)::BIGINT AS expires_epoch",
         )
         .bind(instance_id)
-        .bind(task_id.to_hex())
+        .bind(task_id.as_bytes().as_slice())
         .bind(worker_id)
         .bind(expires_at)
         .fetch_optional(&self.pool)
@@ -75,13 +75,13 @@ where
         .map_err(PgError)?;
 
         row.map(|r| {
-            let task_id_hex: &str = r.get("task_id");
-            // Fail loudly on invalid hex rather than silently coercing to
-            // TaskId::default() — a malformed task_id column means data
-            // corruption and would otherwise cause incorrect claim ownership.
-            let task_id = sayiir_core::TaskId::from_hex(task_id_hex).map_err(|e| {
+            let task_id_bytes: &[u8] = r.get("task_id");
+            // Fail loudly on a malformed (wrong-length) task_id column —
+            // silently defaulting would cause incorrect claim ownership.
+            let task_id = sayiir_core::TaskId::from_slice(task_id_bytes).map_err(|e| {
                 BackendError::Backend(format!(
-                    "invalid task_id hex in sayiir_task_claims: {task_id_hex:?}: {e}"
+                    "invalid task_id bytes in sayiir_task_claims (len={}): {e}",
+                    task_id_bytes.len(),
                 ))
             })?;
             Ok(TaskClaim {
@@ -115,7 +115,7 @@ where
             "SELECT worker_id FROM sayiir_task_claims WHERE instance_id = $1 AND task_id = $2",
         )
         .bind(instance_id)
-        .bind(task_id.to_hex())
+        .bind(task_id.as_bytes().as_slice())
         .fetch_optional(&self.pool)
         .await
         .map_err(PgError)?
@@ -133,7 +133,7 @@ where
              WHERE instance_id = $1 AND task_id = $2 AND worker_id = $3",
         )
         .bind(instance_id)
-        .bind(task_id.to_hex())
+        .bind(task_id.as_bytes().as_slice())
         .bind(worker_id)
         .execute(&self.pool)
         .await
@@ -161,7 +161,7 @@ where
              WHERE instance_id = $1 AND task_id = $2",
         )
         .bind(instance_id)
-        .bind(task_id.to_hex())
+        .bind(task_id.as_bytes().as_slice())
         .fetch_optional(&self.pool)
         .await
         .map_err(PgError)?
@@ -187,7 +187,7 @@ where
             )
             .bind(new_exp)
             .bind(instance_id)
-            .bind(task_id.to_hex())
+            .bind(task_id.as_bytes().as_slice())
             .execute(&self.pool)
             .await
             .map_err(PgError)?;
@@ -378,7 +378,9 @@ where
         fields(
             db.system = "postgresql",
             instance_id = %hint.instance_id,
-            task_id = %hint.task_id,
+            // Display via the `TaskId` newtype so the span field renders as
+            // 64-char hex like every other task_id log line.
+            task_id = %sayiir_core::TaskId::from_bytes(hint.task_id),
         ),
         err(level = tracing::Level::ERROR),
     )]
@@ -403,7 +405,7 @@ where
         );
         let row = sqlx::query(&query)
             .bind(&hint.instance_id)
-            .bind(&hint.task_id)
+            .bind(hint.task_id.as_slice())
             .fetch_optional(&self.pool)
             .await
             .map_err(PgError)?;
@@ -424,21 +426,8 @@ where
         else {
             return Ok(None);
         };
-        // hint.task_id is the wire-format String (hex of the TaskId), coming
-        // from a NOTIFY payload — treat malformed hex as a stale/garbage hint
-        // (skip + log) rather than a hard error: the timer-tick fallback will
-        // pick up the task on the next sweep.
-        let hint_task_id = match sayiir_core::TaskId::from_hex(&hint.task_id) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(
-                    hint_task_id = %hint.task_id,
-                    error = %e,
-                    "ignoring NOTIFY hint with invalid task_id hex",
-                );
-                return Ok(None);
-            }
-        };
+        // hint.task_id is 32 raw bytes from the NOTIFY payload — wrap and compare.
+        let hint_task_id = sayiir_core::TaskId::from_bytes(hint.task_id);
         if *task_id != hint_task_id || completed_tasks.contains_key(task_id) {
             return Ok(None);
         }

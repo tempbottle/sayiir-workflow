@@ -976,8 +976,14 @@ async fn save_snapshot_emits_notify_only_when_poll_eligible() {
     let hint = sayiir_persistence::TaskWakeupHint::decode(notif.payload())
         .expect("payload must decode to a TaskWakeupHint");
     assert_eq!(&*hint.instance_id, "wf-notify");
-    assert_eq!(hint.task_id, "step-1");
-    assert_eq!(hint.definition_hash, "h");
+    assert_eq!(
+        hint.task_id,
+        *sayiir_core::TaskId::from("step-1").as_bytes()
+    );
+    assert_eq!(
+        hint.definition_hash,
+        *sayiir_core::DefinitionHash::from("h").as_bytes()
+    );
 
     // 3) Terminal completion — must not notify.
     let mut snapshot = backend.load_snapshot("wf-notify").await.unwrap();
@@ -1087,8 +1093,14 @@ async fn wait_for_wakeup_delivers_parsed_hint() {
     producer.await.unwrap();
 
     assert_eq!(&*hint.instance_id, "wf-hinted");
-    assert_eq!(hint.task_id, "task-a");
-    assert_eq!(hint.definition_hash, "h-xyz");
+    assert_eq!(
+        hint.task_id,
+        *sayiir_core::TaskId::from("task-a").as_bytes()
+    );
+    assert_eq!(
+        hint.definition_hash,
+        *sayiir_core::DefinitionHash::from("h-xyz").as_bytes()
+    );
 }
 
 /// `find_hinted_task` must return an `AvailableTask` when the snapshot
@@ -1110,8 +1122,8 @@ async fn find_hinted_task_returns_available_task() {
 
     let hint = TaskWakeupHint {
         instance_id: "wf-hint-found".into(),
-        task_id: sayiir_core::TaskId::from("first").to_hex(),
-        definition_hash: "h".into(),
+        task_id: *sayiir_core::TaskId::from("first").as_bytes(),
+        definition_hash: *sayiir_core::DefinitionHash::from("h").as_bytes(),
         tags: vec![],
     };
     let task = backend
@@ -1144,8 +1156,8 @@ async fn find_hinted_task_returns_none_when_stale() {
     // Hint targets a task the workflow is no longer at — should be skipped.
     let hint = TaskWakeupHint {
         instance_id: "wf-stale".into(),
-        task_id: sayiir_core::TaskId::from("first").to_hex(),
-        definition_hash: "h".into(),
+        task_id: *sayiir_core::TaskId::from("first").as_bytes(),
+        definition_hash: *sayiir_core::DefinitionHash::from("h").as_bytes(),
         tags: vec![],
     };
     assert!(backend.find_hinted_task(&hint).await.unwrap().is_none());
@@ -1178,8 +1190,8 @@ async fn find_hinted_task_returns_none_when_claimed() {
 
     let hint = TaskWakeupHint {
         instance_id: "wf-claimed".into(),
-        task_id: sayiir_core::TaskId::from("first").to_hex(),
-        definition_hash: "h".into(),
+        task_id: *sayiir_core::TaskId::from("first").as_bytes(),
+        definition_hash: *sayiir_core::DefinitionHash::from("h").as_bytes(),
         tags: vec![],
     };
     assert!(backend.find_hinted_task(&hint).await.unwrap().is_none());

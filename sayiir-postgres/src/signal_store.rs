@@ -333,7 +333,8 @@ where
 
         let data = self.encode(&snapshot)?;
         let status = snapshot.state.as_ref();
-        let task_id = snapshot.current_task_id().map(|t| t.to_hex());
+        let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
+        let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
@@ -347,7 +348,7 @@ where
         )
         .bind(&data)
         .bind(status)
-        .bind(&task_id)
+        .bind(task_id)
         .bind(task_count)
         .bind(pos_kind)
         .bind(wake_at)
@@ -402,7 +403,8 @@ where
 
         let data = self.encode(&snapshot)?;
         let status = snapshot.state.as_ref();
-        let task_id = snapshot.current_task_id().map(|t| t.to_hex());
+        let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
+        let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
@@ -416,7 +418,7 @@ where
         )
         .bind(&data)
         .bind(status)
-        .bind(&task_id)
+        .bind(task_id)
         .bind(task_count)
         .bind(pos_kind)
         .bind(wake_at)

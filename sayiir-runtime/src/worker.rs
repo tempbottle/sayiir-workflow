@@ -594,11 +594,7 @@ where
     /// True if the worker has the hint's workflow registered and its
     /// tag set covers the hint's tags.
     fn can_handle_hint(&self, hint: &TaskWakeupHint, workflows: &impl WorkflowLookup) -> bool {
-        // `TaskWakeupHint.definition_hash` is the hex wire form; parse once for the
-        // O(1) HashMap probe. Malformed hex means we can't match — drop the hint.
-        let Ok(hash) = sayiir_core::DefinitionHash::from_hex(&hint.definition_hash) else {
-            return false;
-        };
+        let hash = sayiir_core::DefinitionHash::from_bytes(hint.definition_hash);
         if !workflows.contains_definition_hash(&hash) {
             return false;
         }
