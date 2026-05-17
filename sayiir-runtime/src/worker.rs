@@ -26,7 +26,7 @@ use sayiir_core::snapshot::{
 };
 use sayiir_core::task_claim::AvailableTask;
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
-use sayiir_persistence::{PersistentBackend, TaskClaimStore};
+use sayiir_persistence::{PersistentBackend, TaskClaimStore, TaskWakeupHint};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -54,6 +54,26 @@ pub struct ExternalWorkflow {
 
 /// Workflow index keyed by definition hash for O(1) lookup during task dispatch.
 pub type WorkflowIndex = HashMap<String, ExternalWorkflow>;
+
+/// Definition-hash containment over either [`WorkflowIndex`] (`HashMap`,
+/// O(1)) or [`WorkflowRegistry`] (`Vec`, O(n)). Lets `can_handle_hint`
+/// accept any worker-registered workflows collection uniformly instead
+/// of taking a hand-rolled closure per call site.
+pub(crate) trait WorkflowLookup {
+    fn contains_definition_hash(&self, hash: &str) -> bool;
+}
+
+impl WorkflowLookup for WorkflowIndex {
+    fn contains_definition_hash(&self, hash: &str) -> bool {
+        self.contains_key(hash)
+    }
+}
+
+impl<C, Input, M> WorkflowLookup for WorkflowRegistry<C, Input, M> {
+    fn contains_definition_hash(&self, hash: &str) -> bool {
+        self.iter().any(|(k, _)| k == hash)
+    }
+}
 
 /// External task executor function signature.
 ///
@@ -463,7 +483,7 @@ where
         let mut interval = time::interval(poll_interval);
 
         loop {
-            tokio::select! {
+            let hint = tokio::select! {
                 biased;
 
                 cmd = cmd_rx.recv() => {
@@ -474,9 +494,42 @@ where
                         }
                     }
                 }
-
                 _ = interval.tick() => {
-                    tracing::trace!(worker_id = %self.worker_id, "Will poll for available tasks");
+                    tracing::trace!(worker_id = %self.worker_id, "fallback poll tick");
+                    None
+                }
+                hint = self.backend.wait_for_wakeup(poll_interval) => {
+                    let hint = hint?;
+                    tracing::debug!(
+                        worker_id = %self.worker_id,
+                        has_hint = hint.is_some(),
+                        "wakeup notification",
+                    );
+                    hint
+                }
+            };
+
+            if let Some(h) = hint.as_ref()
+                && !self.can_handle_hint(h, &workflows)
+            {
+                // This optimization cuts PG load proportional to NOTIFY volume x fleet-tag-fragmentation.
+                tracing::trace!(
+                    worker_id = %self.worker_id,
+                    instance_id = %h.instance_id,
+                    "skipping wakeup, hint not handleable here",
+                );
+                continue;
+            }
+
+            if let Some(h) = hint.as_ref() {
+                match self.try_hinted_execute(h, &workflows, &executor).await {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(ref e) if e.is_timeout() => {
+                        tracing::error!(worker_id = %self.worker_id, error = %e, "Task timed out — worker shutting down");
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
                 }
             }
 
@@ -531,6 +584,43 @@ where
                 }
             }
         }
+    }
+
+    /// True if the worker has the hint's workflow registered and its
+    /// tag set covers the hint's tags.
+    fn can_handle_hint(&self, hint: &TaskWakeupHint, workflows: &impl WorkflowLookup) -> bool {
+        if !workflows.contains_definition_hash(&hint.definition_hash) {
+            return false;
+        }
+        hint.tags.iter().all(|t| self.tags.contains(t))
+    }
+
+    /// `Ok(true)` if the hinted task was claimed and executed (or its
+    /// execution failed non-fatally), `Ok(false)` to fall through to the
+    /// full polling scan, `Err(e)` on a fatal task timeout.
+    async fn try_hinted_execute(
+        &self,
+        hint: &TaskWakeupHint,
+        workflows: &WorkflowIndex,
+        executor: &ExternalTaskExecutor,
+    ) -> Result<bool, crate::error::RuntimeError> {
+        let Some(task) = self.backend.find_hinted_task(hint).await? else {
+            return Ok(false);
+        };
+        let Some(ext_wf) = workflows.get(&task.workflow_definition_hash) else {
+            return Ok(false);
+        };
+        match self
+            .execute_external_task(ext_wf, &task.workflow_definition_hash, executor, &task)
+            .await
+        {
+            Err(e) if e.is_timeout() => return Err(e),
+            Ok(_) => tracing::info!(worker_id = %self.worker_id, "completed hinted task"),
+            Err(e) => {
+                tracing::error!(worker_id = %self.worker_id, error = %e, "hinted task execution failed");
+            }
+        }
+        Ok(true)
     }
 
     /// Execute a single task using an external executor.
@@ -763,11 +853,12 @@ where
         let mut interval = time::interval(poll_interval);
 
         loop {
-            tokio::select! {
+            // In-process mode only filters irrelevant wakes; the direct-
+            // claim shortcut lives on the external-executor path.
+            let hint = tokio::select! {
                 biased;
 
                 cmd = cmd_rx.recv() => {
-                    // None (all handles dropped) or Some(Shutdown) → exit
                     match cmd {
                         Some(WorkerCommand::Shutdown) | None => {
                             tracing::info!(worker_id = %self.worker_id, "Worker shutting down");
@@ -775,10 +866,31 @@ where
                         }
                     }
                 }
-
                 _ = interval.tick() => {
-                    tracing::trace!(worker_id = %self.worker_id, "Will poll for available tasks");
+                    tracing::trace!(worker_id = %self.worker_id, "fallback poll tick");
+                    None
                 }
+                hint = self.backend.wait_for_wakeup(poll_interval) => {
+                    let hint = hint?;
+                    tracing::debug!(
+                        worker_id = %self.worker_id,
+                        has_hint = hint.is_some(),
+                        "wakeup notification",
+                    );
+                    hint
+                }
+            };
+
+            if let Some(h) = hint.as_ref()
+                && !self.can_handle_hint(h, &workflows)
+            {
+                // This optimization cuts PG load proportional to NOTIFY volume x fleet-tag-fragmentation.
+                tracing::trace!(
+                    worker_id = %self.worker_id,
+                    instance_id = %h.instance_id,
+                    "skipping wakeup, hint not handleable here",
+                );
+                continue;
             }
 
             let available_tasks = self
@@ -2136,12 +2248,12 @@ mod tests {
         let registry = TaskRegistry::new();
         let worker = PooledWorker::builder(backend, registry)
             .worker_id("w1")
-            .claim_ttl(Some(Duration::from_secs(120)))
+            .claim_ttl(Some(Duration::from_mins(2)))
             .batch_size(NonZeroUsize::new(8).unwrap())
             .build();
 
         assert_eq!(worker.worker_id, "w1");
-        assert_eq!(worker.claim_ttl, Some(Duration::from_secs(120)));
+        assert_eq!(worker.claim_ttl, Some(Duration::from_mins(2)));
         assert_eq!(worker.batch_size.get(), 8);
     }
 

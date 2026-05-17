@@ -1344,8 +1344,7 @@ impl SerializableContinuation {
 
         let mut hasher = Sha256::new();
         hash_continuation(self, &mut hasher);
-        let result = hasher.finalize();
-        format!("{result:x}")
+        hex::encode(hasher.finalize())
     }
 }
 
@@ -2372,7 +2371,7 @@ mod tests {
         let wf2: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx2)
             .with_registry()
             .then("step1", |i: u32| async move { Ok(i + 1) })
-            .delay("wait", Duration::from_secs(60))
+            .delay("wait", Duration::from_mins(1))
             .build()
             .unwrap();
 
@@ -2416,7 +2415,7 @@ mod tests {
         let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
         let workflow = WorkflowBuilder::new(ctx)
             .then("fetch", |i: u32| async move { Ok(i) })
-            .delay("wait_24h", Duration::from_secs(86400))
+            .delay("wait_24h", Duration::from_hours(24))
             .then("process", |i: u32| async move { Ok(i + 1) })
             .build()
             .unwrap();
@@ -2468,7 +2467,7 @@ mod tests {
                 id, duration, next, ..
             } => {
                 assert_eq!(id, "wait");
-                assert_eq!(duration, std::time::Duration::from_millis(5000));
+                assert_eq!(duration, std::time::Duration::from_secs(5));
                 assert!(next.is_none());
             }
             _ => panic!("Expected Delay variant"),

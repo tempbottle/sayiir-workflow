@@ -1382,7 +1382,7 @@ mod tests {
 
         let workflow = WorkflowBuilder::new(ctx())
             .then("step1", |i: u32| async move { Ok(i + 1) })
-            .delay("wait_1h", std::time::Duration::from_secs(3600))
+            .delay("wait_1h", std::time::Duration::from_hours(1))
             .then("step2", |i: u32| async move { Ok(i * 2) })
             .build()
             .unwrap();
@@ -1428,7 +1428,7 @@ mod tests {
 
         let workflow = WorkflowBuilder::new(ctx())
             .then("step1", |i: u32| async move { Ok(i + 1) })
-            .delay("wait_1h", std::time::Duration::from_secs(3600))
+            .delay("wait_1h", std::time::Duration::from_hours(1))
             .then("step2", |i: u32| async move { Ok(i * 2) })
             .build()
             .unwrap();
@@ -1486,7 +1486,7 @@ mod tests {
 
         let workflow = WorkflowBuilder::new(ctx())
             .then("step1", |i: u32| async move { Ok(i + 1) })
-            .delay("wait_1h", std::time::Duration::from_secs(3600))
+            .delay("wait_1h", std::time::Duration::from_hours(1))
             .then("step2", |i: u32| async move { Ok(i * 2) })
             .build()
             .unwrap();
