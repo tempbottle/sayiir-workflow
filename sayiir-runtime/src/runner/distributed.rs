@@ -400,8 +400,8 @@ where
                                     let next_hash = sayiir_core::TaskId::from(next_name.as_str());
                                     snapshot.set_task_hint(&TaskHint::new(
                                         &next_name,
-                                        continuation.get_task_priority(&next_hash),
-                                        continuation.get_task_tags(&next_hash),
+                                        task_index.priority(&next_hash),
+                                        task_index.tags(&next_hash),
                                     ));
                                     snapshot.update_position(ExecutionPosition::AtTask {
                                         task_id: next_hash,

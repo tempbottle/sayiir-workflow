@@ -601,7 +601,7 @@ async fn test_prepare_run_creates_snapshot() {
         "inst-1",
         "hash-1".into(),
         Bytes::from("input"),
-        sayiir_core::snapshot::TaskHint::new("task-1", None, vec![]),
+        sayiir_core::snapshot::TaskHint::new("task-1", None, &[]),
         &backend,
         sayiir_core::workflow::ConflictPolicy::Fail,
     )

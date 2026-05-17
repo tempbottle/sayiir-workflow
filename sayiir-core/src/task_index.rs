@@ -26,19 +26,47 @@ use crate::workflow::WorkflowContinuation;
 pub struct TaskNodeMetadata {
     /// Human-readable node id (the `id` argument given to the builder).
     ///
-    /// Stored as `Arc<str>` so the FFI layer can clone it cheaply into
-    /// `TaskExecutionContext` without re-allocating the string per dispatch.
-    pub name: Arc<str>,
-    /// Optional per-task timeout.
-    pub timeout: Option<std::time::Duration>,
-    /// Optional execution priority (1–5; lower runs first).
-    pub priority: Option<u8>,
+    /// `Arc<str>` so the FFI layer can clone it cheaply into
+    /// `TaskExecutionContext` without re-allocating per dispatch.
+    pub(crate) name: Arc<str>,
+    pub(crate) timeout: Option<std::time::Duration>,
+    pub(crate) priority: Option<u8>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) retry_policy: Option<RetryPolicy>,
+    pub(crate) version: Option<String>,
+}
+
+impl TaskNodeMetadata {
+    /// Human-readable node id (`Arc<str>` for cheap FFI cloning).
+    #[must_use]
+    pub fn name(&self) -> &Arc<str> {
+        &self.name
+    }
+    /// Configured timeout, if any.
+    #[must_use]
+    pub fn timeout(&self) -> Option<std::time::Duration> {
+        self.timeout
+    }
+    /// Configured priority (1–5; lower runs first).
+    #[must_use]
+    pub fn priority(&self) -> Option<u8> {
+        self.priority
+    }
     /// Affinity tags for worker-pool routing.
-    pub tags: Vec<String>,
-    /// Optional retry policy.
-    pub retry_policy: Option<RetryPolicy>,
+    #[must_use]
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+    /// Configured retry policy.
+    #[must_use]
+    pub fn retry_policy(&self) -> Option<&RetryPolicy> {
+        self.retry_policy.as_ref()
+    }
     /// Optional version string.
-    pub version: Option<String>,
+    #[must_use]
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
 }
 
 /// O(1) lookup table from [`TaskId`] to per-node metadata.
@@ -91,12 +119,12 @@ impl TaskIndex {
     }
 
     /// Look up the affinity tags configured on `task_id`.
+    ///
+    /// Returns a borrow into the index — callers that need to own the tags
+    /// clone explicitly (e.g. when feeding into `TaskHint::new`).
     #[must_use]
-    pub fn tags(&self, task_id: &TaskId) -> Vec<String> {
-        self.0
-            .get(task_id)
-            .map(|m| m.tags.clone())
-            .unwrap_or_default()
+    pub fn tags(&self, task_id: &TaskId) -> &[String] {
+        self.0.get(task_id).map_or(&[], |m| m.tags.as_slice())
     }
 
     /// Look up the retry policy configured on `task_id`.

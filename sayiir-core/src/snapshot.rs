@@ -29,11 +29,11 @@ pub struct TaskHint {
 impl TaskHint {
     /// Build a hint by hashing the task name.
     #[must_use]
-    pub fn new(name: &str, priority: Option<u8>, tags: Vec<String>) -> Self {
+    pub fn new(name: &str, priority: Option<u8>, tags: &[String]) -> Self {
         Self {
             id: crate::TaskId::from(name),
             priority,
-            tags,
+            tags: tags.to_vec(),
         }
     }
 }

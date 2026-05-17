@@ -695,6 +695,7 @@ where
         self.settle_execution_result_ext(
             execution_result,
             &ext_wf.continuation,
+            &ext_wf.task_index,
             available_task,
             &mut snapshot,
             claim,
@@ -718,16 +719,17 @@ where
         // walk and no per-node SHA-256 — this is a single hash-map probe.
         let indexed_meta = ext_wf.task_index.get(&task_id);
         let task_name: Arc<str> =
-            indexed_meta.map_or_else(|| Arc::from(task_id.to_hex()), |m| Arc::clone(&m.name));
+            indexed_meta.map_or_else(|| Arc::from(task_id.to_hex()), |m| Arc::clone(m.name()));
 
-        let deadline = if let Some(timeout) = indexed_meta.and_then(|m| m.timeout) {
-            snapshot.set_task_deadline(task_id, timeout);
-            let _ = self.backend.save_snapshot(snapshot).await;
-            snapshot.refresh_task_deadline();
-            snapshot.task_deadline.clone()
-        } else {
-            None
-        };
+        let deadline =
+            if let Some(timeout) = indexed_meta.and_then(sayiir_core::TaskNodeMetadata::timeout) {
+                snapshot.set_task_deadline(task_id, timeout);
+                let _ = self.backend.save_snapshot(snapshot).await;
+                snapshot.refresh_task_deadline();
+                snapshot.task_deadline.clone()
+            } else {
+                None
+            };
 
         let task_ctx = TaskExecutionContext {
             workflow_id: Arc::clone(&ext_wf.workflow_id),
@@ -767,6 +769,7 @@ where
         &self,
         outcome: ExecutionOutcome,
         continuation: &WorkflowContinuation,
+        task_index: &sayiir_core::TaskIndex,
         available_task: &AvailableTask,
         snapshot: &mut WorkflowSnapshot,
         claim: ActiveTaskClaim<'_, B>,
@@ -775,7 +778,7 @@ where
         match outcome {
             ExecutionOutcome::Timeout(err) => {
                 if let Ok(Some(status)) = self
-                    .try_schedule_retry(continuation, available_task, snapshot, &err.to_string())
+                    .try_schedule_retry(task_index, available_task, snapshot, &err.to_string())
                     .await
                 {
                     claim.release_quietly().await;
@@ -797,7 +800,7 @@ where
                 let panic_msg = extract_panic_message(&panic_payload);
 
                 if let Ok(Some(status)) = self
-                    .try_schedule_retry(continuation, available_task, snapshot, &panic_msg)
+                    .try_schedule_retry(task_index, available_task, snapshot, &panic_msg)
                     .await
                 {
                     claim.release_quietly().await;
@@ -815,7 +818,7 @@ where
             }
             ExecutionOutcome::TaskError(e) => {
                 if let Ok(Some(status)) = self
-                    .try_schedule_retry(continuation, available_task, snapshot, &e.to_string())
+                    .try_schedule_retry(task_index, available_task, snapshot, &e.to_string())
                     .await
                 {
                     claim.release_quietly().await;
@@ -1109,19 +1112,20 @@ where
         // task context exposed to user code (no tree walk, no rehashing).
         let indexed_meta = task_index.get(&task_id);
         let task_name: Arc<str> =
-            indexed_meta.map_or_else(|| Arc::from(task_id.to_hex()), |m| Arc::clone(&m.name));
+            indexed_meta.map_or_else(|| Arc::from(task_id.to_hex()), |m| Arc::clone(m.name()));
 
         // Set deadline if task has a timeout configured
-        let deadline = if let Some(timeout) = indexed_meta.and_then(|m| m.timeout) {
-            snapshot.set_task_deadline(task_id, timeout);
-            let _ = self.backend.save_snapshot(snapshot).await;
-            // Refresh deadline to now + timeout so it measures actual execution
-            // time, not time spent on the snapshot save above.
-            snapshot.refresh_task_deadline();
-            snapshot.task_deadline.clone()
-        } else {
-            None
-        };
+        let deadline =
+            if let Some(timeout) = indexed_meta.and_then(sayiir_core::TaskNodeMetadata::timeout) {
+                snapshot.set_task_deadline(task_id, timeout);
+                let _ = self.backend.save_snapshot(snapshot).await;
+                // Refresh deadline to now + timeout so it measures actual execution
+                // time, not time spent on the snapshot save above.
+                snapshot.refresh_task_deadline();
+                snapshot.task_deadline.clone()
+            } else {
+                None
+            };
 
         let task_ctx = TaskExecutionContext {
             workflow_id: Arc::from(workflow.context().workflow_id()),
@@ -1155,18 +1159,18 @@ where
 
     /// Try to schedule a retry for a failed task.
     ///
-    /// Looks up the retry policy on the continuation. If retries are available,
+    /// Looks up the retry policy in the task index. If retries are available,
     /// records the retry state on the snapshot, clears the deadline, saves the
     /// snapshot, releases the claim, and returns `Ok(Some(InProgress))`.
     /// Otherwise returns `Ok(None)` (caller falls through to existing error handling).
     async fn try_schedule_retry(
         &self,
-        continuation: &WorkflowContinuation,
+        task_index: &sayiir_core::TaskIndex,
         available_task: &AvailableTask,
         snapshot: &mut WorkflowSnapshot,
         error_msg: &str,
     ) -> Result<Option<WorkflowStatus>, crate::error::RuntimeError> {
-        let Some(policy) = continuation.get_task_retry_policy(&available_task.task_id) else {
+        let Some(policy) = task_index.retry_policy(&available_task.task_id) else {
             return Ok(None);
         };
 
@@ -1223,7 +1227,7 @@ where
             ExecutionOutcome::Timeout(err) => {
                 if let Ok(Some(status)) = self
                     .try_schedule_retry(
-                        workflow.continuation(),
+                        workflow.task_index(),
                         available_task,
                         snapshot,
                         &err.to_string(),
@@ -1249,12 +1253,7 @@ where
                 let panic_msg = extract_panic_message(&panic_payload);
 
                 if let Ok(Some(status)) = self
-                    .try_schedule_retry(
-                        workflow.continuation(),
-                        available_task,
-                        snapshot,
-                        &panic_msg,
-                    )
+                    .try_schedule_retry(workflow.task_index(), available_task, snapshot, &panic_msg)
                     .await
                 {
                     claim.release_quietly().await;
@@ -1273,7 +1272,7 @@ where
             ExecutionOutcome::TaskError(e) => {
                 if let Ok(Some(status)) = self
                     .try_schedule_retry(
-                        workflow.continuation(),
+                        workflow.task_index(),
                         available_task,
                         snapshot,
                         &e.to_string(),

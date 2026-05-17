@@ -424,9 +424,20 @@ where
         else {
             return Ok(None);
         };
-        // hint.task_id is the wire-format String (hex of the TaskId).
-        let Some(hint_task_id) = sayiir_core::TaskId::from_hex(&hint.task_id).ok() else {
-            return Ok(None);
+        // hint.task_id is the wire-format String (hex of the TaskId), coming
+        // from a NOTIFY payload — treat malformed hex as a stale/garbage hint
+        // (skip + log) rather than a hard error: the timer-tick fallback will
+        // pick up the task on the next sweep.
+        let hint_task_id = match sayiir_core::TaskId::from_hex(&hint.task_id) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    hint_task_id = %hint.task_id,
+                    error = %e,
+                    "ignoring NOTIFY hint with invalid task_id hex",
+                );
+                return Ok(None);
+            }
         };
         if *task_id != hint_task_id || completed_tasks.contains_key(task_id) {
             return Ok(None);

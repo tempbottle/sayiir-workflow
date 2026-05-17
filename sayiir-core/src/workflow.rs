@@ -486,7 +486,7 @@ impl WorkflowContinuation {
         crate::snapshot::TaskHint::new(
             self.first_task_id(),
             self.first_task_priority(),
-            self.first_task_tags(),
+            &self.first_task_tags(),
         )
     }
 
@@ -1616,11 +1616,17 @@ impl<C, Input, M> Workflow<C, Input, M> {
         &self.continuation
     }
 
-    /// Get a reference to the `TaskId → metadata` index. Built once at build
-    /// time; cheap to clone (it's behind an `Arc`).
+    /// Borrow the `TaskId → metadata` index. Built once at build time.
     #[must_use]
-    pub fn task_index(&self) -> &Arc<crate::task_index::TaskIndex> {
+    pub fn task_index(&self) -> &crate::task_index::TaskIndex {
         &self.task_index
+    }
+
+    /// Clone the shared `Arc<TaskIndex>` — for callers (FFI / runtime) that
+    /// want to hold onto the index alongside the continuation.
+    #[must_use]
+    pub fn task_index_arc(&self) -> Arc<crate::task_index::TaskIndex> {
+        Arc::clone(&self.task_index)
     }
 
     /// Get a reference to the metadata attached to this workflow.
