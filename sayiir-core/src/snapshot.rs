@@ -15,27 +15,10 @@ use crate::task::RetryPolicy;
 ///
 /// Carried through `ParkReason` and `prepare_run` so that persistence-layer
 /// advancement inherits priority and tags without re-reading the continuation.
-///
-/// Both forms of the id are kept here: [`id`] is the human-readable name
-/// (used to populate [`ExecutionPosition::AtTask::task_id`] for snapshot
-/// readability), and [`task_id_hash`] is the SHA-256 [`TaskId`] used for
-/// fast O(1) comparison and `HashMap` probes — precomputed once at
-/// hint-build time so downstream consumers don't pay the hash cost on every
-/// check.
-///
-/// [`id`]: TaskHint::id
-/// [`task_id_hash`]: TaskHint::task_id_hash
-/// [`TaskId`]: crate::TaskId
 #[derive(Debug, Clone, Default)]
 pub struct TaskHint {
-    /// The task identifier (human-readable name).
-    pub id: String,
-    /// Precomputed [`crate::TaskId`] = SHA-256 of `id`.
-    ///
-    /// Built once when the hint is created so callers that need a fast id
-    /// comparison (e.g. claim matching, dispatch routing) can avoid
-    /// re-hashing the name on every call.
-    pub task_id_hash: crate::TaskId,
+    /// SHA-256 hash of the task's user-facing name.
+    pub id: crate::TaskId,
     /// Optional execution priority (lower = higher priority).
     pub priority: Option<u8>,
     /// Affinity tags for worker routing.
@@ -43,14 +26,11 @@ pub struct TaskHint {
 }
 
 impl TaskHint {
-    /// Build a hint from a task name, precomputing the [`crate::TaskId`].
+    /// Build a hint by hashing the task name.
     #[must_use]
-    pub fn new(id: impl Into<String>, priority: Option<u8>, tags: Vec<String>) -> Self {
-        let id = id.into();
-        let task_id_hash = crate::TaskId::from(id.as_str());
+    pub fn new(name: &str, priority: Option<u8>, tags: Vec<String>) -> Self {
         Self {
-            id,
-            task_id_hash,
+            id: crate::TaskId::from(name),
             priority,
             tags,
         }
@@ -73,7 +53,7 @@ impl TaskHint {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskDeadline {
     /// The task this deadline applies to.
-    pub task_id: String,
+    pub task_id: crate::TaskId,
     /// Absolute wall-clock deadline.
     pub deadline: DateTime<Utc>,
     /// Original configured timeout in milliseconds (for error reporting).
@@ -110,15 +90,15 @@ pub enum ExecutionPosition {
     /// The task ID indicates which task should be executed next.
     AtTask {
         /// ID of the task to execute next.
-        task_id: String,
+        task_id: crate::TaskId,
     },
     /// Execution is parked at a fork because one or more branches hit a delay.
     /// Completed branches have their results cached; delayed branches will
     /// re-execute (skipping cached sub-tasks) once `wake_at` passes.
     AtFork {
         /// Fork node ID.
-        fork_id: String,
-        /// Branch results collected so far.
+        fork_id: crate::TaskId,
+        /// Branch results collected so far. Keyed by branch label, not task id.
         completed_branches: HashMap<String, TaskResult>,
         /// Earliest time the fork can resume.
         wake_at: DateTime<Utc>,
@@ -126,40 +106,40 @@ pub enum ExecutionPosition {
     /// Execution is at a join task, waiting for all branches.
     AtJoin {
         /// Join task ID.
-        join_id: String,
-        /// Branch results collected so far.
+        join_id: crate::TaskId,
+        /// Branch results collected so far. Keyed by branch label, not task id.
         completed_branches: HashMap<String, TaskResult>,
     },
     /// Execution is parked at a delay node, waiting for `wake_at`.
     AtDelay {
         /// Delay node ID.
-        delay_id: String,
+        delay_id: crate::TaskId,
         /// When the delay was entered.
         entered_at: DateTime<Utc>,
         /// When the delay expires.
         wake_at: DateTime<Utc>,
         /// First task ID after the delay (so backends can advance without traversing the workflow tree).
-        next_task_id: Option<String>,
+        next_task_id: Option<crate::TaskId>,
     },
     /// Execution is parked waiting for an external signal.
     AtSignal {
         /// Signal node ID.
-        signal_id: String,
-        /// Name of the signal being waited on.
+        signal_id: crate::TaskId,
+        /// Name of the signal being waited on (user-defined string).
         signal_name: String,
         /// Optional timeout deadline. `None` means wait indefinitely.
         wake_at: Option<DateTime<Utc>>,
         /// First task ID after the signal (so backends can advance without traversing the workflow tree).
-        next_task_id: Option<String>,
+        next_task_id: Option<crate::TaskId>,
     },
     /// Execution is inside a loop at a given iteration.
     InLoop {
         /// Loop node ID.
-        loop_id: String,
+        loop_id: crate::TaskId,
         /// Current iteration (0-based).
         iteration: u32,
         /// Next task to execute within the loop body (for resume positioning).
-        next_task_id: Option<String>,
+        next_task_id: Option<crate::TaskId>,
     },
 }
 
@@ -167,7 +147,7 @@ pub enum ExecutionPosition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskResult {
     /// The task ID that produced this result.
-    pub task_id: String,
+    pub task_id: crate::TaskId,
     /// The serialized output of the task.
     pub output: Bytes,
 }
@@ -312,10 +292,10 @@ pub enum WorkflowSnapshotState {
         /// Current execution position.
         position: ExecutionPosition,
         /// Results from completed tasks (by task ID).
-        completed_tasks: HashMap<String, TaskResult>,
+        completed_tasks: HashMap<crate::TaskId, TaskResult>,
         /// ID of the last completed task (for deterministic resume).
         /// This is needed because `HashMap` iteration order is not guaranteed.
-        last_completed_task_id: Option<String>,
+        last_completed_task_id: Option<crate::TaskId>,
     },
     /// Workflow completed successfully.
     Completed {
@@ -336,9 +316,9 @@ pub enum WorkflowSnapshotState {
         /// Timestamp when the workflow was cancelled.
         cancelled_at: DateTime<Utc>,
         /// Results from tasks that completed before cancellation.
-        completed_tasks: HashMap<String, TaskResult>,
+        completed_tasks: HashMap<crate::TaskId, TaskResult>,
         /// The task ID that was interrupted (if any).
-        interrupted_at_task: Option<String>,
+        interrupted_at_task: Option<crate::TaskId>,
     },
     /// Workflow was paused. Unlike Cancelled, this preserves position and
     /// `last_completed_task_id` so that the workflow can resume from exactly
@@ -351,11 +331,11 @@ pub enum WorkflowSnapshotState {
         /// Timestamp when the workflow was paused.
         paused_at: DateTime<Utc>,
         /// Results from tasks that completed before pausing.
-        completed_tasks: HashMap<String, TaskResult>,
+        completed_tasks: HashMap<crate::TaskId, TaskResult>,
         /// Execution position at the time of pause (for exact resume).
         position: ExecutionPosition,
         /// ID of the last completed task (for deterministic resume).
-        last_completed_task_id: Option<String>,
+        last_completed_task_id: Option<crate::TaskId>,
     },
 }
 
@@ -442,7 +422,7 @@ impl WorkflowSnapshotState {
                 ..
             } => WorkflowStatus::Waiting {
                 wake_at: *wake_at,
-                delay_id: delay_id.clone(),
+                delay_id: *delay_id,
             },
             Self::InProgress {
                 position:
@@ -452,7 +432,7 @@ impl WorkflowSnapshotState {
                 ..
             } => WorkflowStatus::Waiting {
                 wake_at: *wake_at,
-                delay_id: fork_id.clone(),
+                delay_id: *fork_id,
             },
             Self::InProgress {
                 position:
@@ -464,7 +444,7 @@ impl WorkflowSnapshotState {
                     },
                 ..
             } => WorkflowStatus::AwaitingSignal {
-                signal_id: signal_id.clone(),
+                signal_id: *signal_id,
                 signal_name: signal_name.clone(),
                 wake_at: *wake_at,
             },
@@ -543,10 +523,10 @@ pub struct WorkflowSnapshot {
     pub task_deadline: Option<TaskDeadline>,
     /// Retry state for tasks that have failed and are pending retry.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub task_retries: HashMap<String, TaskRetryState>,
+    pub task_retries: HashMap<crate::TaskId, TaskRetryState>,
     /// Current iteration counts for active loops (keyed by loop ID).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub loop_iterations: HashMap<String, u32>,
+    pub loop_iterations: HashMap<crate::TaskId, u32>,
     /// Execution priority of the current task (1–5).
     ///
     /// Set from the continuation tree when advancing to a new task. Used by
@@ -637,7 +617,7 @@ impl WorkflowSnapshot {
     }
 
     /// Get the result of a completed task, if available.
-    pub fn get_task_result(&self, task_id: &str) -> Option<&TaskResult> {
+    pub fn get_task_result(&self, task_id: &crate::TaskId) -> Option<&TaskResult> {
         match &self.state {
             WorkflowSnapshotState::InProgress {
                 completed_tasks, ..
@@ -653,7 +633,7 @@ impl WorkflowSnapshot {
     }
 
     /// Get the result of a completed task as Bytes, if available.
-    pub fn get_task_result_bytes(&self, task_id: &str) -> Option<Bytes> {
+    pub fn get_task_result_bytes(&self, task_id: &crate::TaskId) -> Option<Bytes> {
         self.get_task_result(task_id).map(|r| r.output.clone())
     }
 
@@ -663,7 +643,7 @@ impl WorkflowSnapshot {
     /// retain `completed_tasks`), and `None` for `Completed` and `Failed` states
     /// (where task results have been discarded).
     #[must_use]
-    pub fn get_all_task_results(&self) -> Option<&HashMap<String, TaskResult>> {
+    pub fn get_all_task_results(&self) -> Option<&HashMap<crate::TaskId, TaskResult>> {
         match &self.state {
             WorkflowSnapshotState::InProgress {
                 completed_tasks, ..
@@ -679,20 +659,14 @@ impl WorkflowSnapshot {
     }
 
     /// Mark a task as completed and store its result.
-    pub fn mark_task_completed(&mut self, task_id: String, output: Bytes) {
+    pub fn mark_task_completed(&mut self, task_id: crate::TaskId, output: Bytes) {
         if let WorkflowSnapshotState::InProgress {
             completed_tasks,
             last_completed_task_id,
             ..
         } = &mut self.state
         {
-            completed_tasks.insert(
-                task_id.clone(),
-                TaskResult {
-                    task_id: task_id.clone(),
-                    output,
-                },
-            );
+            completed_tasks.insert(task_id, TaskResult { task_id, output });
             *last_completed_task_id = Some(task_id);
             self.updated_at = Self::current_timestamp();
         }
@@ -706,8 +680,7 @@ impl WorkflowSnapshot {
                 last_completed_task_id,
                 ..
             } => last_completed_task_id
-                .as_ref()
-                .and_then(|id| completed_tasks.get(id))
+                .and_then(|id| completed_tasks.get(&id))
                 .map(|r| r.output.clone()),
             _ => None,
         }
@@ -733,7 +706,7 @@ impl WorkflowSnapshot {
     ///
     /// Computes `deadline = Utc::now() + timeout` and stores it in the snapshot.
     #[allow(clippy::cast_possible_truncation)]
-    pub fn set_task_deadline(&mut self, task_id: String, timeout: std::time::Duration) {
+    pub fn set_task_deadline(&mut self, task_id: crate::TaskId, timeout: std::time::Duration) {
         let deadline =
             Utc::now() + chrono::Duration::from_std(timeout).unwrap_or(chrono::Duration::MAX);
         self.task_deadline = Some(TaskDeadline {
@@ -764,13 +737,10 @@ impl WorkflowSnapshot {
     /// If the persisted deadline has expired, return `(task_id, timeout)`.
     ///
     /// Returns `None` if no deadline is set or it hasn't expired yet.
-    pub fn expired_task_deadline(&self) -> Option<(&str, std::time::Duration)> {
+    pub fn expired_task_deadline(&self) -> Option<(crate::TaskId, std::time::Duration)> {
         self.task_deadline.as_ref().and_then(|d| {
             if Utc::now() >= d.deadline {
-                Some((
-                    d.task_id.as_str(),
-                    std::time::Duration::from_millis(d.timeout_ms),
-                ))
+                Some((d.task_id, std::time::Duration::from_millis(d.timeout_ms)))
             } else {
                 None
             }
@@ -787,14 +757,14 @@ impl WorkflowSnapshot {
     #[allow(clippy::cast_possible_truncation)]
     pub fn record_retry(
         &mut self,
-        task_id: &str,
+        task_id: crate::TaskId,
         policy: &RetryPolicy,
         error: &str,
         worker_id: Option<&str>,
     ) -> DateTime<Utc> {
         let entry = self
             .task_retries
-            .entry(task_id.to_string())
+            .entry(task_id)
             .or_insert_with(|| TaskRetryState {
                 attempts: 0,
                 policy: policy.clone(),
@@ -821,12 +791,12 @@ impl WorkflowSnapshot {
 
     /// Get the retry state for a task, if any.
     #[must_use]
-    pub fn get_retry_state(&self, task_id: &str) -> Option<&TaskRetryState> {
+    pub fn get_retry_state(&self, task_id: &crate::TaskId) -> Option<&TaskRetryState> {
         self.task_retries.get(task_id)
     }
 
     /// Clear retry state for a task (e.g. on success).
-    pub fn clear_retry_state(&mut self, task_id: &str) {
+    pub fn clear_retry_state(&mut self, task_id: &crate::TaskId) {
         self.task_retries.remove(task_id);
     }
 
@@ -834,7 +804,7 @@ impl WorkflowSnapshot {
     ///
     /// Returns `true` if retry state exists and `attempts >= policy.max_retries`.
     #[must_use]
-    pub fn retries_exhausted(&self, task_id: &str) -> bool {
+    pub fn retries_exhausted(&self, task_id: &crate::TaskId) -> bool {
         self.task_retries
             .get(task_id)
             .is_some_and(|rs| rs.attempts >= rs.policy.max_retries)
@@ -842,18 +812,18 @@ impl WorkflowSnapshot {
 
     /// Get the current iteration for a loop, defaulting to 0.
     #[must_use]
-    pub fn loop_iteration(&self, loop_id: &str) -> u32 {
+    pub fn loop_iteration(&self, loop_id: &crate::TaskId) -> u32 {
         self.loop_iterations.get(loop_id).copied().unwrap_or(0)
     }
 
     /// Set the current iteration for a loop.
-    pub fn set_loop_iteration(&mut self, loop_id: &str, iteration: u32) {
-        self.loop_iterations.insert(loop_id.to_string(), iteration);
+    pub fn set_loop_iteration(&mut self, loop_id: crate::TaskId, iteration: u32) {
+        self.loop_iterations.insert(loop_id, iteration);
         self.updated_at = Self::current_timestamp();
     }
 
     /// Clear loop iteration tracking (called when a loop completes).
-    pub fn clear_loop_iteration(&mut self, loop_id: &str) {
+    pub fn clear_loop_iteration(&mut self, loop_id: &crate::TaskId) {
         self.loop_iterations.remove(loop_id);
     }
 
@@ -861,7 +831,7 @@ impl WorkflowSnapshot {
     ///
     /// Used by loop execution to clear body task results between iterations
     /// so the body re-executes on the next iteration.
-    pub fn remove_task_result(&mut self, task_id: &str) {
+    pub fn remove_task_result(&mut self, task_id: &crate::TaskId) {
         if let WorkflowSnapshotState::InProgress {
             completed_tasks, ..
         } = &mut self.state
@@ -908,7 +878,7 @@ impl WorkflowSnapshot {
                 paused_at: Utc::now(),
                 completed_tasks: completed_tasks.clone(),
                 position: position.clone(),
-                last_completed_task_id: last_completed_task_id.clone(),
+                last_completed_task_id: *last_completed_task_id,
             };
             self.updated_at = Self::current_timestamp();
         }
@@ -927,7 +897,7 @@ impl WorkflowSnapshot {
             self.state = WorkflowSnapshotState::InProgress {
                 position: position.clone(),
                 completed_tasks: completed_tasks.clone(),
-                last_completed_task_id: last_completed_task_id.clone(),
+                last_completed_task_id: *last_completed_task_id,
             };
             self.updated_at = Self::current_timestamp();
         }
@@ -940,7 +910,7 @@ impl WorkflowSnapshot {
         &mut self,
         reason: Option<String>,
         cancelled_by: Option<String>,
-        interrupted_at_task: Option<String>,
+        interrupted_at_task: Option<crate::TaskId>,
     ) {
         let completed_tasks = match &self.state {
             WorkflowSnapshotState::InProgress {
@@ -976,7 +946,7 @@ impl WorkflowSnapshot {
     ///
     /// Used as a soft bias to prefer a different worker on retry.
     #[must_use]
-    pub fn has_failed_on_worker(&self, task_id: &str, worker_id: &str) -> bool {
+    pub fn has_failed_on_worker(&self, task_id: &crate::TaskId, worker_id: &str) -> bool {
         self.task_retries
             .get(task_id)
             .and_then(|rs| rs.last_failed_worker.as_deref())
@@ -987,12 +957,12 @@ impl WorkflowSnapshot {
 
     /// The current task ID, if the workflow is at a task position.
     #[must_use]
-    pub fn current_task_id(&self) -> Option<&str> {
+    pub fn current_task_id(&self) -> Option<crate::TaskId> {
         match &self.state {
             WorkflowSnapshotState::InProgress {
                 position: ExecutionPosition::AtTask { task_id },
                 ..
-            } => Some(task_id.as_str()),
+            } => Some(*task_id),
             _ => None,
         }
     }
@@ -1131,13 +1101,13 @@ mod tests {
             (ExecutionPosition::NotStarted, "NotStarted"),
             (
                 ExecutionPosition::AtTask {
-                    task_id: "t".into(),
+                    task_id: crate::TaskId::from("t"),
                 },
                 "AtTask",
             ),
             (
                 ExecutionPosition::AtFork {
-                    fork_id: "f".into(),
+                    fork_id: crate::TaskId::from("f"),
                     completed_branches: HashMap::new(),
                     wake_at: chrono::Utc::now(),
                 },
@@ -1145,14 +1115,14 @@ mod tests {
             ),
             (
                 ExecutionPosition::AtJoin {
-                    join_id: "j".into(),
+                    join_id: crate::TaskId::from("j"),
                     completed_branches: HashMap::new(),
                 },
                 "AtJoin",
             ),
             (
                 ExecutionPosition::AtDelay {
-                    delay_id: "d".into(),
+                    delay_id: crate::TaskId::from("d"),
                     entered_at: chrono::Utc::now(),
                     wake_at: chrono::Utc::now(),
                     next_task_id: None,
@@ -1161,7 +1131,7 @@ mod tests {
             ),
             (
                 ExecutionPosition::AtSignal {
-                    signal_id: "s".into(),
+                    signal_id: crate::TaskId::from("s"),
                     signal_name: "n".into(),
                     wake_at: None,
                     next_task_id: None,
@@ -1170,7 +1140,7 @@ mod tests {
             ),
             (
                 ExecutionPosition::InLoop {
-                    loop_id: "l".into(),
+                    loop_id: crate::TaskId::from("l"),
                     iteration: 0,
                     next_task_id: None,
                 },
@@ -1196,12 +1166,12 @@ mod tests {
     #[test]
     fn test_mark_task_completed_and_retrieve() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        snapshot.mark_task_completed("task-1".into(), Bytes::from("output1"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("output1"));
 
-        let result = snapshot.get_task_result("task-1");
+        let result = snapshot.get_task_result(&crate::TaskId::from("task-1"));
         assert!(result.is_some());
         assert_eq!(result.unwrap().output, Bytes::from("output1"));
-        assert_eq!(result.unwrap().task_id, "task-1");
+        assert_eq!(result.unwrap().task_id, crate::TaskId::from("task-1"));
     }
 
     #[test]
@@ -1209,22 +1179,26 @@ mod tests {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         assert!(snapshot.get_last_task_output().is_none());
 
-        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
         assert_eq!(snapshot.get_last_task_output(), Some(Bytes::from("out1")));
 
-        snapshot.mark_task_completed("task-2".into(), Bytes::from("out2"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-2"), Bytes::from("out2"));
         assert_eq!(snapshot.get_last_task_output(), Some(Bytes::from("out2")));
     }
 
     #[test]
     fn test_get_task_result_bytes() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        snapshot.mark_task_completed("task-1".into(), Bytes::from("data"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("data"));
         assert_eq!(
-            snapshot.get_task_result_bytes("task-1"),
+            snapshot.get_task_result_bytes(&crate::TaskId::from("task-1")),
             Some(Bytes::from("data"))
         );
-        assert!(snapshot.get_task_result_bytes("nonexistent").is_none());
+        assert!(
+            snapshot
+                .get_task_result_bytes(&crate::TaskId::from("nonexistent"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -1250,7 +1224,7 @@ mod tests {
     #[test]
     fn test_mark_cancelled_preserves_completed_tasks() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        snapshot.mark_task_completed("task-1".into(), Bytes::from("output1"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("output1"));
         snapshot.mark_cancelled(
             Some("user request".into()),
             Some("admin".into()),
@@ -1260,7 +1234,11 @@ mod tests {
         assert!(snapshot.state.is_cancelled());
         assert!(snapshot.state.is_terminal());
         // Completed tasks should be preserved in cancelled state
-        assert!(snapshot.get_task_result("task-1").is_some());
+        assert!(
+            snapshot
+                .get_task_result(&crate::TaskId::from("task-1"))
+                .is_some()
+        );
     }
 
     #[test]
@@ -1280,11 +1258,13 @@ mod tests {
     fn test_update_position() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         snapshot.update_position(ExecutionPosition::AtTask {
-            task_id: "task-1".into(),
+            task_id: crate::TaskId::from("task-1"),
         });
         match &snapshot.state {
             WorkflowSnapshotState::InProgress { position, .. } => match position {
-                ExecutionPosition::AtTask { task_id } => assert_eq!(task_id, "task-1"),
+                ExecutionPosition::AtTask { task_id } => {
+                    assert_eq!(*task_id, crate::TaskId::from("task-1"));
+                }
                 _ => panic!("Expected AtTask"),
             },
             _ => panic!("Expected InProgress"),
@@ -1296,7 +1276,7 @@ mod tests {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         snapshot.mark_completed(Bytes::from("done"));
         snapshot.update_position(ExecutionPosition::AtTask {
-            task_id: "task-1".into(),
+            task_id: crate::TaskId::from("task-1"),
         });
         // Position update should be a no-op on completed state
         assert!(snapshot.state.is_completed());
@@ -1306,7 +1286,7 @@ mod tests {
     fn test_mark_task_completed_noop_on_terminal() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         snapshot.mark_completed(Bytes::from("done"));
-        snapshot.mark_task_completed("task-1".into(), Bytes::from("output"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("output"));
         // Should not crash, just be a no-op
         assert!(snapshot.state.is_completed());
     }
@@ -1315,46 +1295,63 @@ mod tests {
     fn test_get_task_result_on_completed_state() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         snapshot.mark_completed(Bytes::from("done"));
-        assert!(snapshot.get_task_result("task-1").is_none());
+        assert!(
+            snapshot
+                .get_task_result(&crate::TaskId::from("task-1"))
+                .is_none()
+        );
     }
 
     #[test]
     fn test_get_task_result_on_failed_state() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         snapshot.mark_failed("err".into());
-        assert!(snapshot.get_task_result("task-1").is_none());
+        assert!(
+            snapshot
+                .get_task_result(&crate::TaskId::from("task-1"))
+                .is_none()
+        );
     }
 
     #[test]
     fn test_get_all_task_results_in_progress() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
-        snapshot.mark_task_completed("task-2".into(), Bytes::from("out2"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-2"), Bytes::from("out2"));
 
         let results = snapshot.get_all_task_results();
         assert!(results.is_some());
         let results = results.unwrap();
         assert_eq!(results.len(), 2);
-        assert_eq!(results["task-1"].output, Bytes::from("out1"));
-        assert_eq!(results["task-2"].output, Bytes::from("out2"));
+        assert_eq!(
+            results[&crate::TaskId::from("task-1")].output,
+            Bytes::from("out1")
+        );
+        assert_eq!(
+            results[&crate::TaskId::from("task-2")].output,
+            Bytes::from("out2")
+        );
     }
 
     #[test]
     fn test_get_all_task_results_cancelled() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
         snapshot.mark_cancelled(Some("reason".into()), None, Some("task-2".into()));
 
         let results = snapshot.get_all_task_results();
         assert!(results.is_some());
         assert_eq!(results.unwrap().len(), 1);
-        assert_eq!(results.unwrap()["task-1"].output, Bytes::from("out1"));
+        assert_eq!(
+            results.unwrap()[&crate::TaskId::from("task-1")].output,
+            Bytes::from("out1")
+        );
     }
 
     #[test]
     fn test_get_all_task_results_paused() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
         let request = PauseRequest::new(Some("maintenance".into()), None);
         snapshot.mark_paused(&request);
 
@@ -1366,7 +1363,7 @@ mod tests {
     #[test]
     fn test_get_all_task_results_completed() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
         snapshot.mark_completed(Bytes::from("final"));
         assert!(snapshot.get_all_task_results().is_none());
     }
@@ -1374,7 +1371,7 @@ mod tests {
     #[test]
     fn test_get_all_task_results_failed() {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
         snapshot.mark_failed("error".into());
         assert!(snapshot.get_all_task_results().is_none());
     }
@@ -1517,14 +1514,18 @@ mod proptests {
             proptest::collection::vec(any::<u8>(), 0..32),
         )
             .prop_map(|(task_id, data)| TaskResult {
-                task_id,
+                task_id: crate::TaskId::from(task_id.as_str()),
                 output: Bytes::from(data),
             })
     }
 
-    /// Strategy for arbitrary `HashMap<String, TaskResult>`.
-    fn arb_completed_tasks() -> impl Strategy<Value = HashMap<String, TaskResult>> {
-        proptest::collection::hash_map("[a-z0-9]{1,8}", arb_task_result(), 0..4)
+    /// Strategy for arbitrary `HashMap<TaskId, TaskResult>`.
+    fn arb_completed_tasks() -> impl Strategy<Value = HashMap<crate::TaskId, TaskResult>> {
+        proptest::collection::hash_map(
+            "[a-z0-9]{1,8}".prop_map(|s| crate::TaskId::from(s.as_str())),
+            arb_task_result(),
+            0..4,
+        )
     }
 
     /// Strategy for arbitrary `WorkflowSnapshotState`.
@@ -1551,7 +1552,7 @@ mod proptests {
                 prop::option::of("[a-zA-Z0-9 ]{0,32}"),
                 prop::option::of("[a-zA-Z0-9 ]{0,32}"),
                 arb_completed_tasks(),
-                prop::option::of("[a-z0-9]{1,8}"),
+                prop::option::of("[a-z0-9]{1,8}".prop_map(|s| crate::TaskId::from(s.as_str()))),
             )
                 .prop_map(
                     |(reason, cancelled_by, completed_tasks, interrupted_at_task)| {
@@ -1569,7 +1570,7 @@ mod proptests {
                 prop::option::of("[a-zA-Z0-9 ]{0,32}"),
                 prop::option::of("[a-zA-Z0-9 ]{0,32}"),
                 arb_completed_tasks(),
-                prop::option::of("[a-z0-9]{1,8}"),
+                prop::option::of("[a-z0-9]{1,8}".prop_map(|s| crate::TaskId::from(s.as_str()))),
             )
                 .prop_map(
                     |(reason, paused_by, completed_tasks, last_completed_task_id)| {

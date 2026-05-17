@@ -89,6 +89,6 @@ pub mod task;
 pub mod task_claim;
 pub mod workflow;
 
-pub use hash32::{DefinitionHash, Hash32, TaskId};
+pub use hash32::{DefinitionHash, Hash32, TaskId, WorkflowId};
 pub use loop_result::LoopResult;
 pub use workflow::MaxIterationsPolicy;

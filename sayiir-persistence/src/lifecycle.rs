@@ -151,7 +151,7 @@ where
     let mut snapshot =
         WorkflowSnapshot::with_initial_input(instance_id, definition_hash, input_bytes);
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: first_task.id.clone(),
+        task_id: first_task.id,
     });
     snapshot.set_task_hint(&first_task);
     backend.save_snapshot(&snapshot).await?;

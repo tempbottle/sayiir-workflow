@@ -1248,9 +1248,10 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
             self.registry.set_metadata(id, metadata);
             // Also update the timeout, retry policy, and version on the continuation node
             // so they're available for direct execution (not just the serializable roundtrip path).
-            self.continuation.set_task_timeout(id, timeout);
-            self.continuation.set_task_retry_policy(id, retry_policy);
-            self.continuation.set_task_version(id, version);
+            let tid = crate::TaskId::from(id);
+            self.continuation.set_task_timeout(&tid, timeout);
+            self.continuation.set_task_retry_policy(&tid, retry_policy);
+            self.continuation.set_task_version(&tid, version);
         }
         self
     }

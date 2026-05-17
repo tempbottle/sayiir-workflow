@@ -97,7 +97,11 @@ async fn resume_after_simulated_crash() {
     // Verify step1 result was checkpointed (snapshot is still InProgress)
     let snapshot = runner1.backend().load_snapshot("inst-1").await.unwrap();
     assert!(snapshot.state.is_in_progress());
-    assert!(snapshot.get_task_result("step1").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("step1"))
+            .is_some()
+    );
 
     // "Crash" — drop runner1, build new backend to same DB
     drop(runner1);
@@ -139,7 +143,7 @@ async fn cancel_and_resume() {
         input_bytes,
     );
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
-        task_id: "step1".into(),
+        task_id: sayiir_core::TaskId::from("step1"),
     });
     runner.backend().save_snapshot(&snapshot).await.unwrap();
 
@@ -187,7 +191,7 @@ async fn pause_unpause_resume() {
         input_bytes,
     );
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
-        task_id: "step1".into(),
+        task_id: sayiir_core::TaskId::from("step1"),
     });
     runner.backend().save_snapshot(&snapshot).await.unwrap();
 
@@ -235,14 +239,18 @@ async fn delay_returns_waiting_then_completes() {
     let status = runner.run(&workflow, "inst-1", 10u32).await.unwrap();
     match &status {
         WorkflowStatus::Waiting { delay_id, .. } => {
-            assert_eq!(delay_id, "short_wait");
+            assert_eq!(*delay_id, sayiir_core::TaskId::from("short_wait"));
         }
         other => panic!("Expected Waiting, got {other:?}"),
     }
 
     // step1 should be completed
     let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
-    assert!(snapshot.get_task_result("step1").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("step1"))
+            .is_some()
+    );
 
     // Wait for delay to expire
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -449,7 +457,11 @@ async fn signal_parks_then_resumes_with_payload() {
 
     // Verify step1 completed
     let snapshot = runner.backend().load_snapshot("inst-sig-1").await.unwrap();
-    assert!(snapshot.get_task_result("step1").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("step1"))
+            .is_some()
+    );
 
     // Send the signal with a payload
     let payload = Arc::new(JsonCodec).encode(&42u32).unwrap();
@@ -535,7 +547,7 @@ async fn definition_hash_mismatch_on_resume() {
         input_bytes,
     );
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
-        task_id: "step1".into(),
+        task_id: sayiir_core::TaskId::from("step1"),
     });
     runner.backend().save_snapshot(&snapshot).await.unwrap();
 
@@ -584,7 +596,7 @@ async fn task_version_change_causes_hash_mismatch() {
         input_bytes,
     );
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
-        task_id: "process".into(),
+        task_id: sayiir_core::TaskId::from("process"),
     });
     runner.backend().save_snapshot(&snapshot).await.unwrap();
 
@@ -656,7 +668,7 @@ async fn task_version_none_vs_some_causes_hash_mismatch() {
         input_bytes,
     );
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
-        task_id: "process".into(),
+        task_id: sayiir_core::TaskId::from("process"),
     });
     runner.backend().save_snapshot(&snapshot).await.unwrap();
 

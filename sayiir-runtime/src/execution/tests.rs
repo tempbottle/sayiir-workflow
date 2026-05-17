@@ -464,7 +464,10 @@ async fn test_async_task_exceeds_timeout() {
     let result = execute_continuation_async(&cont, input, &JsonCodec).await;
     let err = result.unwrap_err();
     assert!(err.to_string().contains("timed out"));
-    assert!(err.to_string().contains("slow"));
+    assert!(
+        err.to_string()
+            .contains(&sayiir_core::TaskId::from("slow").to_hex())
+    );
 }
 
 #[tokio::test]
@@ -513,7 +516,7 @@ async fn test_checkpointing_task_timeout() {
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: "slow".into(),
+        task_id: sayiir_core::TaskId::from("slow"),
     });
     backend.save_snapshot(&snapshot).await.unwrap();
 
@@ -534,7 +537,10 @@ async fn test_checkpointing_task_timeout() {
 
     let err = result.unwrap_err();
     assert!(err.to_string().contains("timed out"));
-    assert!(err.to_string().contains("slow"));
+    assert!(
+        err.to_string()
+            .contains(&sayiir_core::TaskId::from("slow").to_hex())
+    );
 }
 
 #[tokio::test]
@@ -557,9 +563,9 @@ async fn test_checkpointing_skipped_tasks_bypass_timeout() {
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), encode_u32(1));
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: "cached".into(),
+        task_id: sayiir_core::TaskId::from("cached"),
     });
-    snapshot.mark_task_completed("cached".to_string(), output.clone());
+    snapshot.mark_task_completed(sayiir_core::TaskId::from("cached"), output.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let never_called = |_id: &str, _input: Bytes| async move {
@@ -655,7 +661,10 @@ async fn test_prepare_resume_with_completed_tasks() {
         "hash-1".into(),
         Bytes::from("initial"),
     );
-    snapshot.mark_task_completed("task-1".into(), Bytes::from("task1_output"));
+    snapshot.mark_task_completed(
+        sayiir_core::TaskId::from("task-1"),
+        Bytes::from("task1_output"),
+    );
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
@@ -847,7 +856,11 @@ async fn test_checkpointing_single_task() {
     .unwrap();
 
     assert_eq!(decode_u32(&result), 6);
-    assert!(snapshot.get_task_result("add_one").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("add_one"))
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -886,8 +899,16 @@ async fn test_checkpointing_chain() {
     .unwrap();
 
     assert_eq!(decode_u32(&result), 22); // (10+1)*2
-    assert!(snapshot.get_task_result("add_one").is_some());
-    assert!(snapshot.get_task_result("double").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("add_one"))
+            .is_some()
+    );
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("double"))
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -898,7 +919,7 @@ async fn test_checkpointing_skips_completed_tasks() {
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
     // Pre-mark task as completed (simulates resume)
-    snapshot.mark_task_completed("add_one".into(), encode_u32(11));
+    snapshot.mark_task_completed(sayiir_core::TaskId::from("add_one"), encode_u32(11));
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let double = stub_node("double", None);
@@ -1060,7 +1081,10 @@ fn test_get_resume_input_with_completed_tasks() {
         "hash-1".into(),
         Bytes::from("initial"),
     );
-    snapshot.mark_task_completed("task-1".into(), Bytes::from("task1_out"));
+    snapshot.mark_task_completed(
+        sayiir_core::TaskId::from("task-1"),
+        Bytes::from("task1_out"),
+    );
     let input = get_resume_input(&snapshot).unwrap();
     assert_eq!(input, Bytes::from("task1_out"));
 }
@@ -1215,8 +1239,8 @@ async fn test_checkpointing_delay_returns_waiting() {
                 next_task_id,
                 ..
             } => {
-                assert_eq!(delay_id, "wait_1h");
-                assert_eq!(next_task_id.as_deref(), Some("process"));
+                assert_eq!(*delay_id, sayiir_core::TaskId::from("wait_1h"));
+                assert_eq!(next_task_id, &Some(sayiir_core::TaskId::from("process")));
             }
             other => panic!("Expected AtDelay, got {other:?}"),
         },
@@ -1224,7 +1248,9 @@ async fn test_checkpointing_delay_returns_waiting() {
     }
 
     // Pass-through value should be stored
-    let stored = snapshot.get_task_result("wait_1h").unwrap();
+    let stored = snapshot
+        .get_task_result(&sayiir_core::TaskId::from("wait_1h"))
+        .unwrap();
     assert_eq!(decode_u32(&stored.output), 42);
 }
 
@@ -1236,7 +1262,7 @@ async fn test_checkpointing_delay_skip_on_resume() {
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
     // Pre-mark delay as completed (simulates resume after delay expired)
-    snapshot.mark_task_completed("wait".into(), encode_u32(42));
+    snapshot.mark_task_completed(sayiir_core::TaskId::from("wait"), encode_u32(42));
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let process = stub_node("process", None);
@@ -1329,7 +1355,7 @@ async fn test_finalize_execution_waiting() {
     let now = chrono::Utc::now();
     let wake_at = now + chrono::Duration::hours(1);
     snapshot.update_position(ExecutionPosition::AtDelay {
-        delay_id: "my_delay".into(),
+        delay_id: sayiir_core::TaskId::from("my_delay"),
         entered_at: now,
         wake_at,
         next_task_id: Some("next_step".into()),
@@ -1350,7 +1376,7 @@ async fn test_finalize_execution_waiting() {
             delay_id,
         } => {
             assert_eq!(wa, wake_at);
-            assert_eq!(delay_id, "my_delay");
+            assert_eq!(delay_id, sayiir_core::TaskId::from("my_delay"));
         }
         _ => panic!("Expected Waiting status, got {status:?}"),
     }
@@ -1451,7 +1477,7 @@ async fn test_fork_with_delay_parks_at_fork() {
                 completed_branches,
                 wake_at,
             } => {
-                assert_eq!(fork_id, "fork");
+                assert_eq!(*fork_id, sayiir_core::TaskId::from("fork"));
                 // branch_a completed, branch_b is waiting
                 assert_eq!(completed_branches.len(), 1);
                 assert!(completed_branches.contains_key("branch_a"));
@@ -1463,11 +1489,23 @@ async fn test_fork_with_delay_parks_at_fork() {
     }
 
     // branch_a result should be cached
-    assert!(snapshot.get_task_result("branch_a").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("branch_a"))
+            .is_some()
+    );
     // before_delay task result should be cached (saved during branch execution)
-    assert!(snapshot.get_task_result("before_delay").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("before_delay"))
+            .is_some()
+    );
     // delay pass-through should be cached
-    assert!(snapshot.get_task_result("branch_delay").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("branch_delay"))
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -1947,7 +1985,7 @@ async fn test_checkpointing_retry_succeeds_after_failure() {
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: "flaky".into(),
+        task_id: sayiir_core::TaskId::from("flaky"),
     });
     backend.save_snapshot(&snapshot).await.unwrap();
 
@@ -1982,9 +2020,17 @@ async fn test_checkpointing_retry_succeeds_after_failure() {
     assert_eq!(decode_u32(&result), 11);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     // Task result is cached after success
-    assert!(snapshot.get_task_result("flaky").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("flaky"))
+            .is_some()
+    );
     // Retry state is cleared on success
-    assert!(snapshot.get_retry_state("flaky").is_none());
+    assert!(
+        snapshot
+            .get_retry_state(&sayiir_core::TaskId::from("flaky"))
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1995,7 +2041,7 @@ async fn test_checkpointing_retry_exhaustion() {
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: "always_fail".into(),
+        task_id: sayiir_core::TaskId::from("always_fail"),
     });
     backend.save_snapshot(&snapshot).await.unwrap();
 
@@ -2035,7 +2081,7 @@ async fn test_checkpointing_retry_state_persisted() {
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: "flaky".into(),
+        task_id: sayiir_core::TaskId::from("flaky"),
     });
     backend.save_snapshot(&snapshot).await.unwrap();
 
@@ -2072,11 +2118,19 @@ async fn test_checkpointing_retry_state_persisted() {
     assert_eq!(attempts.load(Ordering::SeqCst), 4);
 
     // Retry state should be cleared after success
-    assert!(snapshot.get_retry_state("flaky").is_none());
+    assert!(
+        snapshot
+            .get_retry_state(&sayiir_core::TaskId::from("flaky"))
+            .is_none()
+    );
 
     // Snapshot was saved to backend during retries — verify it has the task result
     let persisted = backend.load_snapshot("inst-1").await.unwrap();
-    assert!(persisted.get_task_result("flaky").is_some());
+    assert!(
+        persisted
+            .get_task_result(&sayiir_core::TaskId::from("flaky"))
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -2087,7 +2141,7 @@ async fn test_checkpointing_retry_with_timeout() {
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: "slow_then_fast".into(),
+        task_id: sayiir_core::TaskId::from("slow_then_fast"),
     });
     backend.save_snapshot(&snapshot).await.unwrap();
 
@@ -2178,8 +2232,16 @@ async fn test_checkpointing_retry_in_chain() {
     assert_eq!(decode_u32(&result), 12);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     // Both tasks should be cached
-    assert!(snapshot.get_task_result("flaky").is_some());
-    assert!(snapshot.get_task_result("double").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("flaky"))
+            .is_some()
+    );
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("double"))
+            .is_some()
+    );
 }
 
 // ========================================================================
@@ -2216,7 +2278,10 @@ async fn test_async_timeout_mid_chain_fails() {
     let result = execute_continuation_async(&fast_task, input, &JsonCodec).await;
     let err = result.unwrap_err();
     assert!(err.to_string().contains("timed out"));
-    assert!(err.to_string().contains("slow"));
+    assert!(
+        err.to_string()
+            .contains(&sayiir_core::TaskId::from("slow").to_hex())
+    );
 }
 
 #[tokio::test]
@@ -2320,9 +2385,16 @@ async fn test_checkpointing_timeout_mid_chain() {
 
     let err = result.unwrap_err();
     assert!(err.to_string().contains("timed out"));
-    assert!(err.to_string().contains("slow"));
+    assert!(
+        err.to_string()
+            .contains(&sayiir_core::TaskId::from("slow").to_hex())
+    );
     // First task should still be cached
-    assert!(snapshot.get_task_result("fast").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("fast"))
+            .is_some()
+    );
 }
 
 // ========================================================================
@@ -2372,7 +2444,7 @@ async fn test_checkpointing_delay_terminal_parks() {
                 next_task_id,
                 ..
             } => {
-                assert_eq!(delay_id, "final_wait");
+                assert_eq!(*delay_id, sayiir_core::TaskId::from("final_wait"));
                 assert!(next_task_id.is_none());
             }
             other => panic!("Expected AtDelay, got {other:?}"),
@@ -2381,7 +2453,9 @@ async fn test_checkpointing_delay_terminal_parks() {
     }
 
     // Pass-through value should be stored
-    let stored = snapshot.get_task_result("final_wait").unwrap();
+    let stored = snapshot
+        .get_task_result(&sayiir_core::TaskId::from("final_wait"))
+        .unwrap();
     assert_eq!(decode_u32(&stored.output), 42);
 }
 
@@ -2429,7 +2503,11 @@ async fn test_checkpointing_delay_after_task_chain() {
         result.unwrap_err(),
         RuntimeError::Workflow(WorkflowError::Waiting { .. })
     ));
-    assert!(snapshot.get_task_result("prepare").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("prepare"))
+            .is_some()
+    );
 
     // Wait for delay to expire
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -2878,7 +2956,10 @@ async fn test_checkpointing_loop_basic() {
 
     assert_eq!(decode_u32(&result), 0);
     // Loop iteration counter should be cleared after completion
-    assert_eq!(snapshot.loop_iteration("loop_0"), 0);
+    assert_eq!(
+        snapshot.loop_iteration(&sayiir_core::TaskId::from("loop_0")),
+        0
+    );
 }
 
 #[tokio::test]
@@ -2890,7 +2971,7 @@ async fn test_checkpointing_loop_resumes_from_iteration() {
         WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
 
     // Simulate: 2 iterations already completed. Next input should be 3 (5→4→3).
-    snapshot.set_loop_iteration("loop_0", 2);
+    snapshot.set_loop_iteration(sayiir_core::TaskId::from("loop_0"), 2);
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let call_count = Arc::new(AtomicU32::new(0));
@@ -2936,7 +3017,10 @@ async fn test_checkpointing_loop_resumes_from_iteration() {
     // Should have run 4 body executions (3→2→1→0 → Done)
     assert_eq!(call_count.load(Ordering::SeqCst), 4);
     // Loop iteration counter should be cleared after completion
-    assert_eq!(snapshot.loop_iteration("loop_0"), 0);
+    assert_eq!(
+        snapshot.loop_iteration(&sayiir_core::TaskId::from("loop_0")),
+        0
+    );
 }
 
 // ========================================================================
@@ -3324,7 +3408,7 @@ async fn test_checkpointing_loop_caches_result_on_exit() {
     assert_eq!(decode_u32(&result), 0);
 
     // The loop node itself should have a cached result in the snapshot.
-    let cached = snapshot.get_task_result("loop_0");
+    let cached = snapshot.get_task_result(&sayiir_core::TaskId::from("loop_0"));
     assert!(cached.is_some(), "loop node should be cached after exit");
     assert_eq!(decode_u32(&cached.unwrap().output), 0);
 }
@@ -3339,7 +3423,7 @@ async fn test_checkpointing_loop_short_circuits_when_cached() {
 
     // Pre-cache a result for the loop node.
     let cached_output = encode_u32(42);
-    snapshot.mark_task_completed("loop_0".into(), cached_output.clone());
+    snapshot.mark_task_completed(sayiir_core::TaskId::from("loop_0"), cached_output.clone());
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let body = stub_node("body", None);
@@ -3415,7 +3499,7 @@ async fn test_checkpointing_loop_exit_with_last() {
     assert_eq!(decode_u32(&result), 3);
 
     // Should be cached under the loop node.
-    let cached = snapshot.get_task_result("loop_0");
+    let cached = snapshot.get_task_result(&sayiir_core::TaskId::from("loop_0"));
     assert!(
         cached.is_some(),
         "loop node should be cached after exit_with_last"
@@ -3423,7 +3507,10 @@ async fn test_checkpointing_loop_exit_with_last() {
     assert_eq!(decode_u32(&cached.unwrap().output), 3);
 
     // Iteration counter should be cleared.
-    assert_eq!(snapshot.loop_iteration("loop_0"), 0);
+    assert_eq!(
+        snapshot.loop_iteration(&sayiir_core::TaskId::from("loop_0")),
+        0
+    );
 }
 
 #[tokio::test]
@@ -3478,7 +3565,11 @@ async fn test_checkpointing_loop_in_chain() {
     assert_eq!(decode_u32(&result), 20);
 
     // Loop node should be cached (even though there's a next step).
-    assert!(snapshot.get_task_result("loop_0").is_some());
+    assert!(
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("loop_0"))
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -3545,7 +3636,9 @@ async fn test_checkpointing_loop_inside_fork_branch() {
 
     // The loop node should be cached in the snapshot.
     assert!(
-        snapshot.get_task_result("loop_0").is_some(),
+        snapshot
+            .get_task_result(&sayiir_core::TaskId::from("loop_0"))
+            .is_some(),
         "loop inside fork branch should be cached"
     );
 }
@@ -3601,10 +3694,15 @@ async fn test_checkpointing_loop_iteration_counter_persisted() {
     // After completion, the backend's snapshot should also have the cached result.
     let persisted = backend.load_snapshot("inst-1").await.unwrap();
     assert!(
-        persisted.get_task_result("loop_0").is_some(),
+        persisted
+            .get_task_result(&sayiir_core::TaskId::from("loop_0"))
+            .is_some(),
         "loop result should be persisted to backend"
     );
-    assert_eq!(persisted.loop_iteration("loop_0"), 0);
+    assert_eq!(
+        persisted.loop_iteration(&sayiir_core::TaskId::from("loop_0")),
+        0
+    );
 }
 
 // ========================================================================

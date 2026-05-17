@@ -250,7 +250,10 @@ where
         instance_id: &str,
         task_id: &str,
     ) -> Result<Option<Bytes>, RuntimeError> {
-        Ok(self.backend.load_task_result(instance_id, task_id).await?)
+        Ok(self
+            .backend
+            .load_task_result(instance_id, &sayiir_core::TaskId::from(task_id))
+            .await?)
     }
 
     /// Type-safe variant of [`get_task_result`](Self::get_task_result) that

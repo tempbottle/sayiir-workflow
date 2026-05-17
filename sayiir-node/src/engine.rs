@@ -69,7 +69,7 @@ impl NapiWorkflowEngine {
                     workflow_id: Arc::clone(&workflow_id),
                     instance_id: Arc::clone(&workflow_id), // sync path: no instance_id
                     task_id: Arc::from(task_id),
-                    metadata: continuation.build_task_metadata(task_id),
+                    metadata: continuation.build_task_metadata(&sayiir_core::TaskId::from(task_id)),
                     workflow_metadata_json: workflow_metadata_json.clone(),
                 };
                 with_thread_local_task_context(task_ctx, || {

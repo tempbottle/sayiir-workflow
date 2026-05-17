@@ -29,7 +29,7 @@ where
     async fn load_task_result(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
     ) -> Result<Option<bytes::Bytes>, BackendError> {
         let snapshot = self.load_snapshot(instance_id).await?;
 

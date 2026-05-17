@@ -18,7 +18,7 @@ use crate::error::RuntimeError;
 pub(crate) enum ParkReason {
     /// A durable delay that hasn't expired yet.
     Delay {
-        delay_id: String,
+        delay_id: sayiir_core::TaskId,
         wake_at: DateTime<Utc>,
         /// Pre-computed hint for the next task (priority + tags for persistence-layer advancement).
         next_task: Option<TaskHint>,
@@ -27,7 +27,7 @@ pub(crate) enum ParkReason {
     },
     /// Waiting for an external signal that hasn't arrived yet.
     AwaitingSignal {
-        signal_id: String,
+        signal_id: sayiir_core::TaskId,
         signal_name: String,
         timeout: Option<DateTime<Utc>>,
         /// Pre-computed hint for the next task (priority + tags for persistence-layer advancement).
@@ -89,11 +89,11 @@ pub(crate) async fn save_park_checkpoint<B: SnapshotStore>(
             next_task,
             passthrough,
         } => {
-            let next_task_id = next_task.as_ref().map(|h| h.id.clone());
+            let next_task_id = next_task.as_ref().map(|h| h.id);
             snapshot.set_task_hint(next_task.as_ref().unwrap_or(&TaskHint::default()));
             let now = Utc::now();
             snapshot.update_position(ExecutionPosition::AtDelay {
-                delay_id: delay_id.clone(),
+                delay_id,
                 entered_at: now,
                 wake_at,
                 next_task_id,
@@ -110,10 +110,10 @@ pub(crate) async fn save_park_checkpoint<B: SnapshotStore>(
             timeout,
             next_task,
         } => {
-            let next_task_id = next_task.as_ref().map(|h| h.id.clone());
+            let next_task_id = next_task.as_ref().map(|h| h.id);
             snapshot.set_task_hint(next_task.as_ref().unwrap_or(&TaskHint::default()));
             snapshot.update_position(ExecutionPosition::AtSignal {
-                signal_id: signal_id.clone(),
+                signal_id,
                 signal_name: signal_name.clone(),
                 wake_at: timeout,
                 next_task_id,

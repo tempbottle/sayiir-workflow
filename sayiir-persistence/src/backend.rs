@@ -178,7 +178,7 @@ pub trait SnapshotStore: Send + Sync {
     fn save_task_result(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         output: bytes::Bytes,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
@@ -262,7 +262,7 @@ pub trait SignalStore: SnapshotStore {
     fn check_and_cancel(
         &self,
         instance_id: &str,
-        interrupted_at_task: Option<&str>,
+        interrupted_at_task: Option<sayiir_core::TaskId>,
     ) -> impl Future<Output = Result<bool, BackendError>> + Send {
         async move {
             let Some(request) = self.get_signal(instance_id, SignalKind::Cancel).await? else {
@@ -272,11 +272,7 @@ pub trait SignalStore: SnapshotStore {
             if !snapshot.state.is_in_progress() {
                 return Ok(false);
             }
-            snapshot.mark_cancelled(
-                request.reason,
-                request.requested_by,
-                interrupted_at_task.map(String::from),
-            );
+            snapshot.mark_cancelled(request.reason, request.requested_by, interrupted_at_task);
             self.save_snapshot(&snapshot).await?;
             self.clear_signal(instance_id, SignalKind::Cancel).await?;
             Ok(true)
@@ -347,7 +343,7 @@ pub trait TaskClaimStore: Send + Sync {
     fn claim_task(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
         ttl: Option<Duration>,
     ) -> impl Future<Output = Result<Option<TaskClaim>, BackendError>> + Send;
@@ -356,7 +352,7 @@ pub trait TaskClaimStore: Send + Sync {
     fn release_task_claim(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
@@ -364,7 +360,7 @@ pub trait TaskClaimStore: Send + Sync {
     fn extend_task_claim(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
         additional_duration: Duration,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
@@ -442,7 +438,7 @@ pub trait TaskResultStore: SnapshotStore {
     fn load_task_result(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
     ) -> impl Future<Output = Result<Option<bytes::Bytes>, BackendError>> + Send;
 }
 

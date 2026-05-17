@@ -31,7 +31,7 @@ where
         tracing::debug!("saving snapshot");
         let data = self.encode(snapshot)?;
         let status = snapshot.state.as_ref();
-        let task_id = snapshot.current_task_id().map(ToString::to_string);
+        let task_id = snapshot.current_task_id().map(|t| t.to_hex());
         let task_count = snapshot.completed_task_count();
         let error = snapshot.error_message().map(ToString::to_string);
         let terminal = snapshot.state.is_terminal();
@@ -170,7 +170,7 @@ where
     async fn save_task_result(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         output: bytes::Bytes,
     ) -> Result<(), BackendError> {
         tracing::debug!("saving task result");
@@ -188,11 +188,11 @@ where
 
         let raw: &[u8] = row.get("data");
         let mut snapshot = self.decode(raw)?;
-        snapshot.mark_task_completed(task_id.to_string(), output);
+        snapshot.mark_task_completed(*task_id, output);
 
         let data = self.encode(&snapshot)?;
         let status = snapshot.state.as_ref();
-        let current = snapshot.current_task_id().map(ToString::to_string);
+        let current = snapshot.current_task_id().map(|t| t.to_hex());
         let task_count = snapshot.completed_task_count();
 
         sqlx::query(
@@ -218,7 +218,7 @@ where
                 status = 'completed', completed_at = now(), error = NULL",
         )
         .bind(instance_id)
-        .bind(task_id)
+        .bind(task_id.to_hex())
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;

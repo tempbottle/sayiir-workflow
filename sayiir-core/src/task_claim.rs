@@ -15,7 +15,7 @@ pub struct TaskClaim {
     /// The workflow instance ID (not to be confused with the workflow ID)
     pub instance_id: String,
     /// The task ID being claimed.
-    pub task_id: String,
+    pub task_id: crate::TaskId,
     /// The worker node ID that claimed this task.
     pub worker_id: String,
     /// When the claim was created (Unix timestamp).
@@ -31,7 +31,7 @@ impl TaskClaim {
     #[must_use]
     pub fn new(
         instance_id: String,
-        task_id: String,
+        task_id: crate::TaskId,
         worker_id: String,
         ttl: Option<Duration>,
     ) -> Self {
@@ -83,7 +83,7 @@ mod tests {
     fn claim(worker: &str, expires_at: Option<u64>) -> TaskClaim {
         TaskClaim {
             instance_id: "inst-1".into(),
-            task_id: "task-1".into(),
+            task_id: crate::TaskId::from("task-1"),
             worker_id: worker.into(),
             claimed_at: 1_000_000,
             expires_at,
@@ -127,7 +127,7 @@ mod tests {
     fn new_with_ttl_sets_expiry() {
         let c = TaskClaim::new(
             "i".into(),
-            "t".into(),
+            crate::TaskId::from("t"),
             "w".into(),
             Some(Duration::seconds(60)),
         );
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn new_without_ttl_has_no_expiry() {
-        let c = TaskClaim::new("i".into(), "t".into(), "w".into(), None);
+        let c = TaskClaim::new("i".into(), crate::TaskId::from("t"), "w".into(), None);
         assert!(c.expires_at.is_none());
     }
 }
@@ -148,7 +148,7 @@ pub struct AvailableTask {
     /// The workflow instance ID.
     pub instance_id: String,
     /// The task ID.
-    pub task_id: String,
+    pub task_id: crate::TaskId,
     /// The input data for the task (serialized).
     pub input: bytes::Bytes,
     /// The workflow definition hash.

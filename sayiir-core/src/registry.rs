@@ -714,14 +714,17 @@ where
         BytesFuture::new(async move {
             let decoded_input = codec.decode::<I>(input).map_err(|e| -> BoxError {
                 Box::new(CodecError::DecodeFailed {
-                    task_id: task_id.clone(),
+                    task_id: crate::TaskId::from(task_id.as_str()),
                     expected_type: std::any::type_name::<I>(),
                     source: e,
                 })
             })?;
             let output = func(decoded_input).await?;
             codec.encode(&output).map_err(|e| -> BoxError {
-                Box::new(CodecError::EncodeFailed { task_id, source: e })
+                Box::new(CodecError::EncodeFailed {
+                    task_id: crate::TaskId::from(task_id.as_str()),
+                    source: e,
+                })
             })
         })
     }
@@ -754,7 +757,7 @@ where
         BytesFuture::new(async move {
             let decoded_input = codec.decode::<I>(input).map_err(|e| -> BoxError {
                 Box::new(CodecError::DecodeFailed {
-                    task_id: task_id.clone(),
+                    task_id: crate::TaskId::from(task_id.as_str()),
                     expected_type: std::any::type_name::<I>(),
                     source: e,
                 })
@@ -762,7 +765,10 @@ where
             let loop_result = func(decoded_input).await?;
             let (decision, inner) = loop_result.into_decision();
             let inner_bytes = codec.encode(&inner).map_err(|e| -> BoxError {
-                Box::new(CodecError::EncodeFailed { task_id, source: e })
+                Box::new(CodecError::EncodeFailed {
+                    task_id: crate::TaskId::from(task_id.as_str()),
+                    source: e,
+                })
             })?;
             Ok(crate::codec::encode_loop_envelope(decision, &inner_bytes))
         })
@@ -795,14 +801,17 @@ where
         BytesFuture::new(async move {
             let decoded_input = codec.decode::<T::Input>(input).map_err(|e| -> BoxError {
                 Box::new(CodecError::DecodeFailed {
-                    task_id: task_id.clone(),
+                    task_id: crate::TaskId::from(task_id.as_str()),
                     expected_type: std::any::type_name::<T::Input>(),
                     source: e,
                 })
             })?;
             let output = task.run(decoded_input).await?;
             codec.encode(&output).map_err(|e| -> BoxError {
-                Box::new(CodecError::EncodeFailed { task_id, source: e })
+                Box::new(CodecError::EncodeFailed {
+                    task_id: crate::TaskId::from(task_id.as_str()),
+                    source: e,
+                })
             })
         })
     }

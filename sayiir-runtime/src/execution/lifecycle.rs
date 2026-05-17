@@ -119,7 +119,7 @@ where
         snapshot.trace_parent = crate::trace_context::current_trace_parent();
     }
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: first_task.id.clone(),
+        task_id: first_task.id,
     });
     snapshot.set_task_hint(&first_task);
     backend.save_snapshot(&snapshot).await?;
@@ -269,12 +269,12 @@ where
                 WorkflowSnapshotState::InProgress {
                     position: ExecutionPosition::AtDelay { delay_id, .. },
                     ..
-                } => delay_id.clone(),
+                } => *delay_id,
                 WorkflowSnapshotState::InProgress {
                     position: ExecutionPosition::AtFork { fork_id, .. },
                     ..
-                } => fork_id.clone(),
-                _ => String::new(),
+                } => *fork_id,
+                _ => sayiir_core::TaskId::default(),
             };
             tracing::info!(
                 instance_id = %snapshot.instance_id,

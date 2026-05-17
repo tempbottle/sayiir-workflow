@@ -48,7 +48,7 @@ where
     async fn claim_task(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
         ttl: Option<Duration>,
     ) -> Result<Option<TaskClaim>, BackendError> {
@@ -67,7 +67,7 @@ where
                        EXTRACT(EPOCH FROM expires_at)::BIGINT AS expires_epoch",
         )
         .bind(instance_id)
-        .bind(task_id)
+        .bind(task_id.to_hex())
         .bind(worker_id)
         .bind(expires_at)
         .fetch_optional(&self.pool)
@@ -76,7 +76,7 @@ where
 
         Ok(row.map(|r| TaskClaim {
             instance_id: r.get("instance_id"),
-            task_id: r.get("task_id"),
+            task_id: sayiir_core::TaskId::from_hex(r.get::<&str, _>("task_id")).unwrap_or_default(),
             worker_id: r.get("worker_id"),
             claimed_at: r.get::<i64, _>("claimed_epoch").cast_unsigned(),
             expires_at: r
@@ -94,7 +94,7 @@ where
     async fn release_task_claim(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
     ) -> Result<(), BackendError> {
         tracing::debug!("releasing task claim");
@@ -103,7 +103,7 @@ where
             "SELECT worker_id FROM sayiir_task_claims WHERE instance_id = $1 AND task_id = $2",
         )
         .bind(instance_id)
-        .bind(task_id)
+        .bind(task_id.to_hex())
         .fetch_optional(&self.pool)
         .await
         .map_err(PgError)?
@@ -121,7 +121,7 @@ where
              WHERE instance_id = $1 AND task_id = $2 AND worker_id = $3",
         )
         .bind(instance_id)
-        .bind(task_id)
+        .bind(task_id.to_hex())
         .bind(worker_id)
         .execute(&self.pool)
         .await
@@ -139,7 +139,7 @@ where
     async fn extend_task_claim(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         worker_id: &str,
         additional_duration: Duration,
     ) -> Result<(), BackendError> {
@@ -149,7 +149,7 @@ where
              WHERE instance_id = $1 AND task_id = $2",
         )
         .bind(instance_id)
-        .bind(task_id)
+        .bind(task_id.to_hex())
         .fetch_optional(&self.pool)
         .await
         .map_err(PgError)?
@@ -175,7 +175,7 @@ where
             )
             .bind(new_exp)
             .bind(instance_id)
-            .bind(task_id)
+            .bind(task_id.to_hex())
             .execute(&self.pool)
             .await
             .map_err(PgError)?;
@@ -289,7 +289,7 @@ where
                         },
                     ..
                 } if Utc::now() >= *wake_at => {
-                    if let Some(next_id) = next_task_id.clone() {
+                    if let Some(next_id) = *next_task_id {
                         snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
                         self.save_snapshot(&snapshot).await?;
 
@@ -412,13 +412,17 @@ where
         else {
             return Ok(None);
         };
-        if task_id != &hint.task_id || completed_tasks.contains_key(task_id) {
+        // hint.task_id is the wire-format String (hex of the TaskId).
+        let Some(hint_task_id) = sayiir_core::TaskId::from_hex(&hint.task_id).ok() else {
+            return Ok(None);
+        };
+        if *task_id != hint_task_id || completed_tasks.contains_key(task_id) {
             return Ok(None);
         }
 
         Ok(build_available_task(
             &snapshot,
-            &hint.task_id,
+            &hint_task_id,
             completed_tasks,
         ))
     }
@@ -427,8 +431,11 @@ where
 /// Build an [`AvailableTask`] from a snapshot at a task position.
 fn build_available_task(
     snapshot: &WorkflowSnapshot,
-    task_id: &str,
-    completed_tasks: &std::collections::HashMap<String, sayiir_core::snapshot::TaskResult>,
+    task_id: &sayiir_core::TaskId,
+    completed_tasks: &std::collections::HashMap<
+        sayiir_core::TaskId,
+        sayiir_core::snapshot::TaskResult,
+    >,
 ) -> Option<AvailableTask> {
     let input = if completed_tasks.is_empty() {
         snapshot.initial_input_bytes()
@@ -438,7 +445,7 @@ fn build_available_task(
 
     input.map(|input_bytes| AvailableTask {
         instance_id: snapshot.instance_id.clone(),
-        task_id: task_id.to_string(),
+        task_id: *task_id,
         input: input_bytes,
         workflow_definition_hash: snapshot.definition_hash,
         trace_parent: snapshot.trace_parent.clone(),

@@ -299,6 +299,10 @@ macro_rules! hash32_newtype {
             fn from(s: &str) -> Self { Self::sha256(s.as_bytes()) }
         }
 
+        impl From<&String> for $name {
+            fn from(s: &String) -> Self { Self::sha256(s.as_bytes()) }
+        }
+
         impl From<String> for $name {
             fn from(s: String) -> Self { Self::sha256(s.as_bytes()) }
         }
@@ -322,16 +326,30 @@ hash32_newtype! {
 hash32_newtype! {
     /// SHA-256 hash of a task's user-facing name (e.g. `"validate"`).
     ///
-    /// Used as a precomputed lookup key alongside the human-readable id on
-    /// hot data structures (e.g. [`TaskHint`](crate::snapshot::TaskHint)). The
-    /// runtime stores the name (`String`) on
-    /// [`ExecutionPosition`](crate::snapshot::ExecutionPosition) variants for
-    /// readability of serialised snapshots; the `TaskId` is what comparisons
-    /// and map probes use when callers have access to it.
+    /// Stored on every runtime data structure that previously held a task
+    /// id as a `String` — [`ExecutionPosition`](crate::snapshot::ExecutionPosition)
+    /// variants, [`TaskResult`](crate::snapshot::TaskResult), the
+    /// `completed_tasks`/`task_retries`/`loop_iterations` `HashMap` keys on
+    /// [`WorkflowSnapshot`](crate::snapshot::WorkflowSnapshot),
+    /// [`AvailableTask`](crate::task_claim::AvailableTask), and so on. The
+    /// human-readable name only lives once per workflow definition on the
+    /// continuation tree.
     ///
-    /// 32-byte memcmp + single-`u64` hash, same wins as
-    /// [`DefinitionHash`].
+    /// 32-byte memcmp + single-`u64` hash, same wins as [`DefinitionHash`].
     TaskId
+}
+
+hash32_newtype! {
+    /// SHA-256 hash of a workflow's user-facing identifier (e.g.
+    /// `"order-pipeline"`).
+    ///
+    /// Used in runtime contexts and dispatch maps where the workflow
+    /// identifier needs cheap comparison without keeping the string alive.
+    /// The human-readable name remains on the
+    /// [`Workflow`](crate::workflow::Workflow) /
+    /// [`WorkflowContext`](crate::context::WorkflowContext) for log/error
+    /// display.
+    WorkflowId
 }
 
 #[cfg(test)]

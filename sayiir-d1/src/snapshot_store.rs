@@ -15,7 +15,7 @@ where
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         let data = self.encode(snapshot)?;
         let status = snapshot.state.as_ref();
-        let task_id = snapshot.current_task_id().map(ToString::to_string);
+        let task_id = snapshot.current_task_id().map(|t| t.to_hex());
         let task_count = snapshot.completed_task_count();
         let error = snapshot.error_message().map(ToString::to_string);
         let terminal = snapshot.state.is_terminal();
@@ -90,12 +90,12 @@ where
     async fn save_task_result(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         output: bytes::Bytes,
     ) -> Result<(), BackendError> {
         // Single-Worker: no concurrency, so sequential load → mutate → save is safe.
         let mut snapshot = self.load_snapshot(instance_id).await?;
-        snapshot.mark_task_completed(task_id.to_string(), output);
+        snapshot.mark_task_completed(*task_id, output);
         self.save_snapshot(&snapshot).await
     }
 

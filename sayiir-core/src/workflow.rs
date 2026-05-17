@@ -484,7 +484,7 @@ impl WorkflowContinuation {
     #[must_use]
     pub fn first_task_hint(&self) -> crate::snapshot::TaskHint {
         crate::snapshot::TaskHint::new(
-            self.first_task_id().to_string(),
+            self.first_task_id(),
             self.first_task_priority(),
             self.first_task_tags(),
         )
@@ -508,10 +508,20 @@ impl WorkflowContinuation {
     ///
     /// Recursively walks the full continuation tree, including through `Arc`
     /// fork branches, and returns a reference to the matching `Task` node.
-    fn find_task(&self, target_id: &str) -> Option<&Self> {
+    /// Resolve a [`TaskId`](crate::TaskId) back to the human-readable task
+    /// name stored on the matching `Task` node, if any. O(N) tree walk.
+    #[must_use]
+    pub fn find_task_name(&self, target_id: &crate::TaskId) -> Option<&str> {
+        self.find_task(target_id).and_then(|n| match n {
+            WorkflowContinuation::Task { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+    }
+
+    fn find_task(&self, target_id: &crate::TaskId) -> Option<&Self> {
         match self {
             WorkflowContinuation::Task { id, next, .. } => {
-                if id == target_id {
+                if crate::TaskId::from(id.as_str()) == *target_id {
                     return Some(self);
                 }
                 next.as_ref().and_then(|n| n.find_task(target_id))
@@ -560,9 +570,13 @@ impl WorkflowContinuation {
     /// Same traversal as [`find_task`](Self::find_task) but returns a mutable
     /// reference. Fork branches behind `Arc` are skipped since they cannot be
     /// mutated; only the join continuation is searched.
-    fn find_task_mut(&mut self, target_id: &str) -> Option<&mut Self> {
+    fn find_task_mut(&mut self, target_id: &crate::TaskId) -> Option<&mut Self> {
         match self {
-            WorkflowContinuation::Task { id, .. } if id == target_id => Some(self),
+            WorkflowContinuation::Task { id, .. }
+                if crate::TaskId::from(id.as_str()) == *target_id =>
+            {
+                Some(self)
+            }
             WorkflowContinuation::Task { next, .. } => {
                 next.as_mut().and_then(|n| n.find_task_mut(target_id))
             }
@@ -605,14 +619,22 @@ impl WorkflowContinuation {
     }
 
     /// Set the timeout on a specific task node found by ID.
-    pub fn set_task_timeout(&mut self, target_id: &str, timeout: Option<std::time::Duration>) {
+    pub fn set_task_timeout(
+        &mut self,
+        target_id: &crate::TaskId,
+        timeout: Option<std::time::Duration>,
+    ) {
         if let Some(WorkflowContinuation::Task { timeout: t, .. }) = self.find_task_mut(target_id) {
             *t = timeout;
         }
     }
 
     /// Set the retry policy on a specific task node found by ID.
-    pub fn set_task_retry_policy(&mut self, target_id: &str, policy: Option<RetryPolicy>) {
+    pub fn set_task_retry_policy(
+        &mut self,
+        target_id: &crate::TaskId,
+        policy: Option<RetryPolicy>,
+    ) {
         if let Some(WorkflowContinuation::Task { retry_policy, .. }) = self.find_task_mut(target_id)
         {
             *retry_policy = policy;
@@ -620,7 +642,7 @@ impl WorkflowContinuation {
     }
 
     /// Set the schema version on a specific task node found by ID.
-    pub fn set_task_version(&mut self, target_id: &str, ver: Option<String>) {
+    pub fn set_task_version(&mut self, target_id: &crate::TaskId, ver: Option<String>) {
         if let Some(WorkflowContinuation::Task { version, .. }) = self.find_task_mut(target_id) {
             *version = ver;
         }
@@ -628,7 +650,7 @@ impl WorkflowContinuation {
 
     /// Look up the retry policy configured on a specific task by ID.
     #[must_use]
-    pub fn get_task_retry_policy(&self, task_id: &str) -> Option<&RetryPolicy> {
+    pub fn get_task_retry_policy(&self, task_id: &crate::TaskId) -> Option<&RetryPolicy> {
         match self.find_task(task_id)? {
             WorkflowContinuation::Task { retry_policy, .. } => retry_policy.as_ref(),
             _ => None,
@@ -637,7 +659,7 @@ impl WorkflowContinuation {
 
     /// Look up the timeout configured on a specific task by ID.
     #[must_use]
-    pub fn get_task_timeout(&self, task_id: &str) -> Option<std::time::Duration> {
+    pub fn get_task_timeout(&self, task_id: &crate::TaskId) -> Option<std::time::Duration> {
         match self.find_task(task_id)? {
             WorkflowContinuation::Task { timeout, .. } => *timeout,
             _ => None,
@@ -646,7 +668,7 @@ impl WorkflowContinuation {
 
     /// Look up the priority configured on a specific task by ID.
     #[must_use]
-    pub fn get_task_priority(&self, task_id: &str) -> Option<u8> {
+    pub fn get_task_priority(&self, task_id: &crate::TaskId) -> Option<u8> {
         match self.find_task(task_id)? {
             WorkflowContinuation::Task { priority, .. } => *priority,
             _ => None,
@@ -655,7 +677,7 @@ impl WorkflowContinuation {
 
     /// Look up the affinity tags configured on a specific task by ID.
     #[must_use]
-    pub fn get_task_tags(&self, task_id: &str) -> Vec<String> {
+    pub fn get_task_tags(&self, task_id: &crate::TaskId) -> Vec<String> {
         match self.find_task(task_id) {
             Some(WorkflowContinuation::Task { tags, .. }) => tags.clone(),
             _ => vec![],
@@ -663,7 +685,7 @@ impl WorkflowContinuation {
     }
 
     /// Set the affinity tags on a specific task node found by ID.
-    pub fn set_task_tags(&mut self, target_id: &str, new_tags: Vec<String>) {
+    pub fn set_task_tags(&mut self, target_id: &crate::TaskId, new_tags: Vec<String>) {
         if let Some(WorkflowContinuation::Task { tags, .. }) = self.find_task_mut(target_id) {
             *tags = new_tags;
         }
@@ -676,7 +698,7 @@ impl WorkflowContinuation {
     /// name and description are left as defaults since they are not stored in
     /// the continuation tree.
     #[must_use]
-    pub fn build_task_metadata(&self, task_id: &str) -> crate::task::TaskMetadata {
+    pub fn build_task_metadata(&self, task_id: &crate::TaskId) -> crate::task::TaskMetadata {
         match self.find_task(task_id) {
             Some(WorkflowContinuation::Task {
                 timeout,
@@ -1457,14 +1479,14 @@ pub enum WorkflowStatus {
         /// When the delay expires.
         wake_at: chrono::DateTime<chrono::Utc>,
         /// The delay node ID.
-        delay_id: String,
+        delay_id: crate::TaskId,
     },
     /// The workflow is waiting for an external signal.
     #[strum(serialize = "awaiting_signal")]
     AwaitingSignal {
         /// The signal node ID.
-        signal_id: String,
-        /// The named signal being waited on.
+        signal_id: crate::TaskId,
+        /// The named signal being waited on (user-defined string).
         signal_name: String,
         /// Optional timeout deadline.
         wake_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -1521,14 +1543,15 @@ impl From<WorkflowStatus> for FlatWorkflowStatus {
             }
             WorkflowStatus::Waiting { wake_at, delay_id } => {
                 flat.wake_at = Some(wake_at.to_rfc3339());
-                flat.delay_id = Some(delay_id);
+                // FFI / flattened form keeps strings — render the hash as hex.
+                flat.delay_id = Some(delay_id.to_hex());
             }
             WorkflowStatus::AwaitingSignal {
                 signal_id,
                 signal_name,
                 wake_at,
             } => {
-                flat.signal_id = Some(signal_id);
+                flat.signal_id = Some(signal_id.to_hex());
                 flat.signal_name = Some(signal_name);
                 flat.wake_at = wake_at.map(|t| t.to_rfc3339());
             }
@@ -1554,10 +1577,10 @@ pub struct Workflow<C, Input, M = ()> {
 }
 
 impl<C, Input, M> Workflow<C, Input, M> {
-    /// Get the workflow ID.
+    /// Get the workflow name (human-readable).
     #[must_use]
     pub fn workflow_id(&self) -> &str {
-        &self.context.workflow_id
+        &self.context.workflow_name
     }
 
     /// Get the definition hash.

@@ -132,7 +132,10 @@ fn snapshot_with_tasks(n: usize) -> WorkflowSnapshot {
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("bench-inst".into(), "bench-hash".into(), input);
     for i in 0..n {
-        snapshot.mark_task_completed(format!("task_{i}"), encode(i as u32));
+        snapshot.mark_task_completed(
+            sayiir_core::TaskId::from(format!("task_{i}").as_str()),
+            encode(i as u32),
+        );
     }
     snapshot
 }

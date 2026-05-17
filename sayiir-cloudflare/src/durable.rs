@@ -358,27 +358,35 @@ impl<'a> Executor<'a> {
             unreachable!()
         };
 
-        check_guards(self.backend, &self.snapshot.instance_id, Some(id)).await?;
+        check_guards(
+            self.backend,
+            &self.snapshot.instance_id,
+            Some(sayiir_core::TaskId::from(id)),
+        )
+        .await?;
 
-        let output =
-            if let Some(cached) = self.snapshot.get_task_result(id).map(|r| r.output.clone()) {
-                cached
-            } else {
-                let result = call_js_task(self.task_registry, id, &input).await?;
-                self.snapshot
-                    .mark_task_completed(id.clone(), result.clone());
+        let output = if let Some(cached) = self
+            .snapshot
+            .get_task_result(&sayiir_core::TaskId::from(id))
+            .map(|r| r.output.clone())
+        {
+            cached
+        } else {
+            let result = call_js_task(self.task_registry, id, &input).await?;
+            self.snapshot
+                .mark_task_completed(sayiir_core::TaskId::from(id), result.clone());
 
-                if let Some(next_cont) = next.as_deref() {
-                    self.snapshot.update_position(ExecutionPosition::AtTask {
-                        task_id: next_cont.first_task_id().to_string(),
-                    });
-                }
-                self.checkpoint().await?;
+            if let Some(next_cont) = next.as_deref() {
+                self.snapshot.update_position(ExecutionPosition::AtTask {
+                    task_id: sayiir_core::TaskId::from(next_cont.first_task_id()),
+                });
+            }
+            self.checkpoint().await?;
 
-                check_guards(self.backend, &self.snapshot.instance_id, None).await?;
+            check_guards(self.backend, &self.snapshot.instance_id, None).await?;
 
-                result
-            };
+            result
+        };
 
         Ok(advance_or_break(next.as_deref(), output))
     }
@@ -392,9 +400,18 @@ impl<'a> Executor<'a> {
             unreachable!()
         };
 
-        check_guards(self.backend, &self.snapshot.instance_id, Some(id)).await?;
+        check_guards(
+            self.backend,
+            &self.snapshot.instance_id,
+            Some(sayiir_core::TaskId::from(id)),
+        )
+        .await?;
 
-        if self.snapshot.get_task_result(id).is_some() {
+        if self
+            .snapshot
+            .get_task_result(&sayiir_core::TaskId::from(id))
+            .is_some()
+        {
             return Ok(advance_or_break(next.as_deref(), input));
         }
 
@@ -404,12 +421,13 @@ impl<'a> Executor<'a> {
         let next_task_id = next.as_deref().map(|n| n.first_task_id().to_string());
 
         self.snapshot.update_position(ExecutionPosition::AtDelay {
-            delay_id: id.clone(),
+            delay_id: sayiir_core::TaskId::from(id),
             entered_at: Utc::now(),
             wake_at,
             next_task_id,
         });
-        self.snapshot.mark_task_completed(id.clone(), input);
+        self.snapshot
+            .mark_task_completed(sayiir_core::TaskId::from(id), input);
         self.checkpoint().await?;
 
         Err(WorkflowError::Waiting { wake_at })
@@ -430,9 +448,17 @@ impl<'a> Executor<'a> {
             unreachable!()
         };
 
-        check_guards(self.backend, &self.snapshot.instance_id, Some(id)).await?;
+        check_guards(
+            self.backend,
+            &self.snapshot.instance_id,
+            Some(sayiir_core::TaskId::from(id)),
+        )
+        .await?;
 
-        if let Some(result) = self.snapshot.get_task_result(id) {
+        if let Some(result) = self
+            .snapshot
+            .get_task_result(&sayiir_core::TaskId::from(id))
+        {
             let payload = result.output.clone();
             return Ok(advance_or_break(next.as_deref(), payload));
         }
@@ -445,10 +471,10 @@ impl<'a> Executor<'a> {
         {
             Ok(Some(payload)) => {
                 self.snapshot
-                    .mark_task_completed(id.clone(), payload.clone());
+                    .mark_task_completed(sayiir_core::TaskId::from(id), payload.clone());
                 if let Some(next_cont) = next.as_deref() {
                     self.snapshot.update_position(ExecutionPosition::AtTask {
-                        task_id: next_cont.first_task_id().to_string(),
+                        task_id: sayiir_core::TaskId::from(next_cont.first_task_id()),
                     });
                 }
                 self.checkpoint().await?;
@@ -462,7 +488,7 @@ impl<'a> Executor<'a> {
                 let next_task_id = next.as_deref().map(|n| n.first_task_id().to_string());
 
                 self.snapshot.update_position(ExecutionPosition::AtSignal {
-                    signal_id: id.clone(),
+                    signal_id: sayiir_core::TaskId::from(id),
                     signal_name: signal_name.clone(),
                     wake_at,
                     next_task_id,
@@ -470,7 +496,7 @@ impl<'a> Executor<'a> {
                 self.checkpoint().await?;
 
                 Err(WorkflowError::AwaitingSignal {
-                    signal_id: id.clone(),
+                    signal_id: sayiir_core::TaskId::from(id),
                     signal_name: signal_name.clone(),
                     wake_at,
                 })
@@ -506,7 +532,10 @@ impl<'a> Executor<'a> {
         for branch in branches {
             let branch_id = branch.id().to_string();
 
-            if let Some(cached) = self.snapshot.get_task_result(&branch_id) {
+            if let Some(cached) = self
+                .snapshot
+                .get_task_result(&sayiir_core::TaskId::from(branch_id))
+            {
                 branch_results.push((branch_id, cached.output.clone()));
                 continue;
             }
@@ -519,7 +548,7 @@ impl<'a> Executor<'a> {
                     // output (because the first task uses `branch_id` as
                     // its own id) and feed the wrong value into the join.
                     self.snapshot
-                        .mark_task_completed(branch_id.clone(), output.clone());
+                        .mark_task_completed(sayiir_core::TaskId::from(branch_id), output.clone());
                     self.checkpoint().await?;
                     branch_results.push((branch_id, output));
                 }
@@ -562,14 +591,14 @@ impl<'a> Executor<'a> {
                 (
                     id.clone(),
                     TaskResult {
-                        task_id: id.clone(),
+                        task_id: sayiir_core::TaskId::from(id),
                         output: output.clone(),
                     },
                 )
             })
             .collect();
         self.snapshot.update_position(ExecutionPosition::AtFork {
-            fork_id: fork_id.to_string(),
+            fork_id: fork_id,
             completed_branches,
             wake_at,
         });
@@ -592,9 +621,17 @@ impl<'a> Executor<'a> {
             unreachable!()
         };
 
-        check_guards(self.backend, &self.snapshot.instance_id, Some(id)).await?;
+        check_guards(
+            self.backend,
+            &self.snapshot.instance_id,
+            Some(sayiir_core::TaskId::from(id)),
+        )
+        .await?;
 
-        if let Some(result) = self.snapshot.get_task_result(id) {
+        if let Some(result) = self
+            .snapshot
+            .get_task_result(&sayiir_core::TaskId::from(id))
+        {
             return Ok(advance_or_break(next.as_deref(), result.output.clone()));
         }
 
@@ -619,7 +656,7 @@ impl<'a> Executor<'a> {
             .map_err(|e| WorkflowError::ResumeError(format!("{e:?}")))?;
 
         self.snapshot
-            .mark_task_completed(id.clone(), envelope_bytes.clone());
+            .mark_task_completed(sayiir_core::TaskId::from(id), envelope_bytes.clone());
         self.checkpoint().await?;
 
         Ok(advance_or_break(next.as_deref(), envelope_bytes))
@@ -641,13 +678,21 @@ impl<'a> Executor<'a> {
             unreachable!()
         };
 
-        check_guards(self.backend, &self.snapshot.instance_id, Some(id)).await?;
+        check_guards(
+            self.backend,
+            &self.snapshot.instance_id,
+            Some(sayiir_core::TaskId::from(id)),
+        )
+        .await?;
 
-        if let Some(result) = self.snapshot.get_task_result(id) {
+        if let Some(result) = self
+            .snapshot
+            .get_task_result(&sayiir_core::TaskId::from(id))
+        {
             return Ok(advance_or_break(next.as_deref(), result.output.clone()));
         }
 
-        let start = self.snapshot.loop_iteration(id);
+        let start = self.snapshot.loop_iteration(&sayiir_core::TaskId::from(id));
         let mut loop_input = input;
 
         for iteration in start..*max_iterations {
@@ -656,24 +701,27 @@ impl<'a> Executor<'a> {
             // Clear body task results for next iteration
             let body_ser = body.to_serializable();
             for tid in &body_ser.task_ids() {
-                self.snapshot.remove_task_result(tid);
+                self.snapshot
+                    .remove_task_result(&sayiir_core::TaskId::from(*tid));
             }
 
             let (tag, inner_bytes) = decode_loop_result(&output)
                 .map_err(|e| WorkflowError::ResumeError(format!("{e:?}")))?;
 
             if tag == sayiir_core::codec::LoopDecision::Done.as_ref() {
-                self.snapshot.clear_loop_iteration(id);
                 self.snapshot
-                    .mark_task_completed(id.clone(), inner_bytes.clone());
+                    .clear_loop_iteration(&sayiir_core::TaskId::from(id));
+                self.snapshot
+                    .mark_task_completed(sayiir_core::TaskId::from(id), inner_bytes.clone());
                 self.checkpoint().await?;
                 return Ok(advance_or_break(next.as_deref(), inner_bytes));
             } else if tag == sayiir_core::codec::LoopDecision::Again.as_ref() {
-                self.snapshot.set_loop_iteration(id, iteration + 1);
+                self.snapshot
+                    .set_loop_iteration(sayiir_core::TaskId::from(id), iteration + 1);
                 self.snapshot.update_position(ExecutionPosition::InLoop {
-                    loop_id: id.clone(),
+                    loop_id: sayiir_core::TaskId::from(id),
                     iteration: iteration + 1,
-                    next_task_id: Some(body.first_task_id().to_string()),
+                    next_task_id: Some(sayiir_core::TaskId::from(body.first_task_id())),
                 });
                 self.checkpoint().await?;
                 loop_input = inner_bytes;
@@ -688,14 +736,15 @@ impl<'a> Executor<'a> {
         match on_max {
             sayiir_core::workflow::MaxIterationsPolicy::Fail => {
                 Err(WorkflowError::MaxIterationsExceeded {
-                    loop_id: id.clone(),
+                    loop_id: sayiir_core::TaskId::from(id),
                     max_iterations: *max_iterations,
                 })
             }
             sayiir_core::workflow::MaxIterationsPolicy::ExitWithLast => {
-                self.snapshot.clear_loop_iteration(id);
                 self.snapshot
-                    .mark_task_completed(id.clone(), loop_input.clone());
+                    .clear_loop_iteration(&sayiir_core::TaskId::from(id));
+                self.snapshot
+                    .mark_task_completed(sayiir_core::TaskId::from(id), loop_input.clone());
                 self.checkpoint().await?;
                 Ok(advance_or_break(next.as_deref(), loop_input))
             }
@@ -714,16 +763,24 @@ impl<'a> Executor<'a> {
             unreachable!()
         };
 
-        check_guards(self.backend, &self.snapshot.instance_id, Some(id)).await?;
+        check_guards(
+            self.backend,
+            &self.snapshot.instance_id,
+            Some(sayiir_core::TaskId::from(id)),
+        )
+        .await?;
 
-        if let Some(result) = self.snapshot.get_task_result(id) {
+        if let Some(result) = self
+            .snapshot
+            .get_task_result(&sayiir_core::TaskId::from(id))
+        {
             return Ok(advance_or_break(next.as_deref(), result.output.clone()));
         }
 
         let output = Box::pin(self.run(child, input)).await?;
 
         self.snapshot
-            .mark_task_completed(id.clone(), output.clone());
+            .mark_task_completed(sayiir_core::TaskId::from(id), output.clone());
         self.checkpoint().await?;
 
         Ok(advance_or_break(next.as_deref(), output))
@@ -762,7 +819,7 @@ async fn execute_with_checkpointing(
 /// return values.
 async fn call_js_task(
     registry: &js_sys::Object,
-    task_id: &str,
+    task_id: &sayiir_core::TaskId,
     input: &Bytes,
 ) -> Result<Bytes, WorkflowError> {
     let func: js_sys::Function = js_sys::Reflect::get(registry, &JsValue::from_str(task_id))

@@ -272,7 +272,7 @@ async fn resolve_parked<B: SignalStore>(
                 .await
                 .map_err(to_js_error)?
             {
-                snapshot.mark_task_completed(signal_id.clone(), payload);
+                snapshot.mark_task_completed(signal_id, payload);
                 if let Some(next_id) = next_task_id {
                     snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
                 } else {
