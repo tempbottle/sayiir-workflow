@@ -199,10 +199,37 @@ where
             "AND s.task_tags <@ $3"
         };
 
+        // Pre-filter on position_kind so rows that would just hit the
+        // `_ => continue` branch in app are never decoded. AtTask is the
+        // primary claim target; AtDelay only matters once its wake_at has
+        // elapsed (we then advance the snapshot in app). All other variants
+        // (NotStarted, AtJoin, InLoop, AtFork, AtSignal, Paused, terminal …)
+        // are ignored by this routine. See `position_kind_strings_are_stable`
+        // in sayiir-core for the literal pin.
+        //
+        // FOR UPDATE OF s SKIP LOCKED has **marginal** benefit here, and is
+        // intentionally narrow. This SELECT runs through sqlx without an
+        // enclosing transaction, so the row locks are released as soon as
+        // the statement completes — they do NOT persist across the caller's
+        // subsequent `claim_task` INSERT. The actual claim race is resolved
+        // by the `INSERT … ON CONFLICT` in `claim_task`, which is the sole
+        // arbiter for "who owns this task." All we get here is statement-
+        // scope dedup: two pollers issuing this SELECT at the exact same
+        // instant will tend to receive disjoint row sets instead of fully
+        // overlapping ones, reducing wasted snapshot decodes when fleet
+        // size is high. If real cross-statement dedup is ever needed, the
+        // SELECT and the conflict-resolving INSERT have to share a
+        // transaction — see the audit for the trade-offs.
         let query = format!(
             "SELECT s.instance_id, s.data, s.trace_parent
              FROM sayiir_workflow_snapshots s
              WHERE s.status = 'InProgress'
+               AND (
+                   s.position_kind = 'AtTask'
+                   OR (s.position_kind = 'AtDelay'
+                       AND s.delay_wake_at IS NOT NULL
+                       AND s.delay_wake_at <= now())
+               )
                AND NOT EXISTS (
                    SELECT 1 FROM sayiir_task_claims c
                    WHERE c.instance_id = s.instance_id
@@ -217,7 +244,8 @@ where
              ORDER BY
                (s.task_priority - EXTRACT(EPOCH FROM (now() - s.updated_at)) / $2) ASC,
                s.updated_at ASC
-             LIMIT $1"
+             LIMIT $1
+             FOR UPDATE OF s SKIP LOCKED"
         );
 
         let mut q = sqlx::query(&query)

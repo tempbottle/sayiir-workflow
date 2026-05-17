@@ -67,7 +67,10 @@ impl NapiWorkflowClient {
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
         let fresh_backend = runtime
-            .block_on(PostgresBackend::<JsonCodec>::connect(&backend.url))
+            .block_on(PostgresBackend::<JsonCodec>::connect_with_options(
+                &backend.url,
+                backend.options.clone(),
+            ))
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
         Ok(Self {

@@ -63,7 +63,10 @@ impl PyWorkflowClient {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
             let fresh_backend = runtime
-                .block_on(PostgresBackend::<JsonCodec>::connect(&pg.url))
+                .block_on(PostgresBackend::<JsonCodec>::connect_with_options(
+                    &pg.url,
+                    pg.options.clone(),
+                ))
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
             Ok(Self {

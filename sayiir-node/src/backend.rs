@@ -3,9 +3,54 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use sayiir_persistence::InMemoryBackend;
-use sayiir_postgres::PostgresBackend;
+use sayiir_postgres::{PoolOptions, PostgresBackend};
 use sayiir_runtime::serialization::JsonCodec;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Connection-pool options for the Postgres backend.
+///
+/// All fields are optional; unset fields fall back to sqlx pool defaults
+/// (`maxConnections=10`, no idle/lifetime caps, no session-level timeouts).
+///
+/// Durations are specified in seconds (floats accepted) to keep the JS API
+/// consistent with the rest of the Sayiir bindings.
+#[napi(object)]
+#[derive(Default, Clone)]
+pub struct NapiPgPoolOptions {
+    /// Maximum number of connections held by the pool.
+    pub max_connections: Option<u32>,
+    /// Minimum number of warm connections kept open.
+    pub min_connections: Option<u32>,
+    /// Seconds to wait for a free connection before erroring.
+    pub acquire_timeout_secs: Option<f64>,
+    /// Drop connections idle longer than this many seconds.
+    pub idle_timeout_secs: Option<f64>,
+    /// Recycle connections older than this many seconds.
+    pub max_lifetime_secs: Option<f64>,
+    /// PG `statement_timeout` (seconds) set on every new connection.
+    pub statement_timeout_secs: Option<f64>,
+    /// PG `idle_in_transaction_session_timeout` (seconds) set on every new
+    /// connection. Named to match the underlying Postgres GUC for
+    /// discoverability.
+    pub idle_in_transaction_session_timeout_secs: Option<f64>,
+}
+
+impl From<NapiPgPoolOptions> for PoolOptions {
+    fn from(o: NapiPgPoolOptions) -> Self {
+        Self {
+            max_connections: o.max_connections,
+            min_connections: o.min_connections,
+            acquire_timeout: o.acquire_timeout_secs.map(Duration::from_secs_f64),
+            idle_timeout: o.idle_timeout_secs.map(Duration::from_secs_f64),
+            max_lifetime: o.max_lifetime_secs.map(Duration::from_secs_f64),
+            statement_timeout: o.statement_timeout_secs.map(Duration::from_secs_f64),
+            idle_in_transaction_session_timeout: o
+                .idle_in_transaction_session_timeout_secs
+                .map(Duration::from_secs_f64),
+        }
+    }
+}
 
 /// In-memory persistence backend.
 ///
@@ -34,6 +79,9 @@ impl NapiInMemoryBackend {
 pub struct NapiPostgresBackend {
     pub(crate) inner: Arc<PostgresBackend<JsonCodec>>,
     pub(crate) url: String,
+    /// Pool options stashed so engine / worker / client can rebuild the pool
+    /// on their own tokio runtimes without losing the operator's tuning.
+    pub(crate) options: PoolOptions,
     #[allow(dead_code)]
     pub(crate) runtime: Arc<tokio::runtime::Runtime>,
 }
@@ -41,9 +89,14 @@ pub struct NapiPostgresBackend {
 #[napi]
 impl NapiPostgresBackend {
     /// Connect to a `PostgreSQL` database.
+    ///
+    /// `options` (optional) tunes pool size and session-level timeouts; see
+    /// [`NapiPgPoolOptions`].
     #[napi(factory)]
-    pub fn connect(url: String) -> Result<Self> {
+    pub fn connect(url: String, options: Option<NapiPgPoolOptions>) -> Result<Self> {
         tracing::info!("connecting to PostgreSQL backend");
+
+        let pool_options: PoolOptions = options.map(Into::into).unwrap_or_default();
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -51,7 +104,10 @@ impl NapiPostgresBackend {
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
         let backend = runtime
-            .block_on(PostgresBackend::<JsonCodec>::connect(&url))
+            .block_on(PostgresBackend::<JsonCodec>::connect_with_options(
+                &url,
+                pool_options.clone(),
+            ))
             .map_err(|e| {
                 tracing::error!(error = %e, "failed to connect to PostgreSQL");
                 Error::new(Status::GenericFailure, e.to_string())
@@ -62,6 +118,7 @@ impl NapiPostgresBackend {
         Ok(Self {
             inner: Arc::new(backend),
             url,
+            options: pool_options,
             runtime: Arc::new(runtime),
         })
     }

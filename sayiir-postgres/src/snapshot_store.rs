@@ -46,12 +46,21 @@ where
 
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
-        // Upsert current state
-        sqlx::query(
+        // `history_version` is intentionally omitted from the column list
+        // and VALUES — the INSERT branch lets the column DEFAULT (1, set in
+        // migration 008) supply the first version. The ON CONFLICT branch
+        // does the increment from the locked existing value. RETURNING then
+        // hands the chosen version to the history insert below.
+        //
+        // Keeping the literal out of the SQL means the "first version is 1"
+        // invariant lives in exactly one place (the column default), not
+        // duplicated between INSERT and UPDATE.
+        let upsert_row = sqlx::query(
             "INSERT INTO sayiir_workflow_snapshots
                 (instance_id, status, definition_hash, current_task_id,
                  completed_task_count, data, error, position_kind, delay_wake_at,
-                 trace_parent, task_priority, task_tags, completed_at, updated_at)
+                 trace_parent, task_priority, task_tags,
+                 completed_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $9, $10, $11, $12, $13,
                      CASE WHEN $8 THEN now() ELSE NULL END, now())
              ON CONFLICT (instance_id) DO UPDATE SET
@@ -66,8 +75,10 @@ where
                 trace_parent = $11,
                 task_priority = $12,
                 task_tags = $13,
+                history_version = sayiir_workflow_snapshots.history_version + 1,
                 completed_at = CASE WHEN $8 THEN now() ELSE sayiir_workflow_snapshots.completed_at END,
-                updated_at = now()",
+                updated_at = now()
+             RETURNING history_version",
         )
         .bind(&snapshot.instance_id) // $1
         .bind(status) // $2
@@ -82,22 +93,20 @@ where
         .bind(snapshot.trace_parent.as_deref()) // $11
         .bind(task_priority) // $12
         .bind(&task_tags) // $13
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(PgError)?;
 
-        // Append to history
+        let history_version: i32 = upsert_row.get("history_version");
+
+        // Append to history using the version we just claimed under the row lock.
         sqlx::query(
             "INSERT INTO sayiir_workflow_snapshot_history
                 (instance_id, version, status, current_task_id, data)
-             VALUES (
-                $1,
-                (SELECT COALESCE(MAX(version), 0) + 1
-                 FROM sayiir_workflow_snapshot_history WHERE instance_id = $1),
-                $2, $3, $4
-             )",
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&snapshot.instance_id)
+        .bind(history_version)
         .bind(status)
         .bind(&task_id)
         .bind(&data)
@@ -246,11 +255,30 @@ where
     )]
     async fn delete_snapshot(&self, instance_id: &str) -> Result<(), BackendError> {
         tracing::debug!("deleting snapshot");
+
+        let mut tx = self.pool.begin().await.map_err(PgError)?;
+
+        for table in [
+            "sayiir_workflow_snapshot_history",
+            "sayiir_workflow_tasks",
+            "sayiir_workflow_events",
+            "sayiir_workflow_signals",
+            "sayiir_task_claims",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE instance_id = $1"))
+                .bind(instance_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(PgError)?;
+        }
+
         let result = sqlx::query("DELETE FROM sayiir_workflow_snapshots WHERE instance_id = $1")
             .bind(instance_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(PgError)?;
+
+        tx.commit().await.map_err(PgError)?;
 
         if result.rows_affected() == 0 {
             return Err(BackendError::NotFound(instance_id.to_string()));

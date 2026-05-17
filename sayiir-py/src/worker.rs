@@ -15,7 +15,7 @@ use sayiir_runtime::{
     ExternalTaskExecutor, ExternalWorkflow, PooledWorker, WorkerHandle, WorkflowIndex,
 };
 
-use sayiir_postgres::PostgresBackend;
+use sayiir_postgres::{PoolOptions, PostgresBackend};
 use sayiir_runtime::serialization::JsonCodec;
 
 use crate::backend::{BackendKind, PyInMemoryBackend, PyPostgresBackend};
@@ -36,7 +36,7 @@ use crate::flow::PyWorkflow;
 pub struct PyWorker {
     worker_id: String,
     backend_kind: BackendKind,
-    postgres_url: Option<String>,
+    postgres: Option<(String, PoolOptions)>,
     poll_interval: Duration,
     claim_ttl: Duration,
     tags: Vec<String>,
@@ -53,11 +53,11 @@ impl PyWorker {
         claim_ttl_secs: f64,
         tags: Option<Vec<String>>,
     ) -> PyResult<Self> {
-        let (backend_kind, postgres_url) = extract_backend(backend)?;
+        let (backend_kind, postgres) = extract_backend(backend)?;
         Ok(Self {
             worker_id,
             backend_kind,
-            postgres_url,
+            postgres,
             poll_interval: Duration::from_secs_f64(poll_interval_secs),
             claim_ttl: Duration::from_secs_f64(claim_ttl_secs),
             tags: tags.unwrap_or_default(),
@@ -112,7 +112,7 @@ impl PyWorker {
 
         // Spawn a dedicated thread with a current-thread tokio runtime that
         // drives the actor loop (polling + heartbeats) without holding the GIL.
-        let postgres_url = self.postgres_url.clone();
+        let postgres = self.postgres.clone();
         let in_memory_backend = match &self.backend_kind {
             BackendKind::InMemory(b) => Some(Arc::clone(b)),
             BackendKind::Postgres(_) => None,
@@ -140,9 +140,11 @@ impl PyWorker {
                 };
 
                 // Create a fresh backend on worker's runtime (PgPool affinity).
-                let backend_kind = match postgres_url {
-                    Some(url) => {
-                        match runtime.block_on(PostgresBackend::<JsonCodec>::connect(&url)) {
+                let backend_kind = match postgres {
+                    Some((url, options)) => {
+                        match runtime.block_on(PostgresBackend::<JsonCodec>::connect_with_options(
+                            &url, options,
+                        )) {
                             Ok(b) => BackendKind::Postgres(Arc::new(b)),
                             Err(e) => {
                                 let _ = handle_tx.send(Err(e.to_string()));
@@ -240,13 +242,15 @@ impl PyWorkerHandle {
     }
 }
 
-fn extract_backend(backend: &Bound<'_, PyAny>) -> PyResult<(BackendKind, Option<String>)> {
+fn extract_backend(
+    backend: &Bound<'_, PyAny>,
+) -> PyResult<(BackendKind, Option<(String, PoolOptions)>)> {
     if let Ok(mem) = backend.extract::<PyInMemoryBackend>() {
         Ok((BackendKind::InMemory(Arc::clone(&mem.inner)), None))
     } else if let Ok(pg) = backend.extract::<PyPostgresBackend>() {
         Ok((
             BackendKind::Postgres(Arc::clone(&pg.inner)),
-            Some(pg.url.clone()),
+            Some((pg.url.clone(), pg.options.clone())),
         ))
     } else {
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(

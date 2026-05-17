@@ -2,9 +2,10 @@
 
 use pyo3::prelude::*;
 use sayiir_persistence::InMemoryBackend;
-use sayiir_postgres::PostgresBackend;
+use sayiir_postgres::{PoolOptions, PostgresBackend};
 use sayiir_runtime::serialization::JsonCodec;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Python-exposed in-memory persistence backend.
 ///
@@ -38,6 +39,9 @@ impl PyInMemoryBackend {
 pub struct PyPostgresBackend {
     pub(crate) inner: Arc<PostgresBackend<JsonCodec>>,
     pub(crate) url: String,
+    /// Pool options stashed so engine / worker / client can rebuild the pool
+    /// on their own tokio runtimes without losing the operator's tuning.
+    pub(crate) options: PoolOptions,
     /// Kept alive for connection pool background tasks.
     #[allow(dead_code)]
     pub(crate) runtime: Arc<tokio::runtime::Runtime>,
@@ -48,11 +52,54 @@ impl PyPostgresBackend {
     /// Create a new `PostgreSQL` backend.
     ///
     /// Args:
-    ///     url: Connection URL (e.g. `postgresql://localhost/sayiir`)
+    ///     url: Connection URL (e.g. `postgresql://localhost/sayiir`).
+    ///     `max_connections`: Maximum pool size (sqlx default: 10).
+    ///     `min_connections`: Minimum warm connections (sqlx default: 0).
+    ///     `acquire_timeout_secs`: Seconds to wait for a free connection
+    ///         before erroring out.
+    ///     `idle_timeout_secs`: Drop connections idle longer than this.
+    ///     `max_lifetime_secs`: Recycle connections older than this.
+    ///     `statement_timeout_secs`: PG `statement_timeout` applied to every
+    ///         connection. Aborts queries exceeding this duration.
+    ///     `idle_in_transaction_session_timeout_secs`: PG
+    ///         `idle_in_transaction_session_timeout` applied to every
+    ///         connection. Aborts transactions sitting idle. Named to match
+    ///         the underlying Postgres GUC for discoverability.
     #[new]
-    fn new(url: &str) -> PyResult<Self> {
+    #[pyo3(signature = (
+        url, *,
+        max_connections=None,
+        min_connections=None,
+        acquire_timeout_secs=None,
+        idle_timeout_secs=None,
+        max_lifetime_secs=None,
+        statement_timeout_secs=None,
+        idle_in_transaction_session_timeout_secs=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        url: &str,
+        max_connections: Option<u32>,
+        min_connections: Option<u32>,
+        acquire_timeout_secs: Option<f64>,
+        idle_timeout_secs: Option<f64>,
+        max_lifetime_secs: Option<f64>,
+        statement_timeout_secs: Option<f64>,
+        idle_in_transaction_session_timeout_secs: Option<f64>,
+    ) -> PyResult<Self> {
         tracing::info!("connecting to PostgreSQL backend");
         tracing::debug!(url, "PostgreSQL connection URL");
+
+        let options = PoolOptions {
+            max_connections,
+            min_connections,
+            acquire_timeout: acquire_timeout_secs.map(Duration::from_secs_f64),
+            idle_timeout: idle_timeout_secs.map(Duration::from_secs_f64),
+            max_lifetime: max_lifetime_secs.map(Duration::from_secs_f64),
+            statement_timeout: statement_timeout_secs.map(Duration::from_secs_f64),
+            idle_in_transaction_session_timeout: idle_in_transaction_session_timeout_secs
+                .map(Duration::from_secs_f64),
+        };
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -60,7 +107,10 @@ impl PyPostgresBackend {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let backend = runtime
-            .block_on(PostgresBackend::<JsonCodec>::connect(url))
+            .block_on(PostgresBackend::<JsonCodec>::connect_with_options(
+                url,
+                options.clone(),
+            ))
             .map_err(|e: sayiir_persistence::BackendError| {
                 tracing::error!(error = %e, "failed to connect to PostgreSQL");
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
@@ -71,6 +121,7 @@ impl PyPostgresBackend {
         Ok(Self {
             inner: Arc::new(backend),
             url: url.to_owned(),
+            options,
             runtime: Arc::new(runtime),
         })
     }
