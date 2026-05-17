@@ -1,0 +1,57 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommitTypeAll(⬆️)",
+    ":dependencyDashboard",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "Europe/Paris",
+  "schedule": ["before 6am on monday"],
+  "rangeStrategy": "bump",
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 10,
+  "labels": ["dependencies"],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "packageRules": [
+    {
+      "matchManagers": ["cargo"],
+      "groupName": "rust dependencies",
+      "semanticCommitType": "⬆️"
+    },
+    {
+      "matchManagers": ["pep621", "pip_requirements", "pip_setup", "pyenv"],
+      "groupName": "python dependencies",
+      "semanticCommitType": "⬆️"
+    },
+    {
+      "matchManagers": ["npm"],
+      "groupName": "node dependencies",
+      "semanticCommitType": "⬆️"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions",
+      "semanticCommitType": "👷"
+    },
+    {
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["dependencies:major"],
+      "automerge": false
+    },
+    {
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": false
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "schedule": ["at any time"]
+  },
+  "osvVulnerabilityAlerts": true
+}
