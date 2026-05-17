@@ -246,11 +246,30 @@ where
     )]
     async fn delete_snapshot(&self, instance_id: &str) -> Result<(), BackendError> {
         tracing::debug!("deleting snapshot");
+
+        let mut tx = self.pool.begin().await.map_err(PgError)?;
+
+        for table in [
+            "sayiir_workflow_snapshot_history",
+            "sayiir_workflow_tasks",
+            "sayiir_workflow_events",
+            "sayiir_workflow_signals",
+            "sayiir_task_claims",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE instance_id = $1"))
+                .bind(instance_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(PgError)?;
+        }
+
         let result = sqlx::query("DELETE FROM sayiir_workflow_snapshots WHERE instance_id = $1")
             .bind(instance_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(PgError)?;
+
+        tx.commit().await.map_err(PgError)?;
 
         if result.rows_affected() == 0 {
             return Err(BackendError::NotFound(instance_id.to_string()));
