@@ -41,16 +41,6 @@
       "matchManagers": ["github-actions"],
       "groupName": "github actions",
       "semanticCommitType": "👷"
-    },
-    {
-      "matchUpdateTypes": ["major"],
-      "addLabels": ["dependencies:major"],
-      "automerge": false
-    },
-    {
-      "matchDepTypes": ["devDependencies"],
-      "matchUpdateTypes": ["minor", "patch"],
-      "automerge": false
     }
   ],
   "vulnerabilityAlerts": {
