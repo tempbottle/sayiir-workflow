@@ -142,6 +142,10 @@ pub struct NodeInfo<'a> {
     pub retry_policy: Option<&'a RetryPolicy>,
     /// Execution priority (only populated for [`NodeKind::Task`]).
     pub priority: Option<u8>,
+    /// Affinity tags (only populated for [`NodeKind::Task`]).
+    pub tags: &'a [String],
+    /// Schema version string (only populated for [`NodeKind::Task`]).
+    pub version: Option<&'a str>,
 }
 
 /// Lazy, stack-based iterator over workflow nodes in topological order.
@@ -151,6 +155,8 @@ pub struct NodeIter<'a> {
     stack: Vec<(&'a WorkflowContinuation, Option<&'a str>)>,
 }
 
+const EMPTY_TAGS: &[String] = &[];
+
 impl<'a> Iterator for NodeIter<'a> {
     type Item = NodeInfo<'a>;
 
@@ -158,12 +164,14 @@ impl<'a> Iterator for NodeIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let (cont, predecessor) = self.stack.pop()?;
 
-        let (id, kind, timeout, retry_policy, priority) = match cont {
+        let (id, kind, timeout, retry_policy, priority, tags, version) = match cont {
             WorkflowContinuation::Task {
                 id,
                 timeout,
                 retry_policy,
                 priority,
+                tags,
+                version,
                 ..
             } => (
                 id.as_str(),
@@ -171,25 +179,63 @@ impl<'a> Iterator for NodeIter<'a> {
                 *timeout,
                 retry_policy.as_ref(),
                 *priority,
+                tags.as_slice(),
+                version.as_deref(),
             ),
-            WorkflowContinuation::Fork { id, .. } => {
-                (id.as_str(), NodeKind::Fork, None, None, None)
-            }
-            WorkflowContinuation::Delay { id, duration, .. } => {
-                (id.as_str(), NodeKind::Delay, Some(*duration), None, None)
-            }
-            WorkflowContinuation::AwaitSignal { id, timeout, .. } => {
-                (id.as_str(), NodeKind::AwaitSignal, *timeout, None, None)
-            }
-            WorkflowContinuation::Branch { id, .. } => {
-                (id.as_str(), NodeKind::Branch, None, None, None)
-            }
-            WorkflowContinuation::Loop { id, .. } => {
-                (id.as_str(), NodeKind::Loop, None, None, None)
-            }
-            WorkflowContinuation::ChildWorkflow { id, .. } => {
-                (id.as_str(), NodeKind::ChildWorkflow, None, None, None)
-            }
+            WorkflowContinuation::Fork { id, .. } => (
+                id.as_str(),
+                NodeKind::Fork,
+                None,
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
+            WorkflowContinuation::Delay { id, duration, .. } => (
+                id.as_str(),
+                NodeKind::Delay,
+                Some(*duration),
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
+            WorkflowContinuation::AwaitSignal { id, timeout, .. } => (
+                id.as_str(),
+                NodeKind::AwaitSignal,
+                *timeout,
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
+            WorkflowContinuation::Branch { id, .. } => (
+                id.as_str(),
+                NodeKind::Branch,
+                None,
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
+            WorkflowContinuation::Loop { id, .. } => (
+                id.as_str(),
+                NodeKind::Loop,
+                None,
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
+            WorkflowContinuation::ChildWorkflow { id, .. } => (
+                id.as_str(),
+                NodeKind::ChildWorkflow,
+                None,
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
         };
 
         // Push children in reverse order so the first child is popped next.
@@ -252,6 +298,8 @@ impl<'a> Iterator for NodeIter<'a> {
             timeout,
             retry_policy,
             priority,
+            tags,
+            version,
         })
     }
 }
@@ -707,14 +755,13 @@ impl WorkflowContinuation {
                 priority,
                 tags,
                 ..
-            }) => crate::task::TaskMetadata {
-                timeout: *timeout,
-                retries: retry_policy.clone(),
-                version: version.clone(),
-                priority: priority.and_then(crate::priority::Priority::from_u8),
-                tags: tags.clone(),
-                ..Default::default()
-            },
+            }) => crate::task::TaskMetadata::from_node_fields(
+                *timeout,
+                retry_policy.clone(),
+                version.clone(),
+                *priority,
+                tags.clone(),
+            ),
             _ => crate::task::TaskMetadata::default(),
         }
     }

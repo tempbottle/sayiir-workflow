@@ -83,8 +83,35 @@ impl TaskIndex {
     /// node's `id` to its [`TaskId`].
     #[must_use]
     pub fn build(continuation: &WorkflowContinuation) -> Self {
-        let mut map = HashMap::new();
-        collect(continuation, &mut map);
+        // Single traversal via `iter_nodes` — keeps tree-walking logic in one
+        // place so a new continuation variant only needs to teach `NodeIter`
+        // about itself, not a parallel walker. We index every id-carrying
+        // node (Task / Delay / AwaitSignal) so worker-side `contains` lookups
+        // succeed for delay and signal positions too.
+        let map: HashMap<TaskId, TaskNodeMetadata> = continuation
+            .iter_nodes()
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    crate::workflow::NodeKind::Task
+                        | crate::workflow::NodeKind::Delay
+                        | crate::workflow::NodeKind::AwaitSignal
+                )
+            })
+            .map(|n| {
+                let metadata = TaskNodeMetadata {
+                    name: Arc::from(n.id),
+                    timeout: n
+                        .timeout
+                        .filter(|_| n.kind == crate::workflow::NodeKind::Task),
+                    priority: n.priority,
+                    tags: n.tags.to_vec(),
+                    retry_policy: n.retry_policy.cloned(),
+                    version: n.version.map(str::to_owned),
+                };
+                (TaskId::from(n.id), metadata)
+            })
+            .collect();
         Self(map)
     }
 
@@ -140,14 +167,13 @@ impl TaskIndex {
     #[must_use]
     pub fn build_task_metadata(&self, task_id: &TaskId) -> crate::task::TaskMetadata {
         match self.0.get(task_id) {
-            Some(m) => crate::task::TaskMetadata {
-                timeout: m.timeout,
-                retries: m.retry_policy.clone(),
-                version: m.version.clone(),
-                priority: m.priority.and_then(crate::priority::Priority::from_u8),
-                tags: m.tags.clone(),
-                ..Default::default()
-            },
+            Some(m) => crate::task::TaskMetadata::from_node_fields(
+                m.timeout,
+                m.retry_policy.clone(),
+                m.version.clone(),
+                m.priority,
+                m.tags.clone(),
+            ),
             None => crate::task::TaskMetadata::default(),
         }
     }
@@ -162,86 +188,5 @@ impl TaskIndex {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-}
-
-fn collect(cont: &WorkflowContinuation, out: &mut HashMap<TaskId, TaskNodeMetadata>) {
-    match cont {
-        WorkflowContinuation::Task {
-            id,
-            timeout,
-            retry_policy,
-            version,
-            priority,
-            tags,
-            next,
-            ..
-        } => {
-            out.insert(
-                TaskId::from(id.as_str()),
-                TaskNodeMetadata {
-                    name: Arc::from(id.as_str()),
-                    timeout: *timeout,
-                    priority: *priority,
-                    tags: tags.clone(),
-                    retry_policy: retry_policy.clone(),
-                    version: version.clone(),
-                },
-            );
-            if let Some(n) = next.as_deref() {
-                collect(n, out);
-            }
-        }
-        WorkflowContinuation::Delay { id, next, .. }
-        | WorkflowContinuation::AwaitSignal { id, next, .. } => {
-            // Non-Task nodes still hash their id so worker-side
-            // `contains(&task_id)` validation succeeds for delay/signal nodes.
-            out.insert(
-                TaskId::from(id.as_str()),
-                TaskNodeMetadata {
-                    name: Arc::from(id.as_str()),
-                    ..TaskNodeMetadata::default()
-                },
-            );
-            if let Some(n) = next.as_deref() {
-                collect(n, out);
-            }
-        }
-        WorkflowContinuation::Fork { branches, join, .. } => {
-            for branch in branches {
-                collect(branch, out);
-            }
-            if let Some(j) = join.as_deref() {
-                collect(j, out);
-            }
-        }
-        WorkflowContinuation::Branch {
-            branches,
-            default,
-            next,
-            ..
-        } => {
-            for branch in branches.values() {
-                collect(branch, out);
-            }
-            if let Some(d) = default.as_deref() {
-                collect(d, out);
-            }
-            if let Some(n) = next.as_deref() {
-                collect(n, out);
-            }
-        }
-        WorkflowContinuation::Loop { body, next, .. } => {
-            collect(body, out);
-            if let Some(n) = next.as_deref() {
-                collect(n, out);
-            }
-        }
-        WorkflowContinuation::ChildWorkflow { child, next, .. } => {
-            collect(child, out);
-            if let Some(n) = next.as_deref() {
-                collect(n, out);
-            }
-        }
     }
 }

@@ -50,6 +50,36 @@ pub struct TaskMetadata {
     pub priority: Option<Priority>,
 }
 
+impl TaskMetadata {
+    /// Build a `TaskMetadata` from the subset of fields actually stored on a
+    /// `WorkflowContinuation::Task` node (or in the `TaskIndex`). `display_name`
+    /// and `description` aren't stored on continuation nodes, so they default.
+    ///
+    /// Shared by both [`WorkflowContinuation::build_task_metadata`] and
+    /// [`TaskIndex::build_task_metadata`] so adding a new continuation-node
+    /// field only requires updating one place.
+    ///
+    /// [`WorkflowContinuation::build_task_metadata`]: crate::workflow::WorkflowContinuation::build_task_metadata
+    /// [`TaskIndex::build_task_metadata`]: crate::task_index::TaskIndex::build_task_metadata
+    #[must_use]
+    pub fn from_node_fields(
+        timeout: Option<Duration>,
+        retries: Option<RetryPolicy>,
+        version: Option<String>,
+        priority: Option<u8>,
+        tags: Vec<String>,
+    ) -> Self {
+        Self {
+            timeout,
+            retries,
+            version,
+            priority: priority.and_then(Priority::from_u8),
+            tags,
+            ..Default::default()
+        }
+    }
+}
+
 /// Configuration for retrying failed task executions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetryPolicy {
