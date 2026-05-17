@@ -16,8 +16,6 @@ jobs:
         target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -43,8 +41,6 @@ jobs:
         target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -66,8 +62,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -89,8 +83,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
 
       - uses: PyO3/maturin-action@v1
         with:
@@ -131,8 +123,6 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -184,8 +174,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -225,8 +213,6 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
         with:
@@ -260,8 +246,6 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -323,8 +307,6 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
         with:
