@@ -1049,7 +1049,10 @@ async fn find_hinted_task_returns_available_task() {
         .expect("hinted task should still be eligible");
     assert_eq!(task.instance_id, "wf-hint-found");
     assert_eq!(task.task_id, "first");
-    assert_eq!(task.workflow_definition_hash, sayiir_core::DefinitionHash::from("h"));
+    assert_eq!(
+        task.workflow_definition_hash,
+        sayiir_core::DefinitionHash::from("h")
+    );
 }
 
 /// `find_hinted_task` must return `None` when the snapshot already

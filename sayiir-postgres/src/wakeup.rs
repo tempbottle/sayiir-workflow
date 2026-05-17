@@ -81,7 +81,7 @@ fn build_hint(snapshot: &sayiir_core::snapshot::WorkflowSnapshot) -> Option<Task
     Some(TaskWakeupHint {
         instance_id: snapshot.instance_id.clone(),
         task_id: task_id.to_string(),
-        definition_hash: snapshot.definition_hash.clone(),
+        definition_hash: snapshot.definition_hash.to_hex(),
         tags: snapshot.current_task_tags().to_vec(),
     })
 }
