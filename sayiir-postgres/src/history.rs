@@ -1,0 +1,144 @@
+//! Shared plumbing for paths that mutate the snapshot blob.
+//!
+//! `sayiir_workflow_snapshot_history` is the canonical store of the
+//! encoded snapshot bytes; the `sayiir_workflow_snapshots` table only
+//! holds metadata and a `history_version` pointer into history. Any
+//! path that mutates the blob (save_snapshot, save_task_result,
+//! check_and_cancel, check_and_pause, unpause) must:
+//!
+//! 1. Lock the snapshot row and read the current blob via
+//!    [`lock_snapshot_for_mutation`].
+//! 2. Mutate in memory and re-encode.
+//! 3. Append a new history row with the bumped version through
+//!    [`append_history`].
+//! 4. Update snapshot metadata (status, history_version, position
+//!    kind, etc.) without touching `data`.
+//!
+//! The helpers in this module own steps 1 and 3 so the SQL stays in
+//! one place — every site that mutates the blob writes the same
+//! history shape, including the `data_hash` (SHA-256 of the encoded
+//! blob) that paves the way for a future KV/object-store offload.
+
+use sayiir_core::codec::{self, Decoder};
+use sayiir_core::snapshot::WorkflowSnapshot;
+use sayiir_persistence::BackendError;
+use sha2::{Digest, Sha256};
+use sqlx::{PgConnection, Row};
+
+use crate::backend::PostgresBackend;
+use crate::error::PgError;
+
+/// SQL fragment joining `sayiir_workflow_snapshots s` to its canonical
+/// history row. Inlined into every read path that needs the blob —
+/// kept in one place so the join shape can't drift across sites.
+pub(crate) const HISTORY_JOIN: &str = "JOIN sayiir_workflow_snapshot_history h
+                 ON h.instance_id = s.instance_id AND h.version = s.history_version";
+
+/// SHA-256 of the encoded snapshot bytes. Persisted on every history
+/// row so a future migration can move blob storage to a KV/object
+/// store keyed by hash without changing the on-disk row shape further.
+pub(crate) fn snapshot_hash(data: &[u8]) -> [u8; 32] {
+    Sha256::digest(data).into()
+}
+
+impl<C> PostgresBackend<C>
+where
+    C: Decoder + codec::sealed::DecodeValue<WorkflowSnapshot>,
+{
+    /// Single point of indirection for snapshot blob reads.
+    ///
+    /// Today this is a PK lookup against `sayiir_workflow_snapshot_history`.
+    /// When blob storage moves to a KV / object store, this method becomes
+    /// `SELECT data_hash → blob_store.get(hash)` (with a legacy fallback to
+    /// `data` for rows from before that cutover) and every caller picks up
+    /// the change without further edits. Use this instead of inlining the
+    /// SQL anywhere a blob is fetched by `(instance_id, version)`.
+    pub(crate) async fn fetch_blob<'e, E>(
+        &self,
+        executor: E,
+        instance_id: &str,
+        history_version: i32,
+    ) -> Result<Vec<u8>, BackendError>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
+        let row = sqlx::query(
+            "SELECT data FROM sayiir_workflow_snapshot_history
+             WHERE instance_id = $1 AND version = $2",
+        )
+        .bind(instance_id)
+        .bind(history_version)
+        .fetch_one(executor)
+        .await
+        .map_err(PgError)?;
+        Ok(row.get("data"))
+    }
+
+    /// Lock the snapshot row for mutation and load the latest blob.
+    ///
+    /// Used by every path that does read-modify-write on the snapshot:
+    /// `FOR UPDATE OF s` serialises concurrent writers on the same
+    /// instance (two racing completions would otherwise lose one
+    /// mutation). The JOIN to `sayiir_workflow_snapshot_history` is
+    /// where the blob actually lives now — the snapshot row only
+    /// stores a pointer (`history_version`).
+    ///
+    /// Returns `Ok(None)` if the instance does not exist; callers
+    /// decide whether that's an error.
+    pub(crate) async fn lock_snapshot_for_mutation(
+        &self,
+        tx: &mut PgConnection,
+        instance_id: &str,
+    ) -> Result<Option<(WorkflowSnapshot, i32)>, BackendError> {
+        // Lock the metadata row first; the blob is then fetched through
+        // `fetch_blob` so the read-side abstraction stays uniform with
+        // the rest of the codebase.
+        let row = sqlx::query(
+            "SELECT history_version FROM sayiir_workflow_snapshots
+             WHERE instance_id = $1
+             FOR UPDATE",
+        )
+        .bind(instance_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(PgError)?;
+
+        let Some(row) = row else { return Ok(None) };
+        let history_version: i32 = row.get("history_version");
+        let data = self
+            .fetch_blob(&mut *tx, instance_id, history_version)
+            .await?;
+        let snapshot = self.decode(&data)?;
+        Ok(Some((snapshot, history_version)))
+    }
+}
+
+/// Append a row to `sayiir_workflow_snapshot_history` with the
+/// encoded blob and its hash. Caller is responsible for advancing
+/// `sayiir_workflow_snapshots.history_version` to `version` in the
+/// same transaction so loads find this row through the JOIN.
+pub(crate) async fn append_history(
+    tx: &mut PgConnection,
+    instance_id: &str,
+    version: i32,
+    status: &str,
+    current_task_id: Option<&str>,
+    data: &[u8],
+) -> Result<(), BackendError> {
+    let data_hash = snapshot_hash(data);
+    sqlx::query(
+        "INSERT INTO sayiir_workflow_snapshot_history
+            (instance_id, version, status, current_task_id, data, data_hash)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(instance_id)
+    .bind(version)
+    .bind(status)
+    .bind(current_task_id)
+    .bind(data)
+    .bind(data_hash.as_slice())
+    .execute(&mut *tx)
+    .await
+    .map_err(PgError)?;
+    Ok(())
+}

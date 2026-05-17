@@ -64,7 +64,9 @@
 #![allow(clippy::doc_markdown)]
 
 mod backend;
+mod backfill;
 mod error;
+mod history;
 mod signal_store;
 mod snapshot_store;
 mod task_claim_store;
@@ -72,3 +74,4 @@ mod task_result_store;
 mod wakeup;
 
 pub use backend::{PoolOptions, PostgresBackend};
+pub use backfill::BackfillStats;
