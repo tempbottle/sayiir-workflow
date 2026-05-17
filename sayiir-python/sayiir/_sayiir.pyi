@@ -137,7 +137,18 @@ class PyInMemoryBackend:
 class PyPostgresBackend:
     """PostgreSQL persistence backend for workflow snapshots."""
 
-    def __init__(self, url: str) -> None: ...
+    def __init__(
+        self,
+        url: str,
+        *,
+        max_connections: int | None = None,
+        min_connections: int | None = None,
+        acquire_timeout_secs: float | None = None,
+        idle_timeout_secs: float | None = None,
+        max_lifetime_secs: float | None = None,
+        statement_timeout_secs: float | None = None,
+        idle_in_transaction_timeout_secs: float | None = None,
+    ) -> None: ...
     def __repr__(self) -> str: ...
 
 class PyDurableEngine:

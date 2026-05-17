@@ -70,4 +70,4 @@ mod snapshot_store;
 mod task_claim_store;
 mod task_result_store;
 
-pub use backend::PostgresBackend;
+pub use backend::{PoolOptions, PostgresBackend};

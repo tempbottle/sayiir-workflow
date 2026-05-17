@@ -16,7 +16,7 @@ use sayiir_runtime::{
     ExternalTaskExecutor, ExternalWorkflow, PooledWorker, WorkerHandle, WorkflowIndex,
 };
 
-use sayiir_postgres::PostgresBackend;
+use sayiir_postgres::{PoolOptions, PostgresBackend};
 use sayiir_runtime::serialization::JsonCodec;
 
 use crate::backend::{BackendKind, NapiInMemoryBackend, NapiPostgresBackend};
@@ -27,7 +27,7 @@ use crate::flow::NapiWorkflow;
 pub struct NapiWorker {
     worker_id: String,
     backend_kind: BackendKind,
-    postgres_url: Option<String>,
+    postgres: Option<(String, PoolOptions)>,
     poll_interval: Duration,
     claim_ttl: Duration,
     tags: Vec<String>,
@@ -47,7 +47,7 @@ impl NapiWorker {
         Self {
             worker_id,
             backend_kind: BackendKind::InMemory(Arc::clone(&backend.inner)),
-            postgres_url: None,
+            postgres: None,
             poll_interval: Duration::from_millis(
                 #[allow(clippy::cast_sign_loss)]
                 {
@@ -76,7 +76,7 @@ impl NapiWorker {
         Self {
             worker_id,
             backend_kind: BackendKind::Postgres(Arc::clone(&backend.inner)),
-            postgres_url: Some(backend.url.clone()),
+            postgres: Some((backend.url.clone(), backend.options.clone())),
             poll_interval: Duration::from_millis(
                 #[allow(clippy::cast_sign_loss)]
                 {
@@ -154,7 +154,7 @@ impl NapiWorker {
         });
 
         // Spawn worker on a dedicated background thread.
-        let postgres_url = self.postgres_url.clone();
+        let postgres = self.postgres.clone();
         let in_memory_backend = match &self.backend_kind {
             BackendKind::InMemory(b) => Some(Arc::clone(b)),
             BackendKind::Postgres(_) => None,
@@ -184,16 +184,16 @@ impl NapiWorker {
 
                 // Create a fresh backend on the worker's own runtime to avoid
                 // cross-runtime PgPool affinity issues.
-                let backend_kind = match postgres_url {
-                    Some(url) => {
-                        match runtime.block_on(PostgresBackend::<JsonCodec>::connect(&url)) {
-                            Ok(b) => BackendKind::Postgres(Arc::new(b)),
-                            Err(e) => {
-                                let _ = handle_tx.send(Err(e.to_string()));
-                                return;
-                            }
+                let backend_kind = match postgres {
+                    Some((url, options)) => match runtime.block_on(
+                        PostgresBackend::<JsonCodec>::connect_with_options(&url, options),
+                    ) {
+                        Ok(b) => BackendKind::Postgres(Arc::new(b)),
+                        Err(e) => {
+                            let _ = handle_tx.send(Err(e.to_string()));
+                            return;
                         }
-                    }
+                    },
                     None => {
                         // InMemory backend — no pool affinity issue, reuse the shared Arc.
                         BackendKind::InMemory(

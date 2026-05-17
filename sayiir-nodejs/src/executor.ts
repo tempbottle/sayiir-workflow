@@ -32,6 +32,30 @@ export class InMemoryBackend {
   }
 }
 
+/**
+ * Connection-pool tuning for {@link PostgresBackend.connect}.
+ *
+ * All fields are optional; unset fields fall back to sqlx pool defaults
+ * (`maxConnections=10`, no idle/lifetime caps, no session-level timeouts).
+ * Durations are specified in seconds.
+ */
+export interface PgPoolOptions {
+  /** Maximum number of pool connections. */
+  maxConnections?: number;
+  /** Minimum number of warm connections kept open. */
+  minConnections?: number;
+  /** Seconds to wait for a free connection before erroring. */
+  acquireTimeoutSecs?: number;
+  /** Drop connections idle longer than this many seconds. */
+  idleTimeoutSecs?: number;
+  /** Recycle connections older than this many seconds. */
+  maxLifetimeSecs?: number;
+  /** PG `statement_timeout` (seconds) applied per connection. */
+  statementTimeoutSecs?: number;
+  /** PG `idle_in_transaction_session_timeout` (seconds) applied per connection. */
+  idleInTransactionTimeoutSecs?: number;
+}
+
 /** PostgreSQL persistence backend for durable production workflows. */
 export class PostgresBackend {
   /** @internal */
@@ -41,8 +65,8 @@ export class PostgresBackend {
     this._inner = inner;
   }
 
-  static connect(url: string): PostgresBackend {
-    const inner = getNative().NapiPostgresBackend.connect(url);
+  static connect(url: string, options?: PgPoolOptions): PostgresBackend {
+    const inner = getNative().NapiPostgresBackend.connect(url, options);
     return new PostgresBackend(inner);
   }
 }

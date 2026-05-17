@@ -344,9 +344,27 @@ declare module "sayiir" {
     constructor();
   }
 
+  /**
+   * Connection-pool tuning for {@link PostgresBackend.connect}.
+   *
+   * All fields are optional; unset fields fall back to sqlx pool defaults.
+   * Durations are specified in seconds.
+   */
+  interface PgPoolOptions {
+    maxConnections?: number;
+    minConnections?: number;
+    acquireTimeoutSecs?: number;
+    idleTimeoutSecs?: number;
+    maxLifetimeSecs?: number;
+    /** PG `statement_timeout` applied per connection. */
+    statementTimeoutSecs?: number;
+    /** PG `idle_in_transaction_session_timeout` applied per connection. */
+    idleInTransactionTimeoutSecs?: number;
+  }
+
   /** PostgreSQL backend for production. */
   class PostgresBackend {
-    static connect(url: string): PostgresBackend;
+    static connect(url: string, options?: PgPoolOptions): PostgresBackend;
   }
 
   // ── Duration utility ──
