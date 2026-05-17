@@ -32,14 +32,23 @@ where
         request: SignalRequest,
     ) -> Result<(), BackendError> {
         tracing::debug!("storing signal");
-        // Validate workflow state first
-        let row =
-            sqlx::query("SELECT status FROM sayiir_workflow_snapshots WHERE instance_id = $1")
-                .bind(instance_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(PgError)?
-                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+        // Lock the snapshot row for the duration of validate-then-insert so a
+        // concurrent `save_snapshot` can't transition the workflow to a state
+        // that would have failed `validate_signal_allowed` between our read
+        // and our write. `save_snapshot` upserts into the same row and will
+        // block on the lock until this transaction commits.
+        let mut tx = self.pool.begin().await.map_err(PgError)?;
+
+        let row = sqlx::query(
+            "SELECT status FROM sayiir_workflow_snapshots
+             WHERE instance_id = $1
+             FOR UPDATE",
+        )
+        .bind(instance_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(PgError)?
+        .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
 
         let status: String = row.get("status");
         validate_signal_allowed(&status, kind)?;
@@ -54,10 +63,11 @@ where
         .bind(kind.as_ref())
         .bind(&request.reason)
         .bind(&request.requested_by)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(PgError)?;
 
+        tx.commit().await.map_err(PgError)?;
         Ok(())
     }
 
