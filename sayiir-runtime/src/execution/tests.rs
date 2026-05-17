@@ -615,7 +615,10 @@ async fn test_prepare_run_creates_snapshot() {
     };
 
     assert_eq!(snapshot.instance_id, "inst-1");
-    assert_eq!(snapshot.definition_hash, "hash-1");
+    assert_eq!(
+        snapshot.definition_hash,
+        sayiir_core::DefinitionHash::from("hash-1")
+    );
     assert!(snapshot.state.is_in_progress());
 
     let loaded = backend.load_snapshot("inst-1").await.unwrap();
@@ -632,7 +635,9 @@ async fn test_prepare_resume_ready() {
     );
     backend.save_snapshot(&snapshot).await.unwrap();
 
-    let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
+    let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
+        .await
+        .unwrap();
     match outcome {
         ResumeOutcome::Ready {
             snapshot,
@@ -656,7 +661,9 @@ async fn test_prepare_resume_with_completed_tasks() {
     snapshot.mark_task_completed("task-1".into(), Bytes::from("task1_output"));
     backend.save_snapshot(&snapshot).await.unwrap();
 
-    let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
+    let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
+        .await
+        .unwrap();
     match outcome {
         ResumeOutcome::Ready { input_bytes, .. } => {
             // Should use last task output, not initial input
@@ -673,7 +680,9 @@ async fn test_prepare_resume_already_completed() {
     snapshot.mark_completed(Bytes::from("result"));
     backend.save_snapshot(&snapshot).await.unwrap();
 
-    let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
+    let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
+        .await
+        .unwrap();
     match outcome {
         ResumeOutcome::AlreadyTerminal(WorkflowStatus::Completed) => {}
         _ => panic!("Expected AlreadyTerminal(Completed)"),
@@ -687,7 +696,9 @@ async fn test_prepare_resume_already_failed() {
     snapshot.mark_failed("err".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
-    let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
+    let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
+        .await
+        .unwrap();
     match outcome {
         ResumeOutcome::AlreadyTerminal(WorkflowStatus::Failed(_)) => {}
         _ => panic!("Expected AlreadyTerminal(Failed)"),
@@ -701,7 +712,9 @@ async fn test_prepare_resume_already_cancelled() {
     snapshot.mark_cancelled(Some("reason".into()), Some("admin".into()), None);
     backend.save_snapshot(&snapshot).await.unwrap();
 
-    let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
+    let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
+        .await
+        .unwrap();
     match outcome {
         ResumeOutcome::AlreadyTerminal(WorkflowStatus::Cancelled { reason, .. }) => {
             assert_eq!(reason, Some("reason".into()));
@@ -716,7 +729,7 @@ async fn test_prepare_resume_hash_mismatch() {
     let snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
     backend.save_snapshot(&snapshot).await.unwrap();
 
-    let result = prepare_resume("inst-1", "wrong-hash", &backend).await;
+    let result = prepare_resume("inst-1", &"wrong-hash".into(), &backend).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("mismatch"));
 }

@@ -496,7 +496,7 @@ pub struct WorkflowSnapshot {
     /// Unique identifier for this workflow instance.
     pub instance_id: String,
     /// Hash of the workflow definition (for validation).
-    pub definition_hash: String,
+    pub definition_hash: crate::DefinitionHash,
     /// Current state of execution.
     pub state: WorkflowSnapshotState,
     /// Timestamp when this snapshot was created (Unix timestamp).
@@ -550,7 +550,7 @@ impl WorkflowSnapshot {
 
     /// Create a new snapshot for a workflow instance.
     #[must_use]
-    pub fn new(instance_id: String, definition_hash: String) -> Self {
+    pub fn new(instance_id: String, definition_hash: crate::DefinitionHash) -> Self {
         let now = Self::current_timestamp();
         Self {
             instance_id,
@@ -575,7 +575,7 @@ impl WorkflowSnapshot {
     /// Create a new snapshot with initial input.
     pub fn with_initial_input(
         instance_id: String,
-        definition_hash: String,
+        definition_hash: crate::DefinitionHash,
         initial_input: Bytes,
     ) -> Self {
         let now = Self::current_timestamp();
@@ -1074,7 +1074,10 @@ mod tests {
     fn test_new_snapshot_in_progress() {
         let snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         assert_eq!(snapshot.instance_id, "inst-1");
-        assert_eq!(snapshot.definition_hash, "hash-1");
+        assert_eq!(
+            snapshot.definition_hash,
+            crate::DefinitionHash::from("hash-1")
+        );
         assert!(snapshot.state.is_in_progress());
         assert!(!snapshot.state.is_terminal());
         assert!(snapshot.initial_input.is_none());

@@ -89,7 +89,7 @@ impl NapiWorkflowClient {
         instance_id: String,
         input: Unknown,
     ) -> Result<NapiWorkflowStatus> {
-        let definition_hash = workflow.definition_hash.clone();
+        let definition_hash = workflow.definition_hash;
         let first_task = workflow.continuation.first_task_hint();
         let conflict_policy = self.conflict_policy;
 

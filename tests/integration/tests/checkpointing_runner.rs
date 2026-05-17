@@ -135,7 +135,7 @@ async fn cancel_and_resume() {
     let input_bytes = Arc::new(JsonCodec).encode(&1u32).unwrap();
     let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
         "inst-cancel".into(),
-        workflow.definition_hash().to_string(),
+        *workflow.definition_hash(),
         input_bytes,
     );
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
@@ -183,7 +183,7 @@ async fn pause_unpause_resume() {
     let input_bytes = Arc::new(JsonCodec).encode(&5u32).unwrap();
     let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
         "inst-pause".into(),
-        workflow.definition_hash().to_string(),
+        *workflow.definition_hash(),
         input_bytes,
     );
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
@@ -531,7 +531,7 @@ async fn definition_hash_mismatch_on_resume() {
     let input_bytes = Arc::new(JsonCodec).encode(&5u32).unwrap();
     let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
         "inst-mismatch".into(),
-        workflow_v1.definition_hash().to_string(),
+        *workflow_v1.definition_hash(),
         input_bytes,
     );
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
@@ -580,7 +580,7 @@ async fn task_version_change_causes_hash_mismatch() {
     let input_bytes = Arc::new(JsonCodec).encode(&5u32).unwrap();
     let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
         "inst-version".into(),
-        workflow_v1.definition_hash().to_string(),
+        *workflow_v1.definition_hash(),
         input_bytes,
     );
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
@@ -652,7 +652,7 @@ async fn task_version_none_vs_some_causes_hash_mismatch() {
     let input_bytes = Arc::new(JsonCodec).encode(&5u32).unwrap();
     let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
         "inst-version-none".into(),
-        workflow_v1.definition_hash().to_string(),
+        *workflow_v1.definition_hash(),
         input_bytes,
     );
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
@@ -985,7 +985,7 @@ async fn two_workers_collaborate_on_workflows() {
         .unwrap();
 
     let wf = Arc::new(workflow);
-    let def_hash = wf.definition_hash().to_string();
+    let def_hash = *wf.definition_hash();
 
     // Submit 6 workflow instances via the client.
     let client = WorkflowClient::new(backend_client);
@@ -1001,8 +1001,8 @@ async fn two_workers_collaborate_on_workflows() {
     let registry1 = sayiir_core::registry::TaskRegistry::new();
     let registry2 = sayiir_core::registry::TaskRegistry::new();
 
-    let workflows1 = vec![(def_hash.clone(), Arc::clone(&wf))];
-    let workflows2 = vec![(def_hash.clone(), Arc::clone(&wf))];
+    let workflows1 = vec![(def_hash, Arc::clone(&wf))];
+    let workflows2 = vec![(def_hash, Arc::clone(&wf))];
 
     let worker1 = PooledWorker::new("worker-1", backend_w1, registry1)
         .with_claim_ttl(Some(Duration::from_secs(30)));

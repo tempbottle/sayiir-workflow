@@ -84,9 +84,9 @@ pub enum BuildError {
     #[error("Workflow definition mismatch: expected hash '{expected}', found '{found}'")]
     DefinitionMismatch {
         /// The expected hash (from current workflow).
-        expected: String,
+        expected: crate::DefinitionHash,
         /// The hash found in the serialized state.
-        found: String,
+        found: crate::DefinitionHash,
     },
 
     /// A `#[task]` requires a dependency that is missing from the `Deps`
@@ -235,9 +235,9 @@ pub enum WorkflowError {
     #[error("Workflow definition mismatch: expected hash '{expected}', found '{found}'")]
     DefinitionMismatch {
         /// The expected hash (from current workflow).
-        expected: String,
+        expected: crate::DefinitionHash,
         /// The hash found in the serialized state.
-        found: String,
+        found: crate::DefinitionHash,
     },
 
     /// The workflow was cancelled.

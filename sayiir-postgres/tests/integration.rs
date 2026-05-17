@@ -57,7 +57,10 @@ async fn save_and_load_snapshot() {
     let loaded = backend.load_snapshot("test-1").await.unwrap();
 
     assert_eq!(loaded.instance_id, "test-1");
-    assert_eq!(loaded.definition_hash, "hash-1");
+    assert_eq!(
+        loaded.definition_hash,
+        sayiir_core::DefinitionHash::from("hash-1")
+    );
     assert!(loaded.state.is_in_progress());
 }
 

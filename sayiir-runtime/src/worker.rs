@@ -36,7 +36,8 @@ use tokio::sync::mpsc;
 use tokio::time;
 
 /// A list of workflow definitions keyed by their definition hash.
-pub type WorkflowRegistry<C, Input, M> = Vec<(String, Arc<Workflow<C, Input, M>>)>;
+pub type WorkflowRegistry<C, Input, M> =
+    Vec<(sayiir_core::DefinitionHash, Arc<Workflow<C, Input, M>>)>;
 
 /// Workflow definition for binding-friendly worker API.
 ///
@@ -53,7 +54,7 @@ pub struct ExternalWorkflow {
 }
 
 /// Workflow index keyed by definition hash for O(1) lookup during task dispatch.
-pub type WorkflowIndex = HashMap<String, ExternalWorkflow>;
+pub type WorkflowIndex = HashMap<sayiir_core::DefinitionHash, ExternalWorkflow>;
 
 /// External task executor function signature.
 ///
@@ -209,7 +210,7 @@ fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 /// let workflow = WorkflowBuilder::new(ctx)
 ///     .then("step1", |i: u32| async move { Ok(i + 1) })
 ///     .build()?;
-/// let workflows = vec![(workflow.definition_hash().to_string(), Arc::new(workflow))];
+/// let workflows = vec![(*workflow.definition_hash(), Arc::new(workflow))];
 ///
 /// // Spawn the worker and get a handle for lifecycle control
 /// let handle = worker.spawn(Duration::from_secs(1), workflows);
@@ -547,7 +548,7 @@ where
     async fn execute_external_task(
         &self,
         ext_wf: &ExternalWorkflow,
-        definition_hash: &str,
+        definition_hash: &sayiir_core::DefinitionHash,
         executor: &ExternalTaskExecutor,
         available_task: &AvailableTask,
     ) -> Result<WorkflowStatus, crate::error::RuntimeError> {
@@ -803,6 +804,7 @@ where
                 if let Some((_, workflow)) = workflows
                     .iter()
                     .find(|(hash, _)| *hash == task.workflow_definition_hash)
+                // hash and task.workflow_definition_hash are both DefinitionHash
                 {
                     match self.execute_task(workflow.as_ref(), task).await {
                         Err(ref e) if e.is_timeout() => {
@@ -1195,15 +1197,15 @@ where
     /// and that the task is not already completed in the snapshot.
     /// Returns `Ok(true)` if the task should be skipped (already completed).
     fn validate_task_preconditions(
-        definition_hash: &str,
+        definition_hash: &sayiir_core::DefinitionHash,
         continuation: &WorkflowContinuation,
         available_task: &AvailableTask,
         snapshot: &WorkflowSnapshot,
     ) -> Result<bool, crate::error::RuntimeError> {
-        if available_task.workflow_definition_hash != definition_hash {
+        if available_task.workflow_definition_hash != *definition_hash {
             return Err(WorkflowError::DefinitionMismatch {
-                expected: definition_hash.to_string(),
-                found: available_task.workflow_definition_hash.clone(),
+                expected: *definition_hash,
+                found: available_task.workflow_definition_hash,
             }
             .into());
         }
@@ -2073,7 +2075,7 @@ mod tests {
         let registry = TaskRegistry::new();
 
         // Create a workflow snapshot so store_signal can validate it
-        let snapshot = WorkflowSnapshot::new("wf-1".to_string(), "hash-1".to_string());
+        let snapshot = WorkflowSnapshot::new("wf-1".to_string(), "hash-1".into());
         backend.save_snapshot(&snapshot).await.ok();
 
         let worker = PooledWorker::new("test-worker", backend, registry);

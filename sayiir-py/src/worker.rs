@@ -68,24 +68,26 @@ impl PyWorker {
     ///
     /// Args:
     ///     workflows: List of `(Workflow, task_registry_dict)` tuples
+    #[allow(clippy::too_many_lines)]
     fn start(
         &self,
         py: Python<'_>,
         workflows: Vec<(PyRef<'_, PyWorkflow>, Py<PyDict>)>,
     ) -> PyResult<PyWorkerHandle> {
         let mut external_workflows: WorkflowIndex = WorkflowIndex::with_capacity(workflows.len());
-        let mut registries: Vec<(String, Arc<Py<PyDict>>)> = Vec::with_capacity(workflows.len());
+        let mut registries: Vec<(sayiir_core::DefinitionHash, Arc<Py<PyDict>>)> =
+            Vec::with_capacity(workflows.len());
 
         for (wf, reg) in &workflows {
             external_workflows.insert(
-                wf.definition_hash.clone(),
+                wf.definition_hash,
                 ExternalWorkflow {
                     continuation: Arc::clone(&wf.continuation),
                     workflow_id: Arc::from(wf.workflow_id.as_str()),
                     metadata_json: wf.metadata_json.as_deref().map(Arc::from),
                 },
             );
-            registries.push((wf.definition_hash.clone(), Arc::new(reg.clone_ref(py))));
+            registries.push((wf.definition_hash, Arc::new(reg.clone_ref(py))));
         }
 
         let registries = Arc::new(registries);

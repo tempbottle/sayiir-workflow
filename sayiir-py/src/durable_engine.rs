@@ -100,7 +100,7 @@ impl PyDurableEngine {
         task_registry: Py<PyDict>,
     ) -> PyResult<PyWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
-        let definition_hash = workflow.definition_hash.clone();
+        let definition_hash = workflow.definition_hash;
         let first_task = continuation.first_task_hint();
         let registry = Arc::new(task_registry);
 
@@ -208,7 +208,7 @@ impl PyDurableEngine {
         task_registry: Py<PyDict>,
     ) -> PyResult<PyWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
-        let definition_hash = workflow.definition_hash.clone();
+        let definition_hash = workflow.definition_hash;
         let workflow_id = workflow.workflow_id.clone();
         let workflow_metadata_json: Option<Arc<str>> =
             workflow.metadata_json.as_deref().map(Arc::from);

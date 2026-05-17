@@ -32,7 +32,7 @@ use crate::error::RuntimeError;
 /// I/O errors.
 pub async fn check_existing_instance<B>(
     instance_id: &str,
-    definition_hash: &str,
+    definition_hash: &sayiir_core::DefinitionHash,
     backend: &B,
     conflict_policy: ConflictPolicy,
 ) -> Result<Option<(WorkflowStatus, Option<Bytes>)>, RuntimeError>
@@ -44,10 +44,10 @@ where
     }
     match backend.load_snapshot(instance_id).await {
         Ok(existing) => {
-            if existing.definition_hash != definition_hash {
+            if existing.definition_hash != *definition_hash {
                 return Err(WorkflowError::DefinitionMismatch {
-                    expected: definition_hash.to_string(),
-                    found: existing.definition_hash.clone(),
+                    expected: *definition_hash,
+                    found: existing.definition_hash,
                 }
                 .into());
             }
@@ -86,7 +86,7 @@ where
 )]
 pub async fn prepare_run<B>(
     instance_id: String,
-    definition_hash: String,
+    definition_hash: sayiir_core::DefinitionHash,
     input_bytes: Bytes,
     first_task: TaskHint,
     backend: &B,
@@ -143,7 +143,7 @@ where
 )]
 pub async fn prepare_resume<B>(
     instance_id: &str,
-    definition_hash: &str,
+    definition_hash: &sayiir_core::DefinitionHash,
     backend: &B,
 ) -> Result<ResumeOutcome, RuntimeError>
 where
@@ -153,10 +153,10 @@ where
     let mut snapshot = backend.load_snapshot(instance_id).await?;
 
     // Validate definition hash
-    if snapshot.definition_hash != definition_hash {
+    if snapshot.definition_hash != *definition_hash {
         return Err(WorkflowError::DefinitionMismatch {
-            expected: definition_hash.to_string(),
-            found: snapshot.definition_hash.clone(),
+            expected: *definition_hash,
+            found: snapshot.definition_hash,
         }
         .into());
     }

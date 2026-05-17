@@ -31,7 +31,7 @@ pub(crate) enum ResumeOutcome {
 /// Prepare to resume a workflow from a saved snapshot.
 pub(crate) async fn prepare_resume<B: SignalStore>(
     instance_id: &str,
-    definition_hash: &str,
+    definition_hash: &sayiir_core::DefinitionHash,
     backend: &B,
 ) -> Result<ResumeOutcome, wasm_bindgen::JsValue> {
     let mut snapshot = backend
@@ -39,7 +39,7 @@ pub(crate) async fn prepare_resume<B: SignalStore>(
         .await
         .map_err(to_js_error)?;
 
-    if snapshot.definition_hash != definition_hash {
+    if snapshot.definition_hash != *definition_hash {
         return Err(to_js_error(format!(
             "Definition mismatch: expected '{}', found '{}'",
             definition_hash, snapshot.definition_hash

@@ -53,7 +53,7 @@ where
         sqlx::query(upsert_sql.as_str())
             .bind(&snapshot.instance_id) // ?1
             .bind(status) // ?2
-            .bind(&snapshot.definition_hash) // ?3
+            .bind(snapshot.definition_hash.to_hex()) // ?3
             .bind(&task_id) // ?4
             .bind(i64::from(task_count)) // ?5
             .bind(&data) // ?6

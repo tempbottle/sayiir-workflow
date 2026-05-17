@@ -39,9 +39,9 @@ pub enum RunConflict {
     /// The existing snapshot was produced from a different workflow definition.
     DefinitionMismatch {
         /// Definition hash the caller expected.
-        expected: String,
+        expected: sayiir_core::DefinitionHash,
         /// Definition hash actually stored.
-        found: String,
+        found: sayiir_core::DefinitionHash,
     },
     /// Backend I/O error.
     Backend(BackendError),
@@ -107,7 +107,7 @@ impl std::error::Error for RunConflict {
 /// or backend I/O failures.
 pub async fn prepare_run<B>(
     instance_id: String,
-    definition_hash: String,
+    definition_hash: sayiir_core::DefinitionHash,
     input_bytes: Bytes,
     first_task: TaskHint,
     backend: &B,

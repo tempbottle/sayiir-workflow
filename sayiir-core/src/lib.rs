@@ -79,6 +79,7 @@ pub mod context;
 pub mod continuation_builder;
 pub mod deps;
 pub mod error;
+pub mod hash32;
 pub mod loop_result;
 pub mod prelude;
 pub mod priority;
@@ -88,5 +89,6 @@ pub mod task;
 pub mod task_claim;
 pub mod workflow;
 
+pub use hash32::{DefinitionHash, Hash32};
 pub use loop_result::LoopResult;
 pub use workflow::MaxIterationsPolicy;

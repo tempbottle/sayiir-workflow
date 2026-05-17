@@ -361,7 +361,7 @@ fn build_available_task(
         instance_id: snapshot.instance_id.clone(),
         task_id: task_id.to_string(),
         input: input_bytes,
-        workflow_definition_hash: snapshot.definition_hash.clone(),
+        workflow_definition_hash: snapshot.definition_hash,
         trace_parent: snapshot.trace_parent.clone(),
     })
 }

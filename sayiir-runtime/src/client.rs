@@ -110,7 +110,7 @@ where
         C: Codec + EnvelopeCodec + sealed::EncodeValue<Input> + 'static,
     {
         let instance_id = instance_id.into();
-        let definition_hash = workflow.definition_hash().to_string();
+        let definition_hash = *workflow.definition_hash();
         let conflict_policy = self.conflict_policy;
 
         // Phase 1: check for existing instance before encoding input.

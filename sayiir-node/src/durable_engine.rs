@@ -143,7 +143,7 @@ impl NapiDurableEngine {
         task_registry: Object,
     ) -> Result<NapiWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
-        let definition_hash = workflow.definition_hash.clone();
+        let definition_hash = workflow.definition_hash;
         let first_task = continuation.first_task_hint();
 
         tracing::info!(
@@ -239,7 +239,7 @@ impl NapiDurableEngine {
         task_registry: Object,
     ) -> Result<NapiWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
-        let definition_hash = workflow.definition_hash.clone();
+        let definition_hash = workflow.definition_hash;
 
         tracing::info!(
             workflow_id = %workflow.workflow_id,

@@ -146,7 +146,7 @@ where
         use crate::{PrepareRunOutcome, check_existing_instance, prepare_run};
 
         let instance_id = instance_id.into();
-        let definition_hash = workflow.definition_hash().to_string();
+        let definition_hash = *workflow.definition_hash();
         let conflict_policy = self.conflict_policy;
 
         // Phase 1: check for existing instance before encoding input.
@@ -229,10 +229,10 @@ where
         let mut snapshot = self.backend.load_snapshot(instance_id).await?;
 
         // Validate definition hash
-        if snapshot.definition_hash != workflow.definition_hash() {
+        if snapshot.definition_hash != *workflow.definition_hash() {
             return Err(WorkflowError::DefinitionMismatch {
-                expected: workflow.definition_hash().to_string(),
-                found: snapshot.definition_hash.clone(),
+                expected: *workflow.definition_hash(),
+                found: snapshot.definition_hash,
             }
             .into());
         }
@@ -1215,7 +1215,7 @@ mod tests {
         // Manually create in-progress snapshot with workflow1's hash
         let mut snapshot = WorkflowSnapshot::with_initial_input(
             "inst-2".into(),
-            workflow1.definition_hash().to_string(),
+            *workflow1.definition_hash(),
             Bytes::from(serde_json::to_vec(&5u32).unwrap()),
         );
         snapshot.update_position(ExecutionPosition::AtTask {
@@ -1258,7 +1258,7 @@ mod tests {
         let input_bytes = Arc::new(JsonCodec).encode(&1u32).unwrap();
         let mut snapshot = WorkflowSnapshot::with_initial_input(
             "inst-cancel".into(),
-            workflow.definition_hash().to_string(),
+            *workflow.definition_hash(),
             input_bytes,
         );
         snapshot.update_position(ExecutionPosition::AtTask {
@@ -1302,7 +1302,7 @@ mod tests {
         let input_bytes = Arc::new(JsonCodec).encode(&1u32).unwrap();
         let mut snapshot = WorkflowSnapshot::with_initial_input(
             "inst-precancel".into(),
-            workflow.definition_hash().to_string(),
+            *workflow.definition_hash(),
             input_bytes,
         );
         snapshot.update_position(ExecutionPosition::AtTask {

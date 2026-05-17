@@ -152,7 +152,7 @@ pub struct AvailableTask {
     /// The input data for the task (serialized).
     pub input: bytes::Bytes,
     /// The workflow definition hash.
-    pub workflow_definition_hash: String,
+    pub workflow_definition_hash: crate::DefinitionHash,
     /// W3C `traceparent` header for distributed trace context propagation.
     pub trace_parent: Option<String>,
 }

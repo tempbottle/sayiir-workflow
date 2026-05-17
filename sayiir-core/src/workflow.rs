@@ -1195,7 +1195,7 @@ impl SerializableContinuation {
     /// arrangement.
     #[must_use]
     #[allow(clippy::too_many_lines)]
-    pub fn compute_definition_hash(&self) -> String {
+    pub fn compute_definition_hash(&self) -> crate::DefinitionHash {
         #[allow(clippy::too_many_lines)]
         fn hash_continuation(cont: &SerializableContinuation, hasher: &mut Sha256) {
             match cont {
@@ -1344,8 +1344,7 @@ impl SerializableContinuation {
 
         let mut hasher = Sha256::new();
         hash_continuation(self, &mut hasher);
-        let result = hasher.finalize();
-        format!("{result:x}")
+        crate::DefinitionHash::from_hash(crate::Hash32::from_digest(hasher))
     }
 }
 
@@ -1361,7 +1360,7 @@ pub struct SerializedWorkflowState {
     pub workflow_id: String,
     /// SHA256 hash of the workflow definition structure.
     /// Used to detect version mismatches during deserialization.
-    pub definition_hash: String,
+    pub definition_hash: crate::DefinitionHash,
     /// The serializable continuation structure.
     pub continuation: SerializableContinuation,
 }
@@ -1548,7 +1547,7 @@ use crate::registry::TaskRegistry;
 
 /// A built workflow that can be executed.
 pub struct Workflow<C, Input, M = ()> {
-    pub(crate) definition_hash: String,
+    pub(crate) definition_hash: crate::DefinitionHash,
     pub(crate) context: WorkflowContext<C, M>,
     pub(crate) continuation: WorkflowContinuation,
     pub(crate) _phantom: PhantomData<Input>,
@@ -1567,7 +1566,7 @@ impl<C, Input, M> Workflow<C, Input, M> {
     /// as a version identifier. It can be used to detect when a serialized workflow
     /// state was created with a different workflow definition.
     #[must_use]
-    pub fn definition_hash(&self) -> &str {
+    pub fn definition_hash(&self) -> &crate::DefinitionHash {
         &self.definition_hash
     }
 
@@ -1673,7 +1672,7 @@ impl<C, Input, M> SerializableWorkflow<C, Input, M> {
 
     /// Get the definition hash.
     #[must_use]
-    pub fn definition_hash(&self) -> &str {
+    pub fn definition_hash(&self) -> &crate::DefinitionHash {
         self.inner.definition_hash()
     }
 
@@ -1731,7 +1730,7 @@ impl<C, Input, M> SerializableWorkflow<C, Input, M> {
     pub fn to_serializable(&self) -> SerializedWorkflowState {
         SerializedWorkflowState {
             workflow_id: self.inner.workflow_id().to_string(),
-            definition_hash: self.inner.definition_hash.clone(),
+            definition_hash: self.inner.definition_hash,
             continuation: self.inner.continuation().to_serializable(),
         }
     }
@@ -1751,8 +1750,8 @@ impl<C, Input, M> SerializableWorkflow<C, Input, M> {
     ) -> Result<WorkflowContinuation, crate::error::BuildError> {
         if state.definition_hash != self.inner.definition_hash {
             return Err(crate::error::BuildError::DefinitionMismatch {
-                expected: self.inner.definition_hash.clone(),
-                found: state.definition_hash.clone(),
+                expected: self.inner.definition_hash,
+                found: state.definition_hash,
             });
         }
         state.continuation.to_runnable(&self.registry)
@@ -2119,13 +2118,16 @@ mod tests {
         // Check workflow_id is set correctly
         assert_eq!(workflow.workflow_id(), "my-workflow-id");
 
-        // Definition hash should be non-empty
-        assert!(!workflow.definition_hash().is_empty());
+        // Definition hash should be non-zero
+        assert_ne!(
+            *workflow.definition_hash(),
+            crate::DefinitionHash::from_bytes([0u8; 32])
+        );
 
         // Serializable state should contain the same id and hash
         let state = workflow.to_serializable();
         assert_eq!(state.workflow_id, "my-workflow-id");
-        assert_eq!(state.definition_hash, workflow.definition_hash());
+        assert_eq!(&state.definition_hash, workflow.definition_hash());
     }
 
     #[test]
@@ -2167,7 +2169,7 @@ mod tests {
 
         // Create a state with wrong hash
         let mut state = workflow.to_serializable();
-        state.definition_hash = "wrong-hash".to_string();
+        state.definition_hash = crate::DefinitionHash::sha256(b"wrong-hash");
 
         // to_runnable should fail with DefinitionMismatch
         let result = workflow.to_runnable(&state);

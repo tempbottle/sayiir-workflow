@@ -104,7 +104,7 @@ impl WasmDurableEngine {
 
         let outcome = lifecycle::prepare_run(
             instance_id,
-            workflow.definition_hash.clone(),
+            workflow.definition_hash,
             input_bytes.clone(),
             first_task,
             self.backend.as_ref(),
