@@ -74,15 +74,27 @@ where
         .await
         .map_err(PgError)?;
 
-        Ok(row.map(|r| TaskClaim {
-            instance_id: std::sync::Arc::from(r.get::<&str, _>("instance_id")),
-            task_id: sayiir_core::TaskId::from_hex(r.get::<&str, _>("task_id")).unwrap_or_default(),
-            worker_id: r.get("worker_id"),
-            claimed_at: r.get::<i64, _>("claimed_epoch").cast_unsigned(),
-            expires_at: r
-                .get::<Option<i64>, _>("expires_epoch")
-                .map(i64::cast_unsigned),
-        }))
+        row.map(|r| {
+            let task_id_hex: &str = r.get("task_id");
+            // Fail loudly on invalid hex rather than silently coercing to
+            // TaskId::default() — a malformed task_id column means data
+            // corruption and would otherwise cause incorrect claim ownership.
+            let task_id = sayiir_core::TaskId::from_hex(task_id_hex).map_err(|e| {
+                BackendError::Backend(format!(
+                    "invalid task_id hex in sayiir_task_claims: {task_id_hex:?}: {e}"
+                ))
+            })?;
+            Ok(TaskClaim {
+                instance_id: std::sync::Arc::from(r.get::<&str, _>("instance_id")),
+                task_id,
+                worker_id: r.get("worker_id"),
+                claimed_at: r.get::<i64, _>("claimed_epoch").cast_unsigned(),
+                expires_at: r
+                    .get::<Option<i64>, _>("expires_epoch")
+                    .map(i64::cast_unsigned),
+            })
+        })
+        .transpose()
     }
 
     #[tracing::instrument(

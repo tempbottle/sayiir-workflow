@@ -81,12 +81,12 @@ pub(crate) async fn finalize_execution<B: SnapshotStore>(
                 WorkflowSnapshotState::InProgress {
                     position: ExecutionPosition::AtDelay { delay_id, .. },
                     ..
-                } => delay_id.clone(),
+                } => *delay_id,
                 WorkflowSnapshotState::InProgress {
                     position: ExecutionPosition::AtFork { fork_id, .. },
                     ..
-                } => fork_id.clone(),
-                _ => String::new(),
+                } => *fork_id,
+                _ => sayiir_core::TaskId::default(),
             };
             Ok((WorkflowStatus::Waiting { wake_at, delay_id }, None))
         }
@@ -187,12 +187,12 @@ async fn resolve_parked<B: SignalStore>(
                 },
             ..
         } => {
-            let delay_id = delay_id.clone();
+            let delay_id = *delay_id;
             let wake_at = *wake_at;
-            let next_task_id = next_task_id.clone();
+            let next_task_id = *next_task_id;
 
             // Check cancel/pause
-            if let Some(status) = check_cancel_pause(backend, instance_id, Some(&delay_id)).await? {
+            if let Some(status) = check_cancel_pause(backend, instance_id, Some(delay_id)).await? {
                 return Ok(Some(status));
             }
 
@@ -220,10 +220,10 @@ async fn resolve_parked<B: SignalStore>(
             },
             ..
         } => {
-            let fork_id = fork_id.clone();
+            let fork_id = *fork_id;
             let wake_at = *wake_at;
 
-            if let Some(status) = check_cancel_pause(backend, instance_id, Some(&fork_id)).await? {
+            if let Some(status) = check_cancel_pause(backend, instance_id, Some(fork_id)).await? {
                 return Ok(Some(status));
             }
 
@@ -253,13 +253,12 @@ async fn resolve_parked<B: SignalStore>(
                 },
             ..
         } => {
-            let signal_id = signal_id.clone();
+            let signal_id = *signal_id;
             let signal_name = signal_name.clone();
             let wake_at = *wake_at;
-            let next_task_id = next_task_id.clone();
+            let next_task_id = *next_task_id;
 
-            if let Some(status) = check_cancel_pause(backend, instance_id, Some(&signal_id)).await?
-            {
+            if let Some(status) = check_cancel_pause(backend, instance_id, Some(signal_id)).await? {
                 return Ok(Some(status));
             }
 
@@ -318,7 +317,7 @@ async fn resolve_parked<B: SignalStore>(
 async fn check_cancel_pause<B: SignalStore>(
     backend: &B,
     instance_id: &str,
-    scope: Option<&str>,
+    scope: Option<sayiir_core::TaskId>,
 ) -> Result<Option<WorkflowStatus>, wasm_bindgen::JsValue> {
     if backend
         .check_and_cancel(instance_id, scope)

@@ -3,8 +3,10 @@
 //! [`Hash32`] is a primitive value type — a `[u8; 32]` with cheap `Copy`,
 //! constant-time-equivalent comparison (single SIMD-friendly memcmp), and a
 //! single hash-map probe instead of the per-character hashing a `String`
-//! incurs. It is the building block for the semantic id newtypes (currently
-//! [`DefinitionHash`]; `WorkflowId` and `TaskId` will follow in Phase 2).
+//! incurs. It is the building block for the semantic id newtypes
+//! [`DefinitionHash`], [`WorkflowId`], and [`TaskId`], each of which is a
+//! distinct `Hash32` newtype so the type system prevents mixing identifier
+//! kinds at call sites.
 //!
 //! Serde encodes a `Hash32` as a 64-character lowercase hex string on
 //! human-readable formats (JSON, TOML) and as raw 32 bytes on binary formats

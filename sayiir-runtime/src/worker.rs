@@ -47,6 +47,10 @@ pub type WorkflowRegistry<C, Input, M> =
 pub struct ExternalWorkflow {
     /// The continuation tree describing the workflow structure.
     pub continuation: Arc<WorkflowContinuation>,
+    /// Per-workflow `TaskId → metadata` index. Built once when the workflow
+    /// is registered; replaces the O(N) tree walk + per-node SHA-256 that
+    /// the worker would otherwise do for every task dispatch.
+    pub task_index: Arc<sayiir_core::TaskIndex>,
     /// Human-readable workflow name (for log/error display and FFI task executor).
     pub workflow_id: Arc<str>,
     /// Optional JSON-encoded workflow-level metadata.
@@ -655,14 +659,13 @@ where
             let _ = tracing::Span::current().set_parent(remote_ctx);
         }
 
-        let continuation = &ext_wf.continuation;
         let mut snapshot = self
             .backend
             .load_snapshot(&available_task.instance_id)
             .await?;
         let already_completed = Self::validate_task_preconditions(
             definition_hash,
-            continuation,
+            &ext_wf.task_index,
             available_task,
             &snapshot,
         )?;
@@ -708,17 +711,16 @@ where
         snapshot: &mut WorkflowSnapshot,
         claim: &ActiveTaskClaim<'_, B>,
     ) -> ExecutionOutcome {
-        let continuation = &ext_wf.continuation;
         let task_id = available_task.task_id;
         let input = available_task.input.clone();
-        // Resolve the human-readable task name from the continuation tree so we
-        // can hand it to the external task executor (which looks up Python/Node
-        // functions by name).
-        let task_name: Arc<str> = continuation
-            .find_task_name(&task_id)
-            .map_or_else(|| Arc::from(task_id.to_hex()), Arc::from);
+        // Resolve the human-readable task name from the prebuilt index so the
+        // FFI executor can look up the Python/Node function by name. No tree
+        // walk and no per-node SHA-256 — this is a single hash-map probe.
+        let indexed_meta = ext_wf.task_index.get(&task_id);
+        let task_name: Arc<str> =
+            indexed_meta.map_or_else(|| Arc::from(task_id.to_hex()), |m| Arc::clone(&m.name));
 
-        let deadline = if let Some(timeout) = continuation.get_task_timeout(&task_id) {
+        let deadline = if let Some(timeout) = indexed_meta.and_then(|m| m.timeout) {
             snapshot.set_task_deadline(task_id, timeout);
             let _ = self.backend.save_snapshot(snapshot).await;
             snapshot.refresh_task_deadline();
@@ -731,7 +733,7 @@ where
             workflow_id: Arc::clone(&ext_wf.workflow_id),
             instance_id: Arc::clone(&available_task.instance_id),
             task_id: Arc::clone(&task_name),
-            metadata: continuation.build_task_metadata(&task_id),
+            metadata: ext_wf.task_index.build_task_metadata(&task_id),
             workflow_metadata_json: ext_wf.metadata_json.clone(),
         };
 
@@ -1039,7 +1041,7 @@ where
             .await?;
         let already_completed = Self::validate_task_preconditions(
             workflow.definition_hash(),
-            workflow.continuation(),
+            workflow.task_index(),
             &available_task,
             &snapshot,
         )?;
@@ -1100,16 +1102,17 @@ where
             + 'static,
     {
         let continuation = workflow.continuation();
+        let task_index = workflow.task_index();
         let task_id = available_task.task_id;
         let input = available_task.input.clone();
-        // Resolve human-readable task name from the continuation tree for the
-        // task context exposed to user code.
-        let task_name: Arc<str> = continuation
-            .find_task_name(&task_id)
-            .map_or_else(|| Arc::from(task_id.to_hex()), Arc::from);
+        // Resolve human-readable task name from the prebuilt index for the
+        // task context exposed to user code (no tree walk, no rehashing).
+        let indexed_meta = task_index.get(&task_id);
+        let task_name: Arc<str> =
+            indexed_meta.map_or_else(|| Arc::from(task_id.to_hex()), |m| Arc::clone(&m.name));
 
         // Set deadline if task has a timeout configured
-        let deadline = if let Some(timeout) = continuation.get_task_timeout(&task_id) {
+        let deadline = if let Some(timeout) = indexed_meta.and_then(|m| m.timeout) {
             snapshot.set_task_deadline(task_id, timeout);
             let _ = self.backend.save_snapshot(snapshot).await;
             // Refresh deadline to now + timeout so it measures actual execution
@@ -1124,7 +1127,7 @@ where
             workflow_id: Arc::from(workflow.context().workflow_id()),
             instance_id: Arc::clone(&available_task.instance_id),
             task_id: Arc::clone(&task_name),
-            metadata: continuation.build_task_metadata(&task_id),
+            metadata: task_index.build_task_metadata(&task_id),
             workflow_metadata_json: workflow.context().metadata_json.clone(),
         };
 
@@ -1326,7 +1329,7 @@ where
     /// Returns `Ok(true)` if the task should be skipped (already completed).
     fn validate_task_preconditions(
         definition_hash: &sayiir_core::DefinitionHash,
-        continuation: &WorkflowContinuation,
+        task_index: &sayiir_core::TaskIndex,
         available_task: &AvailableTask,
         snapshot: &WorkflowSnapshot,
     ) -> Result<bool, crate::error::RuntimeError> {
@@ -1338,7 +1341,7 @@ where
             .into());
         }
 
-        if !Self::find_task_id_in_continuation(continuation, &available_task.task_id) {
+        if !task_index.contains(&available_task.task_id) {
             tracing::error!(
                 instance_id = %available_task.instance_id,
                 task_id = %available_task.task_id,
@@ -1608,8 +1611,11 @@ where
 
     /// Find a task function in the workflow continuation and return a reference.
     ///
-    /// Note: We can't clone `UntypedCoreTask`, so we need to execute it directly
-    /// from the continuation structure. This method returns the task ID if found.
+    /// Tree-walk predicate: does `task_id` appear anywhere inside `continuation`?
+    ///
+    /// Only used by [`execute_task_by_id`] to pick which subtree to descend into
+    /// at a `Fork`/`Branch`/`Loop`/`ChildWorkflow` boundary. Validation on the
+    /// dispatch hot path uses [`sayiir_core::TaskIndex::contains`] instead.
     fn find_task_id_in_continuation(
         continuation: &WorkflowContinuation,
         task_id: &sayiir_core::TaskId,
@@ -1625,13 +1631,11 @@ where
                     .is_some_and(|n| Self::find_task_id_in_continuation(n, task_id))
             }
             WorkflowContinuation::Fork { branches, join, .. } => {
-                // Check branches
                 for branch in branches {
                     if Self::find_task_id_in_continuation(branch, task_id) {
                         return true;
                     }
                 }
-                // Check join
                 if let Some(join_cont) = join {
                     Self::find_task_id_in_continuation(join_cont, task_id)
                 } else {

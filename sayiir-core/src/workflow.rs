@@ -1573,6 +1573,11 @@ pub struct Workflow<C, Input, M = ()> {
     pub(crate) definition_hash: crate::DefinitionHash,
     pub(crate) context: WorkflowContext<C, M>,
     pub(crate) continuation: WorkflowContinuation,
+    /// Per-workflow `TaskId → metadata` index, built once at `build()` time.
+    ///
+    /// Avoids re-hashing every node id with SHA-256 on every dispatch lookup
+    /// (`find_task_name`, `get_task_*`, `build_task_metadata`).
+    pub(crate) task_index: Arc<crate::task_index::TaskIndex>,
     pub(crate) _phantom: PhantomData<Input>,
 }
 
@@ -1609,6 +1614,13 @@ impl<C, Input, M> Workflow<C, Input, M> {
     #[must_use]
     pub fn continuation(&self) -> &WorkflowContinuation {
         &self.continuation
+    }
+
+    /// Get a reference to the `TaskId → metadata` index. Built once at build
+    /// time; cheap to clone (it's behind an `Arc`).
+    #[must_use]
+    pub fn task_index(&self) -> &Arc<crate::task_index::TaskIndex> {
+        &self.task_index
     }
 
     /// Get a reference to the metadata attached to this workflow.

@@ -184,10 +184,12 @@ where
         // Execute workflow with checkpointing
         let context = workflow.context().clone();
         let continuation = workflow.continuation();
+        let task_index = workflow.task_index();
         let backend = Arc::clone(&self.backend);
 
         let result = Self::execute_with_checkpointing(
             continuation,
+            task_index,
             input_bytes,
             &mut snapshot,
             Arc::clone(&backend),
@@ -254,6 +256,7 @@ where
         // Resume execution
         let context = workflow.context().clone();
         let continuation = workflow.continuation();
+        let task_index = workflow.task_index();
         let backend = Arc::clone(&self.backend);
 
         // Get the last completed task's output or initial input
@@ -261,6 +264,7 @@ where
 
         let result = Self::execute_with_checkpointing(
             continuation,
+            task_index,
             input_bytes,
             &mut snapshot,
             Arc::clone(&backend),
@@ -276,6 +280,7 @@ where
     #[allow(clippy::manual_async_fn, clippy::too_many_lines)]
     async fn execute_with_checkpointing<'a, C, M>(
         continuation: &'a WorkflowContinuation,
+        task_index: &'a sayiir_core::TaskIndex,
         input: Bytes,
         snapshot: &'a mut WorkflowSnapshot,
         backend: Arc<B>,
@@ -325,8 +330,8 @@ where
                         let next_hash = sayiir_core::TaskId::from(next_name.as_str());
                         snapshot.set_task_hint(&TaskHint::new(
                             &next_name,
-                            continuation.get_task_priority(&next_hash),
-                            continuation.get_task_tags(&next_hash),
+                            task_index.priority(&next_hash),
+                            task_index.tags(&next_hash),
                         ));
                         snapshot.update_position(ExecutionPosition::AtTask { task_id: next_hash });
                     }
@@ -354,7 +359,7 @@ where
                     } else {
                         let wake_at = compute_wake_at(duration)?;
                         Ok(ControlFlow::Break(StepOutcome::Park(ParkReason::Delay {
-                            delay_id: sayiir_core::TaskId::from(id),
+                            delay_id: sayiir_core::TaskId::from(id.as_str()),
                             wake_at,
                             next_task: next.as_deref().map(WorkflowContinuation::first_task_hint),
                             passthrough: current_input.clone(),
@@ -410,7 +415,7 @@ where
                             }
                             Ok(None) => Ok(ControlFlow::Break(StepOutcome::Park(
                                 ParkReason::AwaitingSignal {
-                                    signal_id: sayiir_core::TaskId::from(id),
+                                    signal_id: sayiir_core::TaskId::from(id.as_str()),
                                     signal_name: signal_name.clone(),
                                     timeout: compute_signal_timeout(timeout.as_ref()),
                                     next_task: next
@@ -553,6 +558,7 @@ where
                         for iteration in cfg.start_iteration..cfg.max_iterations {
                             let output = Box::pin(Self::execute_with_checkpointing(
                                 body,
+                                task_index,
                                 loop_input.clone(),
                                 snapshot,
                                 Arc::clone(&backend),
@@ -616,6 +622,7 @@ where
                     } else {
                         let output = Box::pin(Self::execute_with_checkpointing(
                             child,
+                            task_index,
                             current_input.clone(),
                             snapshot,
                             Arc::clone(&backend),

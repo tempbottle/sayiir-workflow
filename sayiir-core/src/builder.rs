@@ -1361,11 +1361,13 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
             .continuation
             .to_serializable()
             .compute_definition_hash();
+        let task_index = Arc::new(crate::task_index::TaskIndex::build(&self.continuation));
 
         Ok(Workflow {
             definition_hash,
             continuation: self.continuation,
             context: self.context,
+            task_index,
             _phantom: PhantomData,
         })
     }
@@ -1400,11 +1402,13 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
             .continuation
             .to_serializable()
             .compute_definition_hash();
+        let task_index = Arc::new(crate::task_index::TaskIndex::build(&self.continuation));
 
         let inner = Workflow {
             definition_hash,
             continuation: self.continuation,
             context: self.context,
+            task_index,
             _phantom: PhantomData,
         };
 

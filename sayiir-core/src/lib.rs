@@ -87,8 +87,10 @@ pub mod registry;
 pub mod snapshot;
 pub mod task;
 pub mod task_claim;
+pub mod task_index;
 pub mod workflow;
 
 pub use hash32::{DefinitionHash, Hash32, TaskId, WorkflowId};
 pub use loop_result::LoopResult;
+pub use task_index::{TaskIndex, TaskNodeMetadata};
 pub use workflow::MaxIterationsPolicy;

@@ -103,7 +103,7 @@ impl WasmDurableEngine {
         let first_task = continuation.first_task_hint();
 
         let outcome = lifecycle::prepare_run(
-            instance_id,
+            &instance_id,
             workflow.definition_hash,
             input_bytes.clone(),
             first_task,
@@ -418,7 +418,9 @@ impl<'a> Executor<'a> {
         // Park at delay — save checkpoint and return
         let wake_at =
             Utc::now() + chrono::Duration::from_std(*duration).unwrap_or(chrono::Duration::zero());
-        let next_task_id = next.as_deref().map(|n| n.first_task_id().to_string());
+        let next_task_id = next
+            .as_deref()
+            .map(|n| sayiir_core::TaskId::from(n.first_task_id()));
 
         self.snapshot.update_position(ExecutionPosition::AtDelay {
             delay_id: sayiir_core::TaskId::from(id),
@@ -485,7 +487,9 @@ impl<'a> Executor<'a> {
                 let wake_at = timeout.map(|d| {
                     Utc::now() + chrono::Duration::from_std(d).unwrap_or(chrono::Duration::zero())
                 });
-                let next_task_id = next.as_deref().map(|n| n.first_task_id().to_string());
+                let next_task_id = next
+                    .as_deref()
+                    .map(|n| sayiir_core::TaskId::from(n.first_task_id()));
 
                 self.snapshot.update_position(ExecutionPosition::AtSignal {
                     signal_id: sayiir_core::TaskId::from(id),
@@ -530,13 +534,11 @@ impl<'a> Executor<'a> {
         let mut max_wake_at: Option<chrono::DateTime<Utc>> = None;
 
         for branch in branches {
-            let branch_id = branch.id().to_string();
+            let branch_name = branch.id().to_string();
+            let branch_hash = sayiir_core::TaskId::from(branch_name.as_str());
 
-            if let Some(cached) = self
-                .snapshot
-                .get_task_result(&sayiir_core::TaskId::from(branch_id))
-            {
-                branch_results.push((branch_id, cached.output.clone()));
+            if let Some(cached) = self.snapshot.get_task_result(&branch_hash) {
+                branch_results.push((branch_name, cached.output.clone()));
                 continue;
             }
 
@@ -548,9 +550,9 @@ impl<'a> Executor<'a> {
                     // output (because the first task uses `branch_id` as
                     // its own id) and feed the wrong value into the join.
                     self.snapshot
-                        .mark_task_completed(sayiir_core::TaskId::from(branch_id), output.clone());
+                        .mark_task_completed(branch_hash, output.clone());
                     self.checkpoint().await?;
-                    branch_results.push((branch_id, output));
+                    branch_results.push((branch_name, output));
                 }
                 Err(WorkflowError::Waiting { wake_at }) => {
                     max_wake_at = Some(match max_wake_at {
@@ -591,14 +593,14 @@ impl<'a> Executor<'a> {
                 (
                     id.clone(),
                     TaskResult {
-                        task_id: sayiir_core::TaskId::from(id),
+                        task_id: sayiir_core::TaskId::from(id.as_str()),
                         output: output.clone(),
                     },
                 )
             })
             .collect();
         self.snapshot.update_position(ExecutionPosition::AtFork {
-            fork_id: fork_id,
+            fork_id: sayiir_core::TaskId::from(fork_id),
             completed_branches,
             wake_at,
         });
@@ -819,13 +821,13 @@ async fn execute_with_checkpointing(
 /// return values.
 async fn call_js_task(
     registry: &js_sys::Object,
-    task_id: &sayiir_core::TaskId,
+    task_name: &str,
     input: &Bytes,
 ) -> Result<Bytes, WorkflowError> {
-    let func: js_sys::Function = js_sys::Reflect::get(registry, &JsValue::from_str(task_id))
-        .map_err(|_| WorkflowError::TaskNotFound(task_id.to_string()))?
+    let func: js_sys::Function = js_sys::Reflect::get(registry, &JsValue::from_str(task_name))
+        .map_err(|_| WorkflowError::TaskNotFound(task_name.to_string()))?
         .dyn_into()
-        .map_err(|_| WorkflowError::TaskNotFound(format!("'{task_id}' is not a function")))?;
+        .map_err(|_| WorkflowError::TaskNotFound(format!("'{task_name}' is not a function")))?;
 
     let input_js = decode_to_js_value(input)
         .map_err(|e| WorkflowError::ResumeError(format!("Failed to decode task input: {e:?}")))?;
@@ -839,7 +841,7 @@ async fn call_js_task(
                     .and_then(|m| m.as_string())
             })
             .unwrap_or_else(|| format!("{e:?}"));
-        WorkflowError::TaskPanicked(format!("Task '{task_id}': {msg}"))
+        WorkflowError::TaskPanicked(format!("Task '{task_name}': {msg}"))
     })?;
 
     // If the result is a Promise (thenable), await it
@@ -854,7 +856,7 @@ async fn call_js_task(
                         .and_then(|m| m.as_string())
                 })
                 .unwrap_or_else(|| format!("{e:?}"));
-            WorkflowError::TaskPanicked(format!("Task '{task_id}': {msg}"))
+            WorkflowError::TaskPanicked(format!("Task '{task_name}': {msg}"))
         })?
     } else {
         result
@@ -878,7 +880,7 @@ fn is_thenable(value: &JsValue) -> bool {
 async fn check_guards(
     backend: &D1Backend,
     instance_id: &str,
-    scope: Option<&str>,
+    scope: Option<sayiir_core::TaskId>,
 ) -> Result<(), WorkflowError> {
     if backend
         .check_and_cancel(instance_id, scope)
