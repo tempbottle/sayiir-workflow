@@ -199,10 +199,30 @@ where
             "AND s.task_tags <@ $3"
         };
 
+        // Pre-filter on position_kind so rows that would just hit the
+        // `_ => continue` branch in app are never decoded. AtTask is the
+        // primary claim target; AtDelay only matters once its wake_at has
+        // elapsed (we then advance the snapshot in app). All other variants
+        // (NotStarted, AtJoin, InLoop, AtFork, AtSignal, Paused, terminal …)
+        // are ignored by this routine. See `position_kind_strings_are_stable`
+        // in sayiir-core for the literal pin.
+        //
+        // FOR UPDATE OF s SKIP LOCKED deduplicates concurrent pollers within
+        // the statement window. The polling SELECT runs outside an enclosing
+        // transaction, so the locks are released immediately after the
+        // statement finishes — the claim race is still resolved by the
+        // INSERT … ON CONFLICT in `claim_task`. SKIP LOCKED here trims the
+        // wasted snapshot decodes when many workers poll simultaneously.
         let query = format!(
             "SELECT s.instance_id, s.data, s.trace_parent
              FROM sayiir_workflow_snapshots s
              WHERE s.status = 'InProgress'
+               AND (
+                   s.position_kind = 'AtTask'
+                   OR (s.position_kind = 'AtDelay'
+                       AND s.delay_wake_at IS NOT NULL
+                       AND s.delay_wake_at <= now())
+               )
                AND NOT EXISTS (
                    SELECT 1 FROM sayiir_task_claims c
                    WHERE c.instance_id = s.instance_id
@@ -217,7 +237,8 @@ where
              ORDER BY
                (s.task_priority - EXTRACT(EPOCH FROM (now() - s.updated_at)) / $2) ASC,
                s.updated_at ASC
-             LIMIT $1"
+             LIMIT $1
+             FOR UPDATE OF s SKIP LOCKED"
         );
 
         let mut q = sqlx::query(&query)

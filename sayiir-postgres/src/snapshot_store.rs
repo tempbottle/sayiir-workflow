@@ -46,13 +46,13 @@ where
 
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
-        // Upsert current state
-        sqlx::query(
+        let upsert_row = sqlx::query(
             "INSERT INTO sayiir_workflow_snapshots
                 (instance_id, status, definition_hash, current_task_id,
                  completed_task_count, data, error, position_kind, delay_wake_at,
-                 trace_parent, task_priority, task_tags, completed_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $9, $10, $11, $12, $13,
+                 trace_parent, task_priority, task_tags, history_version,
+                 completed_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $9, $10, $11, $12, $13, 1,
                      CASE WHEN $8 THEN now() ELSE NULL END, now())
              ON CONFLICT (instance_id) DO UPDATE SET
                 status = $2,
@@ -66,8 +66,10 @@ where
                 trace_parent = $11,
                 task_priority = $12,
                 task_tags = $13,
+                history_version = sayiir_workflow_snapshots.history_version + 1,
                 completed_at = CASE WHEN $8 THEN now() ELSE sayiir_workflow_snapshots.completed_at END,
-                updated_at = now()",
+                updated_at = now()
+             RETURNING history_version",
         )
         .bind(&snapshot.instance_id) // $1
         .bind(status) // $2
@@ -82,22 +84,20 @@ where
         .bind(snapshot.trace_parent.as_deref()) // $11
         .bind(task_priority) // $12
         .bind(&task_tags) // $13
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(PgError)?;
 
-        // Append to history
+        let history_version: i32 = upsert_row.get("history_version");
+
+        // Append to history using the version we just claimed under the row lock.
         sqlx::query(
             "INSERT INTO sayiir_workflow_snapshot_history
                 (instance_id, version, status, current_task_id, data)
-             VALUES (
-                $1,
-                (SELECT COALESCE(MAX(version), 0) + 1
-                 FROM sayiir_workflow_snapshot_history WHERE instance_id = $1),
-                $2, $3, $4
-             )",
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&snapshot.instance_id)
+        .bind(history_version)
         .bind(status)
         .bind(&task_id)
         .bind(&data)
