@@ -23,8 +23,13 @@
       "semanticCommitType": "⬆️"
     },
     {
-      "matchManagers": ["pep621", "pip_requirements", "pip_setup", "pyenv"],
+      "matchManagers": ["pep621", "pip_requirements", "pip_setup"],
       "groupName": "python dependencies",
+      "semanticCommitType": "⬆️"
+    },
+    {
+      "matchManagers": ["pyenv"],
+      "groupName": "python toolchain",
       "semanticCommitType": "⬆️"
     },
     {
