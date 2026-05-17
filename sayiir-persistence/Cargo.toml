@@ -21,6 +21,9 @@ sayiir-core = { workspace = true }
 thiserror = "2"
 bytes = { workspace = true }
 chrono = { workspace = true }
+# `TaskWakeupHint::encode/decode` use nanoserde for the binary wire format.
+nanoserde = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

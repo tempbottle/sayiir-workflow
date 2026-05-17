@@ -69,5 +69,6 @@ mod signal_store;
 mod snapshot_store;
 mod task_claim_store;
 mod task_result_store;
+mod wakeup;
 
 pub use backend::PostgresBackend;

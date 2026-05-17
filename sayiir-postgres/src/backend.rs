@@ -1,11 +1,14 @@
 //! `PostgresBackend` struct and constructors.
 
+use std::sync::Arc;
+
 use sayiir_core::codec::{self, Decoder, Encoder};
 use sayiir_core::snapshot::WorkflowSnapshot;
 use sayiir_persistence::BackendError;
 use sqlx::{PgPool, Row};
 
 use crate::error::PgError;
+use crate::wakeup::WakeupListener;
 
 /// Minimum supported PostgreSQL major version.
 const MIN_PG_MAJOR_VERSION: u32 = 13;
@@ -32,6 +35,7 @@ const MIN_PG_MAJOR_VERSION: u32 = 13;
 pub struct PostgresBackend<C> {
     pub(crate) pool: PgPool,
     pub(crate) codec: C,
+    pub(crate) wakeup: Arc<WakeupListener>,
 }
 
 impl<C> PostgresBackend<C>
@@ -65,10 +69,14 @@ where
             .run(&pool)
             .await
             .map_err(|e| BackendError::Backend(format!("migration failed: {e}")))?;
+
+        let wakeup = WakeupListener::spawn(pool.clone());
+
         tracing::info!("postgres backend ready");
         Ok(Self {
             pool,
             codec: C::default(),
+            wakeup,
         })
     }
 }

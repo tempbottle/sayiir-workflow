@@ -51,7 +51,7 @@ impl NapiWorker {
             poll_interval: Duration::from_millis(
                 #[allow(clippy::cast_sign_loss)]
                 {
-                    poll_interval_ms.unwrap_or(5000.0) as u64
+                    poll_interval_ms.unwrap_or(30000.0) as u64
                 },
             ),
             claim_ttl: Duration::from_millis(
@@ -80,7 +80,7 @@ impl NapiWorker {
             poll_interval: Duration::from_millis(
                 #[allow(clippy::cast_sign_loss)]
                 {
-                    poll_interval_ms.unwrap_or(5000.0) as u64
+                    poll_interval_ms.unwrap_or(30000.0) as u64
                 },
             ),
             claim_ttl: Duration::from_millis(

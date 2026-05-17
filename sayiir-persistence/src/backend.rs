@@ -17,6 +17,124 @@ use sayiir_core::snapshot::{
 };
 use sayiir_core::task_claim::{AvailableTask, TaskClaim};
 
+/// Routing-and-eligibility hint a producer attaches to a "task ready"
+/// wakeup. Workers consume it to:
+///
+/// * **Filter** — drop the wake without polling if the worker's tags don't
+///   match, or if the worker doesn't have the workflow registered. Cuts
+///   PG load proportional to NOTIFY volume × fleet-tag-fragmentation.
+/// * **Direct-claim** — call [`TaskClaimStore::find_hinted_task`] to skip
+///   the full `find_available_tasks` scan on the happy path; the producer
+///   already named the task that just became ready.
+///
+#[derive(Debug, Clone, PartialEq, Eq, nanoserde::SerBin, nanoserde::DeBin)]
+pub struct TaskWakeupHint {
+    /// Workflow instance the task belongs to.
+    pub instance_id: String,
+    /// Task id that's claimable as of the producer's commit.
+    pub task_id: String,
+    /// `definition_hash` of the workflow — workers without this hash
+    /// registered can drop the wake without touching the DB.
+    pub definition_hash: String,
+    /// Task tags. A worker can handle the task only if its tag set is a
+    /// superset of `tags` (untagged tasks are claimable by anyone).
+    pub tags: Vec<String>,
+}
+
+/// Wire-format version byte prepended to the nanoserde blob. Bump on
+/// any breaking change to [`TaskWakeupHint`]'s field layout so decoders
+/// reject payloads they don't understand instead of silently
+/// misparsing them.
+const HINT_WIRE_VERSION: u8 = 1;
+
+impl TaskWakeupHint {
+    /// Encode to a base64-wrapped binary blob, suitable for any text-only
+    /// transport (e.g. PG's `pg_notify` payload).
+    ///
+    /// Wire layout: `[version u8][nanoserde SerBin bytes]`. nanoserde
+    /// uses length-prefixed (u64 LE) encoding for strings and `Vec`,
+    /// little-endian for primitives. Typical hint encodes to ~70–100
+    /// bytes raw and ~95–135 bytes base64 — comfortably under PG's
+    /// 8 kB `NOTIFY` payload cap.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        use base64::Engine;
+        use nanoserde::SerBin;
+
+        let mut buf = Vec::with_capacity(96);
+        buf.push(HINT_WIRE_VERSION);
+        self.ser_bin(&mut buf);
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(&buf)
+    }
+
+    /// Decode from the wire format produced by [`Self::encode`].
+    ///
+    /// Returns `Err` with a human-readable reason for any corrupt,
+    /// truncated, or version-mismatched payload. The caller should log
+    /// and treat the failure as a missed wakeup — the fallback poll
+    /// will catch up.
+    pub fn decode(payload: &str) -> Result<Self, String> {
+        use base64::Engine;
+        use nanoserde::DeBin;
+
+        let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(payload)
+            .map_err(|e| format!("base64: {e}"))?;
+        let Some((&version, body)) = bytes.split_first() else {
+            return Err("empty payload".into());
+        };
+        if version != HINT_WIRE_VERSION {
+            return Err(format!("unsupported wire version: {version}"));
+        }
+        Self::deserialize_bin(body).map_err(|e| format!("nanoserde: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::TaskWakeupHint;
+
+    fn sample() -> TaskWakeupHint {
+        TaskWakeupHint {
+            instance_id: "wf-abc-123".to_string(),
+            task_id: "step-1".to_string(),
+            definition_hash: "hash-xyz".to_string(),
+            tags: vec!["gpu".to_string(), "cuda-12".to_string()],
+        }
+    }
+
+    #[test]
+    fn roundtrip() {
+        let hint = sample();
+        let encoded = hint.encode();
+        let decoded = TaskWakeupHint::decode(&encoded).expect("roundtrip");
+        assert_eq!(hint, decoded);
+    }
+
+    #[test]
+    fn roundtrip_empty_tags() {
+        let mut hint = sample();
+        hint.tags.clear();
+        let decoded = TaskWakeupHint::decode(&hint.encode()).unwrap();
+        assert_eq!(hint, decoded);
+    }
+
+    #[test]
+    fn rejects_garbage_payload() {
+        assert!(TaskWakeupHint::decode("not base64!@#").is_err());
+        assert!(TaskWakeupHint::decode("").is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_version() {
+        use base64::Engine;
+        let buf = vec![99u8, 0, 0, 0, 0, 0, 0, 0, 0];
+        let payload = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&buf);
+        let err = TaskWakeupHint::decode(&payload).unwrap_err();
+        assert!(err.contains("unsupported wire version"));
+    }
+}
+
 /// Error type for backend operations.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
@@ -271,6 +389,35 @@ pub trait TaskClaimStore: Send + Sync {
         aging_interval: Duration,
         worker_tags: &[String],
     ) -> impl Future<Output = Result<Vec<AvailableTask>, BackendError>> + Send;
+
+    /// Block until a wakeup arrives or `timeout` elapses. `Some(hint)`
+    /// when a producer attached one; `None` for hint-less wakeups,
+    /// timeout, or backends without a notification channel.
+    ///
+    /// Default returns a future that never resolves (`std::future::pending`)
+    /// — the worker's `interval.tick()` arm provides the cadence, so
+    /// non-overriding backends keep their fixed-interval poll. Keeps
+    /// `sayiir-persistence` runtime-agnostic.
+    fn wait_for_wakeup(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> impl Future<Output = Result<Option<TaskWakeupHint>, BackendError>> + Send {
+        async move {
+            std::future::pending::<Option<TaskWakeupHint>>().await;
+            Ok(None)
+        }
+    }
+
+    /// Resolve a wakeup hint into a claimable [`AvailableTask`], or
+    /// `None` if the snapshot moved on / is claim-blocked / signal-blocked.
+    /// Does NOT claim — the caller runs the normal claim+execute pipeline.
+    /// Default returns `None`; backends opt in for the targeted lookup.
+    fn find_hinted_task(
+        &self,
+        _hint: &TaskWakeupHint,
+    ) -> impl Future<Output = Result<Option<AvailableTask>, BackendError>> + Send {
+        async move { Ok(None) }
+    }
 }
 
 // ---------------------------------------------------------------------------
