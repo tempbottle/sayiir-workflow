@@ -1083,3 +1083,68 @@ async fn two_workers_collaborate_on_workflows() {
         .unwrap()
         .unwrap();
 }
+
+// ─── delay in PooledWorker: regression for delay-advance bug ─────────────────
+
+/// PooledWorker must correctly advance a workflow that ends a task with a
+/// `delay(...)` next: previously it persisted `AtTask(delay_hash)` because
+/// `first_task_hint` of a `Delay` node returns the delay's own id, which
+/// `execute_task_by_id` then skips past during dispatch (so workers spun
+/// "Task not found in registry").
+#[tokio::test]
+async fn pooled_worker_handles_delay_in_chain() {
+    let (_c, _backend, url) = setup().await;
+
+    let backend_w = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+    let backend_client = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("accept", |i: u32| async move { Ok(i + 1) })
+        .delay("sleep", Duration::from_millis(200))
+        .then("wake", |i: u32| async move { Ok(i * 2) })
+        .build()
+        .unwrap();
+
+    let wf = Arc::new(workflow);
+    let def_hash = *wf.definition_hash();
+
+    let client = WorkflowClient::new(backend_client);
+    let (status, _) = client
+        .submit(wf.as_ref(), "delay-1", 5u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::InProgress));
+
+    let registry = sayiir_core::registry::TaskRegistry::new();
+    let worker = PooledWorker::new("delay-w-0", backend_w, registry)
+        .with_claim_ttl(Some(Duration::from_secs(30)));
+    let handle = worker.spawn(
+        Duration::from_millis(50),
+        vec![(def_hash, Arc::clone(&wf))],
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            let snap = client.backend().load_snapshot("delay-1").await.unwrap();
+            panic!(
+                "Timed out: status={:?} position_kind={:?}",
+                snap.state,
+                snap.position_kind()
+            );
+        }
+        let snap = client.backend().load_snapshot("delay-1").await.unwrap();
+        if snap.state.is_completed() {
+            let out: u32 = JsonCodec
+                .decode(snap.state.completed_output().unwrap().clone())
+                .unwrap();
+            // (5 + 1) * 2 = 12
+            assert_eq!(out, 12);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle.join()).await;
+}

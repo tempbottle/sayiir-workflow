@@ -1786,6 +1786,72 @@ where
         }
     }
 
+    /// Set the snapshot's execution position to reflect "execution is now at
+    /// the head of `cont`".
+    ///
+    /// For Task heads (and Branch / Fork / Loop / `ChildWorkflow` which all
+    /// start with a Task-shaped node), set `AtTask(first_task_hint)`. For
+    /// `Delay` / `AwaitSignal` heads, enter the corresponding park state
+    /// directly — using `first_task_hint(...).id` would name the Delay or
+    /// Signal node itself, but `execute_task_by_id` skips past those when
+    /// dispatching, so the worker would loop on a phantom task ID.
+    fn set_position_at(cont: &WorkflowContinuation, snapshot: &mut WorkflowSnapshot) {
+        match cont {
+            WorkflowContinuation::Delay {
+                id,
+                duration,
+                next,
+            } => {
+                let now = chrono::Utc::now();
+                let wake_at = chrono::Duration::from_std(*duration)
+                    .map(|d| now + d)
+                    .unwrap_or(now);
+                let next_task_id = next
+                    .as_deref()
+                    .map(|n| sayiir_core::TaskId::from(n.first_task_id()));
+                let delay_id = sayiir_core::TaskId::from(id.as_str());
+                snapshot.update_position(ExecutionPosition::AtDelay {
+                    delay_id,
+                    entered_at: now,
+                    wake_at,
+                    next_task_id,
+                });
+                // Mirror the executor's behaviour when it parks at a delay:
+                // mark the delay node as completed with the passthrough input
+                // (which is the *last* completed task's output, sitting at the
+                // top of `completed_tasks`) so downstream nodes see the same
+                // continuous output chain.
+                let passthrough = snapshot.get_last_task_output().unwrap_or_default();
+                snapshot.mark_task_completed(delay_id, passthrough);
+            }
+            WorkflowContinuation::AwaitSignal {
+                id,
+                signal_name,
+                timeout,
+                next,
+            } => {
+                let wake_at = timeout
+                    .as_ref()
+                    .and_then(|t| chrono::Duration::from_std(*t).ok())
+                    .map(|d| chrono::Utc::now() + d);
+                let next_task_id = next
+                    .as_deref()
+                    .map(|n| sayiir_core::TaskId::from(n.first_task_id()));
+                snapshot.update_position(ExecutionPosition::AtSignal {
+                    signal_id: sayiir_core::TaskId::from(id.as_str()),
+                    signal_name: signal_name.clone(),
+                    wake_at,
+                    next_task_id,
+                });
+            }
+            _ => {
+                let hint = cont.first_task_hint();
+                snapshot.update_position(ExecutionPosition::AtTask { task_id: hint.id });
+                snapshot.set_task_hint(&hint);
+            }
+        }
+    }
+
     /// Update execution position after a task completes.
     fn update_position_after_task(
         continuation: &WorkflowContinuation,
@@ -1797,10 +1863,8 @@ where
             | WorkflowContinuation::Delay { id, next, .. }
             | WorkflowContinuation::AwaitSignal { id, next, .. } => {
                 if sayiir_core::TaskId::from(id.as_str()) == *completed_task_id {
-                    if let Some(next_cont) = next {
-                        let hint = next_cont.first_task_hint();
-                        snapshot.update_position(ExecutionPosition::AtTask { task_id: hint.id });
-                        snapshot.set_task_hint(&hint);
+                    if let Some(next_cont) = next.as_deref() {
+                        Self::set_position_at(next_cont, snapshot);
                     }
                 } else if let Some(next_cont) = next {
                     Self::update_position_after_task(next_cont, completed_task_id, snapshot);
