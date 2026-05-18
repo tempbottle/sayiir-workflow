@@ -22,7 +22,7 @@ use sayiir_core::context::{TaskExecutionContext, with_task_context};
 use sayiir_core::error::{BoxError, CodecError, WorkflowError};
 use sayiir_core::registry::TaskRegistry;
 use sayiir_core::snapshot::{
-    ExecutionPosition, SignalKind, SignalRequest, TaskDeadline, WorkflowSnapshot,
+    ExecutionPosition, SignalKind, SignalRequest, TaskDeadline, TaskHint, WorkflowSnapshot,
 };
 use sayiir_core::task_claim::AvailableTask;
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
@@ -1804,9 +1804,12 @@ where
             WorkflowContinuation::Delay { id, duration, next } => {
                 let wake_at = compute_wake_at(duration)?;
                 let entered_at = chrono::Utc::now();
-                let next_task_id = next
-                    .as_deref()
-                    .map(|n| sayiir_core::TaskId::from(n.first_task_id()));
+                let next_hint = next.as_deref().map(WorkflowContinuation::first_task_hint);
+                let next_task_id = next_hint.as_ref().map(|h| h.id);
+                // Update task_priority/task_tags so backends advancing
+                // AtDelay -> AtTask inherit the next task's routing hints
+                // (mirrors save_park_checkpoint).
+                snapshot.set_task_hint(next_hint.as_ref().unwrap_or(&TaskHint::default()));
                 let delay_id = sayiir_core::TaskId::from(id.as_str());
                 snapshot.update_position(ExecutionPosition::AtDelay {
                     delay_id,
@@ -1829,9 +1832,12 @@ where
                 next,
             } => {
                 let wake_at = compute_signal_timeout(timeout.as_ref());
-                let next_task_id = next
-                    .as_deref()
-                    .map(|n| sayiir_core::TaskId::from(n.first_task_id()));
+                let next_hint = next.as_deref().map(WorkflowContinuation::first_task_hint);
+                let next_task_id = next_hint.as_ref().map(|h| h.id);
+                // Update task_priority/task_tags so backends advancing
+                // AtSignal -> AtTask inherit the next task's routing hints
+                // (mirrors save_park_checkpoint).
+                snapshot.set_task_hint(next_hint.as_ref().unwrap_or(&TaskHint::default()));
                 snapshot.update_position(ExecutionPosition::AtSignal {
                     signal_id: sayiir_core::TaskId::from(id.as_str()),
                     signal_name: signal_name.clone(),
