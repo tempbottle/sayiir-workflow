@@ -8,7 +8,9 @@
 --
 -- Nullable on purpose: the existing `INSERT … ON CONFLICT` in save_snapshot
 -- creates a row at task start (status='active') with no output yet. The
--- output is filled in by save_task_result. Old rows from before this
--- migration also stay NULL until the dual-write phase backfills them.
+-- output is filled in by save_task_result. Rows from workflows that
+-- completed tasks before this migration stay NULL — no backfill ships;
+-- pre-migration outputs remain reachable only through the snapshot's
+-- in-blob `completed_tasks` map.
 ALTER TABLE sayiir_workflow_tasks
     ADD COLUMN IF NOT EXISTS output BYTEA;

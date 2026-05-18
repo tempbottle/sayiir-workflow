@@ -227,56 +227,6 @@ async fn history_is_canonical_data_column_stays_null() {
     );
 }
 
-/// Backfill: simulate the post-migration state where `workflow_tasks.output`
-/// is NULL for tasks completed before dual-write deployed. The blob still
-/// carries the result via `completed_tasks`; backfill must copy it across,
-/// be idempotent on a second run, and not touch rows already populated.
-#[tokio::test]
-async fn backfill_task_outputs_copies_from_snapshot_blob() {
-    let (_c, backend, pool) = setup_with_pool(DEFAULT_PG_VERSION).await;
-
-    // Create a real workflow with a completed task via the normal API,
-    // then NULL out the output column to mimic a pre-dual-write state.
-    let task_id = sayiir_core::TaskId::from("task-bf");
-    let mut snapshot = WorkflowSnapshot::new("wf-bf", "hash-bf".into());
-    snapshot.update_position(ExecutionPosition::AtTask { task_id });
-    backend.save_snapshot(&snapshot).await.unwrap();
-    let payload = Bytes::from_static(b"backfilled-output");
-    backend
-        .save_task_result("wf-bf", &task_id, payload.clone())
-        .await
-        .unwrap();
-
-    sqlx::query(
-        "UPDATE sayiir_workflow_tasks SET output = NULL
-         WHERE instance_id = $1 AND task_id = $2",
-    )
-    .bind("wf-bf")
-    .bind(task_id.as_bytes().as_slice())
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let stats = backend.backfill_task_outputs(16).await.unwrap();
-    assert_eq!(stats.outputs_written, 1);
-    assert_eq!(stats.snapshots_scanned, 1);
-
-    let row: (Option<Vec<u8>>,) = sqlx::query_as(
-        "SELECT output FROM sayiir_workflow_tasks WHERE instance_id = $1 AND task_id = $2",
-    )
-    .bind("wf-bf")
-    .bind(task_id.as_bytes().as_slice())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(row.0.unwrap().as_slice(), payload.as_ref());
-
-    // Idempotence: a second run finds nothing left to fill.
-    let stats = backend.backfill_task_outputs(16).await.unwrap();
-    assert_eq!(stats.outputs_written, 0);
-    assert_eq!(stats.snapshots_scanned, 1);
-}
-
 /// Dual-write: save_task_result must persist the output bytes into the
 /// `sayiir_workflow_tasks.output` column in addition to the snapshot's
 /// `completed_tasks` map. Once the cutover lands and the map is removed
