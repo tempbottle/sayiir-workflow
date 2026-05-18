@@ -1535,7 +1535,7 @@ where
             "Task completed"
         );
 
-        Self::update_position_after_task(continuation, &available_task.task_id, snapshot);
+        Self::update_position_after_task(continuation, &available_task.task_id, snapshot)?;
         #[cfg(feature = "otel")]
         {
             snapshot.trace_parent = crate::trace_context::current_trace_parent();
@@ -1795,18 +1795,22 @@ where
     /// directly — using `first_task_hint(...).id` would name the Delay or
     /// Signal node itself, but `execute_task_by_id` skips past those when
     /// dispatching, so the worker would loop on a phantom task ID.
-    fn set_position_at(cont: &WorkflowContinuation, snapshot: &mut WorkflowSnapshot) {
+    fn set_position_at(
+        cont: &WorkflowContinuation,
+        snapshot: &mut WorkflowSnapshot,
+    ) -> Result<(), crate::error::RuntimeError> {
+        use crate::execution::control_flow::{compute_signal_timeout, compute_wake_at};
         match cont {
             WorkflowContinuation::Delay { id, duration, next } => {
-                let now = chrono::Utc::now();
-                let wake_at = chrono::Duration::from_std(*duration).map_or(now, |d| now + d);
+                let wake_at = compute_wake_at(duration)?;
+                let entered_at = chrono::Utc::now();
                 let next_task_id = next
                     .as_deref()
                     .map(|n| sayiir_core::TaskId::from(n.first_task_id()));
                 let delay_id = sayiir_core::TaskId::from(id.as_str());
                 snapshot.update_position(ExecutionPosition::AtDelay {
                     delay_id,
-                    entered_at: now,
+                    entered_at,
                     wake_at,
                     next_task_id,
                 });
@@ -1824,10 +1828,7 @@ where
                 timeout,
                 next,
             } => {
-                let wake_at = timeout
-                    .as_ref()
-                    .and_then(|t| chrono::Duration::from_std(*t).ok())
-                    .map(|d| chrono::Utc::now() + d);
+                let wake_at = compute_signal_timeout(timeout.as_ref());
                 let next_task_id = next
                     .as_deref()
                     .map(|n| sayiir_core::TaskId::from(n.first_task_id()));
@@ -1844,6 +1845,7 @@ where
                 snapshot.set_task_hint(&hint);
             }
         }
+        Ok(())
     }
 
     /// Update execution position after a task completes.
@@ -1851,27 +1853,27 @@ where
         continuation: &WorkflowContinuation,
         completed_task_id: &sayiir_core::TaskId,
         snapshot: &mut WorkflowSnapshot,
-    ) {
+    ) -> Result<(), crate::error::RuntimeError> {
         match continuation {
             WorkflowContinuation::Task { id, next, .. }
             | WorkflowContinuation::Delay { id, next, .. }
             | WorkflowContinuation::AwaitSignal { id, next, .. } => {
                 if sayiir_core::TaskId::from(id.as_str()) == *completed_task_id {
                     if let Some(next_cont) = next.as_deref() {
-                        Self::set_position_at(next_cont, snapshot);
+                        Self::set_position_at(next_cont, snapshot)?;
                     }
                 } else if let Some(next_cont) = next {
-                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot)?;
                 }
             }
             WorkflowContinuation::Fork { branches, join, .. } => {
                 // Check if any branch task completed
                 for branch in branches {
-                    Self::update_position_after_task(branch, completed_task_id, snapshot);
+                    Self::update_position_after_task(branch, completed_task_id, snapshot)?;
                 }
                 // Check join
                 if let Some(join_cont) = join {
-                    Self::update_position_after_task(join_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(join_cont, completed_task_id, snapshot)?;
                 }
             }
             WorkflowContinuation::Branch {
@@ -1881,28 +1883,29 @@ where
                 ..
             } => {
                 for branch_cont in branches.values() {
-                    Self::update_position_after_task(branch_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(branch_cont, completed_task_id, snapshot)?;
                 }
                 if let Some(def) = default {
-                    Self::update_position_after_task(def, completed_task_id, snapshot);
+                    Self::update_position_after_task(def, completed_task_id, snapshot)?;
                 }
                 if let Some(next_cont) = next {
-                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot)?;
                 }
             }
             WorkflowContinuation::Loop { body, next, .. } => {
-                Self::update_position_after_task(body, completed_task_id, snapshot);
+                Self::update_position_after_task(body, completed_task_id, snapshot)?;
                 if let Some(next_cont) = next {
-                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot)?;
                 }
             }
             WorkflowContinuation::ChildWorkflow { child, next, .. } => {
-                Self::update_position_after_task(child, completed_task_id, snapshot);
+                Self::update_position_after_task(child, completed_task_id, snapshot)?;
                 if let Some(next_cont) = next {
-                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot)?;
                 }
             }
         }
+        Ok(())
     }
 
     /// Create a builder with sensible defaults.
