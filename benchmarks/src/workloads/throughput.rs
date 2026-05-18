@@ -129,6 +129,10 @@ pub async fn run(ctx: crate::CommonContext, args: ThroughputArgs) -> Result<()> 
         Instant::now() + Duration::from_secs(60 + (args.workflows as u64 / 100));
 
     let mut completion_rate_samples: Vec<(Duration, usize)> = Vec::new();
+    // Sample roughly every 3% of the run so even small smoke workloads
+    // (500-1000 wf in CI) get >= 2 sample points and the sliding window
+    // throughput calculation has something to chew on.
+    let sample_every = (args.workflows / 32).max(1);
 
     while completed < args.workflows {
         let remaining = collect_deadline.saturating_duration_since(Instant::now());
@@ -163,7 +167,7 @@ pub async fn run(ctx: crate::CommonContext, args: ThroughputArgs) -> Result<()> 
                     excluded_warmup += 1;
                 }
                 completed += 1;
-                if completed.is_multiple_of(1000) {
+                if completed.is_multiple_of(sample_every) {
                     completion_rate_samples.push((bench_start.elapsed(), completed));
                 }
             }
