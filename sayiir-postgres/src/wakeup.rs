@@ -27,8 +27,10 @@ use tokio_util::sync::CancellationToken;
 /// share this single source of truth.
 pub(crate) const TASK_READY_CHANNEL: &str = "sayiir_task_ready";
 
-/// When full, the listener drops the incoming wake messages (fallback to poll)
-const WAKEUP_CHANNEL_CAPACITY: usize = 1024;
+/// When full, the listener drops the incoming wake messages (fallback to poll).
+/// Local-only tuning above main's 1024 to absorb submission bursts on this
+/// hardware (PG NOTIFY payload cap is 8 KB → worst-case buffer ~128 MB).
+const WAKEUP_CHANNEL_CAPACITY: usize = 16384;
 
 /// First reconnect delay after a listener failure. The exponential policy
 /// grows from here so a flapping PG doesn't get hammered, and the jitter
