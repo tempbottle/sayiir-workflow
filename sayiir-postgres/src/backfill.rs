@@ -32,10 +32,10 @@ where
     /// Copy task outputs from the snapshot blob's `completed_tasks` map
     /// into the `sayiir_workflow_tasks.output` column.
     ///
-    /// Run this once after migration 009 lands and before relying on
+    /// Run this once after migration 010 lands and before relying on
     /// `workflow_tasks.output` as canonical (the cutover that drops the
     /// `completed_tasks` map from the snapshot blob). Without it,
-    /// outputs produced before migration 009 deployed remain visible
+    /// outputs produced before migration 010 deployed remain visible
     /// only through the blob, and read paths that have switched over
     /// will see them as missing.
     ///
