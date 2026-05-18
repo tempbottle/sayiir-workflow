@@ -179,13 +179,12 @@ async fn history_is_canonical_data_column_stays_null() {
     // Save once (creates version 1), then complete a task (creates
     // version 2 via save_task_result). Both writes must land in history
     // and leave snapshots.data NULL.
-    let mut snapshot = WorkflowSnapshot::new("wf-can".into(), "hash-can".into());
-    snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: "task-can".into(),
-    });
+    let task_id = sayiir_core::TaskId::from("task-can");
+    let mut snapshot = WorkflowSnapshot::new("wf-can", "hash-can".into());
+    snapshot.update_position(ExecutionPosition::AtTask { task_id });
     backend.save_snapshot(&snapshot).await.unwrap();
     backend
-        .save_task_result("wf-can", "task-can", Bytes::from_static(b"first-result"))
+        .save_task_result("wf-can", &task_id, Bytes::from_static(b"first-result"))
         .await
         .unwrap();
 
@@ -223,7 +222,7 @@ async fn history_is_canonical_data_column_stays_null() {
     // Round-trip through the JOIN'd load path.
     let loaded = backend.load_snapshot("wf-can").await.unwrap();
     assert_eq!(
-        loaded.get_task_result("task-can").unwrap().output,
+        loaded.get_task_result(&task_id).unwrap().output,
         Bytes::from_static(b"first-result"),
     );
 }
@@ -238,14 +237,13 @@ async fn backfill_task_outputs_copies_from_snapshot_blob() {
 
     // Create a real workflow with a completed task via the normal API,
     // then NULL out the output column to mimic a pre-dual-write state.
-    let mut snapshot = WorkflowSnapshot::new("wf-bf".into(), "hash-bf".into());
-    snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: "task-bf".into(),
-    });
+    let task_id = sayiir_core::TaskId::from("task-bf");
+    let mut snapshot = WorkflowSnapshot::new("wf-bf", "hash-bf".into());
+    snapshot.update_position(ExecutionPosition::AtTask { task_id });
     backend.save_snapshot(&snapshot).await.unwrap();
     let payload = Bytes::from_static(b"backfilled-output");
     backend
-        .save_task_result("wf-bf", "task-bf", payload.clone())
+        .save_task_result("wf-bf", &task_id, payload.clone())
         .await
         .unwrap();
 
@@ -254,7 +252,7 @@ async fn backfill_task_outputs_copies_from_snapshot_blob() {
          WHERE instance_id = $1 AND task_id = $2",
     )
     .bind("wf-bf")
-    .bind("task-bf")
+    .bind(task_id.as_bytes().as_slice())
     .execute(&pool)
     .await
     .unwrap();
@@ -266,7 +264,7 @@ async fn backfill_task_outputs_copies_from_snapshot_blob() {
     let row: (Option<Vec<u8>>,) =
         sqlx::query_as("SELECT output FROM sayiir_workflow_tasks WHERE instance_id = $1 AND task_id = $2")
             .bind("wf-bf")
-            .bind("task-bf")
+            .bind(task_id.as_bytes().as_slice())
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -286,22 +284,21 @@ async fn backfill_task_outputs_copies_from_snapshot_blob() {
 #[tokio::test]
 async fn save_task_result_dual_writes_output_column() {
     let (_c, backend, pool) = setup_with_pool(DEFAULT_PG_VERSION).await;
-    let mut snapshot = WorkflowSnapshot::new("wf-dw".into(), "hash-dw".into());
-    snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: "task-dw".into(),
-    });
+    let task_id = sayiir_core::TaskId::from("task-dw");
+    let mut snapshot = WorkflowSnapshot::new("wf-dw", "hash-dw".into());
+    snapshot.update_position(ExecutionPosition::AtTask { task_id });
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let payload = Bytes::from_static(b"\x00\x01\x02hello");
     backend
-        .save_task_result("wf-dw", "task-dw", payload.clone())
+        .save_task_result("wf-dw", &task_id, payload.clone())
         .await
         .unwrap();
 
     let row: (Option<Vec<u8>>,) =
         sqlx::query_as("SELECT output FROM sayiir_workflow_tasks WHERE instance_id = $1 AND task_id = $2")
             .bind("wf-dw")
-            .bind("task-dw")
+            .bind(task_id.as_bytes().as_slice())
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -312,7 +309,7 @@ async fn save_task_result_dual_writes_output_column() {
     // phase — read paths haven't migrated yet.
     let loaded = backend.load_snapshot("wf-dw").await.unwrap();
     assert_eq!(
-        loaded.get_task_result("task-dw").unwrap().output,
+        loaded.get_task_result(&task_id).unwrap().output,
         payload,
     );
 }

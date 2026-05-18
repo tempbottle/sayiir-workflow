@@ -239,6 +239,9 @@ where
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
         let next_history_version = prev_history_version + 1;
+        let task_id_bytes: Option<[u8; 32]> =
+            snapshot.current_task_id().map(|t| *t.as_bytes());
+        let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
 
         sqlx::query(
             "UPDATE sayiir_workflow_snapshots
@@ -263,7 +266,7 @@ where
             instance_id,
             next_history_version,
             status,
-            snapshot.current_task_id(),
+            task_id,
             &data,
         )
         .await?;
@@ -372,7 +375,7 @@ where
             instance_id,
             next_history_version,
             status,
-            task_id.as_deref(),
+            task_id,
             &data,
         )
         .await?;
@@ -449,7 +452,7 @@ where
             instance_id,
             next_history_version,
             status,
-            task_id.as_deref(),
+            task_id,
             &data,
         )
         .await?;

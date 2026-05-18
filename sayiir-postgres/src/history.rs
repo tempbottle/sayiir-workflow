@@ -122,7 +122,7 @@ pub(crate) async fn append_history(
     instance_id: &str,
     version: i32,
     status: &str,
-    current_task_id: Option<&str>,
+    current_task_id: Option<&[u8]>,
     data: &[u8],
 ) -> Result<(), BackendError> {
     let data_hash = snapshot_hash(data);

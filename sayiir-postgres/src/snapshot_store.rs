@@ -208,7 +208,7 @@ where
             instance_id,
             next_history_version,
             status,
-            current.as_deref(),
+            current,
             &data,
         )
         .await?;

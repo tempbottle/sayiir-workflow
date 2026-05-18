@@ -102,17 +102,17 @@ where
                 // via parallel arrays — K task_ids and K output blobs
                 // per instance. With a 100-task workflow this collapses
                 // 100 round-trips into 1.
-                let mut task_ids: Vec<&str> = Vec::with_capacity(results.len());
+                let mut task_ids: Vec<&[u8]> = Vec::with_capacity(results.len());
                 let mut outputs: Vec<&[u8]> = Vec::with_capacity(results.len());
                 for (task_id, result) in results {
-                    task_ids.push(task_id.as_str());
+                    task_ids.push(task_id.as_bytes().as_slice());
                     outputs.push(result.output.as_ref());
                 }
 
                 let res = sqlx::query(
                     "UPDATE sayiir_workflow_tasks t
                      SET output = u.output
-                     FROM UNNEST($2::TEXT[], $3::BYTEA[]) AS u(task_id, output)
+                     FROM UNNEST($2::BYTEA[], $3::BYTEA[]) AS u(task_id, output)
                      WHERE t.instance_id = $1
                        AND t.task_id = u.task_id
                        AND t.output IS NULL",
