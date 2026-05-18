@@ -253,6 +253,13 @@ pub struct PooledWorker<B> {
     batch_size: NonZeroUsize,
     aging_interval: Duration,
     tags: Vec<String>,
+    /// Opt-in: after a task settles successfully, if the next continuation
+    /// is a `Task` with `func: Some(_)` and no per-task deadline / retry
+    /// policy / tag-mismatch, execute it in the same worker invocation
+    /// without releasing the claim or saving the snapshot. Saves and the
+    /// claim release happen once at chain end. See RFC at
+    /// `docs/plans/2026-05-18-multi-task-settle-rfc.md`.
+    chain_settle: bool,
 }
 
 impl<B> PooledWorker<B>
@@ -281,7 +288,27 @@ where
             batch_size: NonZeroUsize::MIN,           // Default: fetch one task at a time (1)
             aging_interval: Duration::from_mins(5),  // Default 5 minutes
             tags: vec![],
+            chain_settle: false,
         }
+    }
+
+    /// Enable in-process chain settle: after a task succeeds, if the next
+    /// continuation is a chainable `Task`, execute it in the same worker
+    /// invocation and save+release once at chain end.
+    ///
+    /// Chainable means: `func: Some(_)`, no per-task `timeout`,
+    /// no `retry_policy`, tags compatible with this worker. Anything else
+    /// (Delay / Signal / Fork / Branch / Loop / `ChildWorkflow` /
+    /// `func: None` / deadlined / retry-bound / tag-mismatch) breaks the
+    /// chain and falls through to the single-task settle path.
+    ///
+    /// Default: `false`. Opt in once you've verified chain semantics
+    /// match your workload (no per-task deadline reliance, no mid-chain
+    /// signal urgency). See RFC for the safety analysis and test plan.
+    #[must_use]
+    pub fn with_chain_settle(mut self, enabled: bool) -> Self {
+        self.chain_settle = enabled;
+        self
     }
 
     /// Set the TTL for task claims.
@@ -1064,19 +1091,243 @@ where
             "Executing task"
         );
 
-        // 4. Execute with deadline + heartbeat, then settle the result
-        let execution_result = self
-            .execute_with_deadline(workflow, &available_task, &mut snapshot, &claim)
-            .await;
+        // 4. Execute with deadline + heartbeat. When `chain_settle` is on
+        //    and the next continuation is a chainable Task, loop in-process
+        //    without saving the snapshot or releasing the claim between
+        //    iterations — see RFC at
+        //    `docs/plans/2026-05-18-multi-task-settle-rfc.md` for the
+        //    safety lemma. Bounded by `MAX_CHAIN_LEN` so a single claim
+        //    stays well under `claim_ttl/2`.
+        const MAX_CHAIN_LEN: usize = 16;
+        let mut current_task = available_task;
+        let mut chain_len = 0usize;
 
-        self.settle_execution_result(
-            execution_result,
-            workflow,
-            &available_task,
-            &mut snapshot,
-            claim,
-        )
-        .await
+        loop {
+            let outcome = self
+                .execute_with_deadline(workflow, &current_task, &mut snapshot, &claim)
+                .await;
+
+            // Failure paths use the existing settle (which saves + releases).
+            // Tasks completed earlier in the chain are already in
+            // `snapshot.completed_tasks` so the save preserves their state.
+            let success_output = match outcome {
+                ExecutionOutcome::Success(o) => o,
+                other => {
+                    return self
+                        .settle_execution_result(
+                            other,
+                            workflow,
+                            &current_task,
+                            &mut snapshot,
+                            claim,
+                        )
+                        .await;
+                }
+            };
+
+            snapshot.clear_retry_state(&current_task.task_id);
+
+            // Bail out of chain mode for the non-opt-in path or when the
+            // length cap is reached. Hand off to single-task settle which
+            // saves the snapshot, resolves loop completions, and returns
+            // the workflow status.
+            let can_chain = self.chain_settle && chain_len < MAX_CHAIN_LEN;
+            if !can_chain {
+                self.commit_task_result(
+                    workflow.continuation(),
+                    &current_task,
+                    &mut snapshot,
+                    success_output.clone(),
+                    claim,
+                )
+                .await?;
+                Self::resolve_loop_completions(
+                    workflow.continuation(),
+                    &mut snapshot,
+                    self.backend.as_ref(),
+                )
+                .await?;
+                return self
+                    .determine_post_task_status(
+                        workflow.continuation(),
+                        &current_task,
+                        &mut snapshot,
+                        success_output,
+                    )
+                    .await;
+            }
+
+            // Chain mode: mutate the in-memory snapshot only (no save).
+            snapshot.mark_task_completed(current_task.task_id, success_output.clone());
+            Self::update_position_after_task(
+                workflow.continuation(),
+                &current_task.task_id,
+                &mut snapshot,
+            )?;
+
+            // If the next continuation is a chainable Task, synthesise the
+            // available-task descriptor for it and continue without saving.
+            if let Some(next) =
+                self.peek_next_chainable_task(workflow, &snapshot, success_output.clone())
+            {
+                chain_len += 1;
+                current_task = next;
+                continue;
+            }
+
+            // Chain ends here. Finalise the same way determine_post_task_status
+            // does, but in one save+release pair instead of per task.
+            Self::resolve_loop_completions(
+                workflow.continuation(),
+                &mut snapshot,
+                self.backend.as_ref(),
+            )
+            .await?;
+
+            if self
+                .backend
+                .check_and_cancel(&current_task.instance_id, None)
+                .await?
+            {
+                let _ = self.backend.save_snapshot(&snapshot).await;
+                claim.release_quietly().await;
+                return Ok(self
+                    .load_cancelled_status(&current_task.instance_id)
+                    .await);
+            }
+            if self
+                .backend
+                .check_and_pause(&current_task.instance_id)
+                .await?
+            {
+                let _ = self.backend.save_snapshot(&snapshot).await;
+                claim.release_quietly().await;
+                return Ok(self.load_paused_status(&current_task.instance_id).await);
+            }
+
+            let is_complete = Self::is_workflow_complete(workflow.continuation(), &snapshot);
+            if is_complete {
+                snapshot.mark_completed(success_output);
+            }
+            self.backend.save_snapshot(&snapshot).await?;
+            claim.release().await?;
+            return Ok(if is_complete {
+                WorkflowStatus::Completed
+            } else {
+                WorkflowStatus::InProgress
+            });
+        }
+    }
+
+    /// If the snapshot's current position is `AtTask` and the workflow's
+    /// continuation at that point is a chainable `Task`, return a
+    /// synthesised `AvailableTask` for it. Returns `None` if the chain
+    /// must break here (non-Task continuation, no `func`, has timeout /
+    /// retry policy, or tag mismatch with this worker).
+    ///
+    /// Caller invariant: `snapshot.state` was just updated by
+    /// `update_position_after_task` for the previous task.
+    fn peek_next_chainable_task<C, Input, M>(
+        &self,
+        workflow: &Workflow<C, Input, M>,
+        snapshot: &WorkflowSnapshot,
+        prev_output: Bytes,
+    ) -> Option<AvailableTask>
+    where
+        C: Codec,
+    {
+        let next_task_id = snapshot.current_task_id()?;
+        // When the final Task in the chain has `next: None`,
+        // `update_position_after_task` is a no-op and `current_task_id`
+        // still points at the task we just marked completed. Detect that
+        // and break the chain so the workflow can move on to completion
+        // detection at chain end.
+        if snapshot.get_task_result(&next_task_id).is_some() {
+            return None;
+        }
+        let meta = workflow.task_index().get(&next_task_id)?;
+        // Bail if per-task semantics need the single-task settle path.
+        if meta.timeout().is_some() || meta.retry_policy().is_some() {
+            return None;
+        }
+        // Tags: every tag the task requires must be in this worker's set
+        // (mirrors the dequeue's `task_tags <@ worker_tags` filter).
+        if !meta.tags().iter().all(|t| self.tags.contains(t)) {
+            return None;
+        }
+        // The continuation tree must actually contain an executable Task
+        // node for this id. If it doesn't (e.g. the position points at a
+        // Delay/Signal, or a Task with `func: None` for external bindings),
+        // we can't chain.
+        if !Self::has_executable_task(workflow.continuation(), &next_task_id) {
+            return None;
+        }
+        Some(AvailableTask {
+            instance_id: Arc::clone(&snapshot.instance_id),
+            task_id: next_task_id,
+            input: prev_output,
+            workflow_definition_hash: *workflow.definition_hash(),
+            trace_parent: snapshot.trace_parent.clone(),
+        })
+    }
+
+    /// `true` iff `task_id` exists in `continuation` as a `Task` node
+    /// with `func: Some(_)`. Used to gate chain continuation; non-Task
+    /// nodes (Delay, AwaitSignal) and Task nodes without `func` (external
+    /// executor bindings) are not chainable in-process.
+    fn has_executable_task(
+        continuation: &WorkflowContinuation,
+        task_id: &sayiir_core::TaskId,
+    ) -> bool {
+        match continuation {
+            WorkflowContinuation::Task { id, func, next, .. } => {
+                if sayiir_core::TaskId::from(id.as_str()) == *task_id {
+                    return func.is_some();
+                }
+                next.as_deref()
+                    .is_some_and(|n| Self::has_executable_task(n, task_id))
+            }
+            WorkflowContinuation::Delay { next, .. }
+            | WorkflowContinuation::AwaitSignal { next, .. } => next
+                .as_deref()
+                .is_some_and(|n| Self::has_executable_task(n, task_id)),
+            WorkflowContinuation::Fork { branches, join, .. } => {
+                branches
+                    .iter()
+                    .any(|b| Self::has_executable_task(b, task_id))
+                    || join
+                        .as_deref()
+                        .is_some_and(|j| Self::has_executable_task(j, task_id))
+            }
+            WorkflowContinuation::Branch {
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                branches
+                    .values()
+                    .any(|b| Self::has_executable_task(b, task_id))
+                    || default
+                        .as_deref()
+                        .is_some_and(|d| Self::has_executable_task(d, task_id))
+                    || next
+                        .as_deref()
+                        .is_some_and(|n| Self::has_executable_task(n, task_id))
+            }
+            WorkflowContinuation::Loop { body, next, .. } => {
+                Self::has_executable_task(body, task_id)
+                    || next
+                        .as_deref()
+                        .is_some_and(|n| Self::has_executable_task(n, task_id))
+            }
+            WorkflowContinuation::ChildWorkflow { child, next, .. } => {
+                Self::has_executable_task(child, task_id)
+                    || next
+                        .as_deref()
+                        .is_some_and(|n| Self::has_executable_task(n, task_id))
+            }
+        }
     }
 
     /// Run the task future with an optional deadline, returning the panic-wrapped result.
@@ -1943,6 +2194,7 @@ where
             batch_size: NonZeroUsize::MIN,
             aging_interval: Duration::from_mins(5),
             tags: vec![],
+            chain_settle: false,
         }
     }
 
@@ -2180,6 +2432,7 @@ pub struct PooledWorkerBuilder<B> {
     batch_size: NonZeroUsize,
     aging_interval: Duration,
     tags: Vec<String>,
+    chain_settle: bool,
 }
 
 impl<B> PooledWorkerBuilder<B>
@@ -2232,6 +2485,14 @@ where
         self
     }
 
+    /// Enable in-process chain settle. Default: `false`. See
+    /// [`PooledWorker::with_chain_settle`].
+    #[must_use]
+    pub fn chain_settle(mut self, enabled: bool) -> Self {
+        self.chain_settle = enabled;
+        self
+    }
+
     /// Build the [`PooledWorker`].
     ///
     /// If no `worker_id` was set, generates one from `{hostname}-{pid}`.
@@ -2246,6 +2507,7 @@ where
             batch_size: self.batch_size,
             aging_interval: self.aging_interval,
             tags: self.tags,
+            chain_settle: self.chain_settle,
         }
     }
 }

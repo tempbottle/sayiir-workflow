@@ -1142,3 +1142,174 @@ async fn pooled_worker_handles_delay_in_chain() {
     handle.shutdown();
     let _ = tokio::time::timeout(Duration::from_secs(5), handle.join()).await;
 }
+
+// ─── chain settle: in-process multi-task ─────────────────────────────────────
+
+/// `with_chain_settle(true)` packs consecutive `Task` continuations into a
+/// single load+claim+save+release cycle. Verifies a 3-task workflow runs
+/// end-to-end on a chain-enabled worker.
+#[tokio::test]
+async fn pooled_worker_chain_settle_three_tasks() {
+    let (_c, _backend, url) = setup().await;
+
+    let backend_w = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+    let backend_client = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("a", |i: u32| async move { Ok(i + 1) })
+        .then("b", |i: u32| async move { Ok(i * 2) })
+        .then("c", |i: u32| async move { Ok(i + 100) })
+        .build()
+        .unwrap();
+    let wf = Arc::new(workflow);
+    let def_hash = *wf.definition_hash();
+
+    let client = WorkflowClient::new(backend_client);
+    let (status, _) = client.submit(wf.as_ref(), "chain-3", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::InProgress));
+
+    let registry = sayiir_core::registry::TaskRegistry::new();
+    let worker = PooledWorker::new("chain-w-0", backend_w, registry)
+        .with_claim_ttl(Some(Duration::from_secs(30)))
+        .with_chain_settle(true);
+    let handle = worker.spawn(Duration::from_millis(50), vec![(def_hash, Arc::clone(&wf))]);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            let snap = client.backend().load_snapshot("chain-3").await.unwrap();
+            panic!("timed out: state={:?}", snap.state);
+        }
+        let snap = client.backend().load_snapshot("chain-3").await.unwrap();
+        if snap.state.is_completed() {
+            let out: u32 = JsonCodec
+                .decode(snap.state.completed_output().unwrap().clone())
+                .unwrap();
+            // ((5+1)*2)+100 = 112
+            assert_eq!(out, 112);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle.join()).await;
+}
+
+/// Chain mode must break at a `delay` node — the workflow should park at
+/// the delay, save once, then resume after the wake_at.
+#[tokio::test]
+async fn pooled_worker_chain_settle_breaks_at_delay() {
+    let (_c, _backend, url) = setup().await;
+
+    let backend_w = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+    let backend_client = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("a", |i: u32| async move { Ok(i + 1) })
+        .then("b", |i: u32| async move { Ok(i * 2) })
+        .delay("wait", Duration::from_millis(200))
+        .then("c", |i: u32| async move { Ok(i + 10) })
+        .build()
+        .unwrap();
+    let wf = Arc::new(workflow);
+    let def_hash = *wf.definition_hash();
+
+    let client = WorkflowClient::new(backend_client);
+    let (status, _) = client.submit(wf.as_ref(), "chain-d", 7u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::InProgress));
+
+    let registry = sayiir_core::registry::TaskRegistry::new();
+    let worker = PooledWorker::new("chain-w-d", backend_w, registry)
+        .with_claim_ttl(Some(Duration::from_secs(30)))
+        .with_chain_settle(true);
+    let handle = worker.spawn(Duration::from_millis(50), vec![(def_hash, Arc::clone(&wf))]);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            let snap = client.backend().load_snapshot("chain-d").await.unwrap();
+            panic!("timed out: state={:?}", snap.state);
+        }
+        let snap = client.backend().load_snapshot("chain-d").await.unwrap();
+        if snap.state.is_completed() {
+            let out: u32 = JsonCodec
+                .decode(snap.state.completed_output().unwrap().clone())
+                .unwrap();
+            // ((7+1)*2)+10 = 26
+            assert_eq!(out, 26);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle.join()).await;
+}
+
+/// Chain mode under concurrent workers: 20 workflows × 4 tasks, 4 workers,
+/// all chain-enabled. Verify every instance reaches Completed with the
+/// correct output (no double-execution, no lost tasks).
+#[tokio::test]
+async fn pooled_worker_chain_settle_concurrent_workers() {
+    let (_c, _backend, url) = setup().await;
+
+    let backend_client = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+    let client = WorkflowClient::new(backend_client);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("a", |i: u32| async move { Ok(i + 1) })
+        .then("b", |i: u32| async move { Ok(i + 1) })
+        .then("c", |i: u32| async move { Ok(i + 1) })
+        .then("d", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+    let wf = Arc::new(workflow);
+    let def_hash = *wf.definition_hash();
+
+    for i in 0u32..20 {
+        let (_, _) = client.submit(wf.as_ref(), format!("chain-c-{i}"), i).await.unwrap();
+    }
+
+    let mut handles = Vec::new();
+    for w in 0..4 {
+        let backend = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+        let registry = sayiir_core::registry::TaskRegistry::new();
+        let worker = PooledWorker::new(format!("chain-cw-{w}"), backend, registry)
+            .with_claim_ttl(Some(Duration::from_secs(30)))
+            .with_chain_settle(true);
+        handles.push(worker.spawn(Duration::from_millis(50), vec![(def_hash, Arc::clone(&wf))]));
+    }
+
+    let codec = JsonCodec;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            panic!("timed out waiting for chain-settle concurrent workflows to complete");
+        }
+        let mut all_done = true;
+        for i in 0u32..20 {
+            let snap = client.backend().load_snapshot(&format!("chain-c-{i}")).await.unwrap();
+            if !snap.state.is_completed() {
+                all_done = false;
+                break;
+            }
+        }
+        if all_done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for i in 0u32..20 {
+        let snap = client.backend().load_snapshot(&format!("chain-c-{i}")).await.unwrap();
+        let out: u32 = codec
+            .decode(snap.state.completed_output().unwrap().clone())
+            .unwrap();
+        assert_eq!(out, i + 4, "instance chain-c-{i}: expected {}, got {out}", i + 4);
+    }
+
+    for h in handles {
+        h.shutdown();
+        let _ = tokio::time::timeout(Duration::from_secs(5), h.join()).await;
+    }
+}
