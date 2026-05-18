@@ -250,10 +250,16 @@ where
         name = "db.load_snapshot",
         skip(self),
         fields(db.system = "postgresql"),
-        err(level = tracing::Level::ERROR),
     )]
     async fn load_snapshot(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {
         tracing::debug!("loading snapshot");
+        // `NotFound` from the snapshots-row lookup is a regular control-flow
+        // return — `check_existing_instance` calls `load_snapshot` on every
+        // fresh `WorkflowClient::submit` to probe for a pre-existing instance.
+        // Logging that at ERROR floods CI / production logs with one red line
+        // per submission. Demote the "no such instance" case to DEBUG, but
+        // keep ERROR for the "instance exists but its history row is missing"
+        // inconsistency case (which is a real bug).
         let row = sqlx::query(
             "SELECT history_version, trace_parent
              FROM sayiir_workflow_snapshots
@@ -262,13 +268,21 @@ where
         .bind(instance_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(PgError)?
-        .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+        .inspect_err(|e| tracing::error!(error = %e, "load_snapshot: snapshots scan failed"))
+        .map_err(PgError)?;
+
+        let Some(row) = row else {
+            tracing::debug!(%instance_id, "snapshot not found");
+            return Err(BackendError::NotFound(instance_id.to_string()));
+        };
 
         let history_version: i32 = row.get("history_version");
         let data = self
             .fetch_blob(&self.pool, instance_id, history_version)
-            .await?;
+            .await
+            .inspect_err(|e| {
+                tracing::error!(error = %e, history_version, "load_snapshot: history blob fetch failed")
+            })?;
         let mut snapshot = self.decode(&data)?;
         snapshot.trace_parent = row.get("trace_parent");
         Ok(snapshot)
