@@ -142,6 +142,10 @@ pub struct NodeInfo<'a> {
     pub retry_policy: Option<&'a RetryPolicy>,
     /// Execution priority (only populated for [`NodeKind::Task`]).
     pub priority: Option<u8>,
+    /// Affinity tags (only populated for [`NodeKind::Task`]).
+    pub tags: &'a [String],
+    /// Schema version string (only populated for [`NodeKind::Task`]).
+    pub version: Option<&'a str>,
 }
 
 /// Lazy, stack-based iterator over workflow nodes in topological order.
@@ -151,6 +155,8 @@ pub struct NodeIter<'a> {
     stack: Vec<(&'a WorkflowContinuation, Option<&'a str>)>,
 }
 
+const EMPTY_TAGS: &[String] = &[];
+
 impl<'a> Iterator for NodeIter<'a> {
     type Item = NodeInfo<'a>;
 
@@ -158,12 +164,14 @@ impl<'a> Iterator for NodeIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let (cont, predecessor) = self.stack.pop()?;
 
-        let (id, kind, timeout, retry_policy, priority) = match cont {
+        let (id, kind, timeout, retry_policy, priority, tags, version) = match cont {
             WorkflowContinuation::Task {
                 id,
                 timeout,
                 retry_policy,
                 priority,
+                tags,
+                version,
                 ..
             } => (
                 id.as_str(),
@@ -171,25 +179,63 @@ impl<'a> Iterator for NodeIter<'a> {
                 *timeout,
                 retry_policy.as_ref(),
                 *priority,
+                tags.as_slice(),
+                version.as_deref(),
             ),
-            WorkflowContinuation::Fork { id, .. } => {
-                (id.as_str(), NodeKind::Fork, None, None, None)
-            }
-            WorkflowContinuation::Delay { id, duration, .. } => {
-                (id.as_str(), NodeKind::Delay, Some(*duration), None, None)
-            }
-            WorkflowContinuation::AwaitSignal { id, timeout, .. } => {
-                (id.as_str(), NodeKind::AwaitSignal, *timeout, None, None)
-            }
-            WorkflowContinuation::Branch { id, .. } => {
-                (id.as_str(), NodeKind::Branch, None, None, None)
-            }
-            WorkflowContinuation::Loop { id, .. } => {
-                (id.as_str(), NodeKind::Loop, None, None, None)
-            }
-            WorkflowContinuation::ChildWorkflow { id, .. } => {
-                (id.as_str(), NodeKind::ChildWorkflow, None, None, None)
-            }
+            WorkflowContinuation::Fork { id, .. } => (
+                id.as_str(),
+                NodeKind::Fork,
+                None,
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
+            WorkflowContinuation::Delay { id, duration, .. } => (
+                id.as_str(),
+                NodeKind::Delay,
+                Some(*duration),
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
+            WorkflowContinuation::AwaitSignal { id, timeout, .. } => (
+                id.as_str(),
+                NodeKind::AwaitSignal,
+                *timeout,
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
+            WorkflowContinuation::Branch { id, .. } => (
+                id.as_str(),
+                NodeKind::Branch,
+                None,
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
+            WorkflowContinuation::Loop { id, .. } => (
+                id.as_str(),
+                NodeKind::Loop,
+                None,
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
+            WorkflowContinuation::ChildWorkflow { id, .. } => (
+                id.as_str(),
+                NodeKind::ChildWorkflow,
+                None,
+                None,
+                None,
+                EMPTY_TAGS,
+                None,
+            ),
         };
 
         // Push children in reverse order so the first child is popped next.
@@ -252,6 +298,8 @@ impl<'a> Iterator for NodeIter<'a> {
             timeout,
             retry_policy,
             priority,
+            tags,
+            version,
         })
     }
 }
@@ -483,11 +531,11 @@ impl WorkflowContinuation {
     /// `prepare_run` and `ParkReason`.
     #[must_use]
     pub fn first_task_hint(&self) -> crate::snapshot::TaskHint {
-        crate::snapshot::TaskHint {
-            id: self.first_task_id().to_string(),
-            priority: self.first_task_priority(),
-            tags: self.first_task_tags(),
-        }
+        crate::snapshot::TaskHint::new(
+            self.first_task_id(),
+            self.first_task_priority(),
+            &self.first_task_tags(),
+        )
     }
 
     /// Get the terminal task ID of this continuation chain.
@@ -508,10 +556,20 @@ impl WorkflowContinuation {
     ///
     /// Recursively walks the full continuation tree, including through `Arc`
     /// fork branches, and returns a reference to the matching `Task` node.
-    fn find_task(&self, target_id: &str) -> Option<&Self> {
+    /// Resolve a [`TaskId`](crate::TaskId) back to the human-readable task
+    /// name stored on the matching `Task` node, if any. O(N) tree walk.
+    #[must_use]
+    pub fn find_task_name(&self, target_id: &crate::TaskId) -> Option<&str> {
+        self.find_task(target_id).and_then(|n| match n {
+            WorkflowContinuation::Task { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+    }
+
+    fn find_task(&self, target_id: &crate::TaskId) -> Option<&Self> {
         match self {
             WorkflowContinuation::Task { id, next, .. } => {
-                if id == target_id {
+                if crate::TaskId::from(id.as_str()) == *target_id {
                     return Some(self);
                 }
                 next.as_ref().and_then(|n| n.find_task(target_id))
@@ -560,9 +618,13 @@ impl WorkflowContinuation {
     /// Same traversal as [`find_task`](Self::find_task) but returns a mutable
     /// reference. Fork branches behind `Arc` are skipped since they cannot be
     /// mutated; only the join continuation is searched.
-    fn find_task_mut(&mut self, target_id: &str) -> Option<&mut Self> {
+    fn find_task_mut(&mut self, target_id: &crate::TaskId) -> Option<&mut Self> {
         match self {
-            WorkflowContinuation::Task { id, .. } if id == target_id => Some(self),
+            WorkflowContinuation::Task { id, .. }
+                if crate::TaskId::from(id.as_str()) == *target_id =>
+            {
+                Some(self)
+            }
             WorkflowContinuation::Task { next, .. } => {
                 next.as_mut().and_then(|n| n.find_task_mut(target_id))
             }
@@ -605,14 +667,22 @@ impl WorkflowContinuation {
     }
 
     /// Set the timeout on a specific task node found by ID.
-    pub fn set_task_timeout(&mut self, target_id: &str, timeout: Option<std::time::Duration>) {
+    pub fn set_task_timeout(
+        &mut self,
+        target_id: &crate::TaskId,
+        timeout: Option<std::time::Duration>,
+    ) {
         if let Some(WorkflowContinuation::Task { timeout: t, .. }) = self.find_task_mut(target_id) {
             *t = timeout;
         }
     }
 
     /// Set the retry policy on a specific task node found by ID.
-    pub fn set_task_retry_policy(&mut self, target_id: &str, policy: Option<RetryPolicy>) {
+    pub fn set_task_retry_policy(
+        &mut self,
+        target_id: &crate::TaskId,
+        policy: Option<RetryPolicy>,
+    ) {
         if let Some(WorkflowContinuation::Task { retry_policy, .. }) = self.find_task_mut(target_id)
         {
             *retry_policy = policy;
@@ -620,7 +690,7 @@ impl WorkflowContinuation {
     }
 
     /// Set the schema version on a specific task node found by ID.
-    pub fn set_task_version(&mut self, target_id: &str, ver: Option<String>) {
+    pub fn set_task_version(&mut self, target_id: &crate::TaskId, ver: Option<String>) {
         if let Some(WorkflowContinuation::Task { version, .. }) = self.find_task_mut(target_id) {
             *version = ver;
         }
@@ -628,7 +698,7 @@ impl WorkflowContinuation {
 
     /// Look up the retry policy configured on a specific task by ID.
     #[must_use]
-    pub fn get_task_retry_policy(&self, task_id: &str) -> Option<&RetryPolicy> {
+    pub fn get_task_retry_policy(&self, task_id: &crate::TaskId) -> Option<&RetryPolicy> {
         match self.find_task(task_id)? {
             WorkflowContinuation::Task { retry_policy, .. } => retry_policy.as_ref(),
             _ => None,
@@ -637,7 +707,7 @@ impl WorkflowContinuation {
 
     /// Look up the timeout configured on a specific task by ID.
     #[must_use]
-    pub fn get_task_timeout(&self, task_id: &str) -> Option<std::time::Duration> {
+    pub fn get_task_timeout(&self, task_id: &crate::TaskId) -> Option<std::time::Duration> {
         match self.find_task(task_id)? {
             WorkflowContinuation::Task { timeout, .. } => *timeout,
             _ => None,
@@ -646,7 +716,7 @@ impl WorkflowContinuation {
 
     /// Look up the priority configured on a specific task by ID.
     #[must_use]
-    pub fn get_task_priority(&self, task_id: &str) -> Option<u8> {
+    pub fn get_task_priority(&self, task_id: &crate::TaskId) -> Option<u8> {
         match self.find_task(task_id)? {
             WorkflowContinuation::Task { priority, .. } => *priority,
             _ => None,
@@ -655,7 +725,7 @@ impl WorkflowContinuation {
 
     /// Look up the affinity tags configured on a specific task by ID.
     #[must_use]
-    pub fn get_task_tags(&self, task_id: &str) -> Vec<String> {
+    pub fn get_task_tags(&self, task_id: &crate::TaskId) -> Vec<String> {
         match self.find_task(task_id) {
             Some(WorkflowContinuation::Task { tags, .. }) => tags.clone(),
             _ => vec![],
@@ -663,7 +733,7 @@ impl WorkflowContinuation {
     }
 
     /// Set the affinity tags on a specific task node found by ID.
-    pub fn set_task_tags(&mut self, target_id: &str, new_tags: Vec<String>) {
+    pub fn set_task_tags(&mut self, target_id: &crate::TaskId, new_tags: Vec<String>) {
         if let Some(WorkflowContinuation::Task { tags, .. }) = self.find_task_mut(target_id) {
             *tags = new_tags;
         }
@@ -676,7 +746,7 @@ impl WorkflowContinuation {
     /// name and description are left as defaults since they are not stored in
     /// the continuation tree.
     #[must_use]
-    pub fn build_task_metadata(&self, task_id: &str) -> crate::task::TaskMetadata {
+    pub fn build_task_metadata(&self, task_id: &crate::TaskId) -> crate::task::TaskMetadata {
         match self.find_task(task_id) {
             Some(WorkflowContinuation::Task {
                 timeout,
@@ -685,14 +755,13 @@ impl WorkflowContinuation {
                 priority,
                 tags,
                 ..
-            }) => crate::task::TaskMetadata {
-                timeout: *timeout,
-                retries: retry_policy.clone(),
-                version: version.clone(),
-                priority: priority.and_then(crate::priority::Priority::from_u8),
-                tags: tags.clone(),
-                ..Default::default()
-            },
+            }) => crate::task::TaskMetadata::from_node_fields(
+                *timeout,
+                retry_policy.clone(),
+                version.clone(),
+                *priority,
+                tags.clone(),
+            ),
             _ => crate::task::TaskMetadata::default(),
         }
     }
@@ -1195,7 +1264,7 @@ impl SerializableContinuation {
     /// arrangement.
     #[must_use]
     #[allow(clippy::too_many_lines)]
-    pub fn compute_definition_hash(&self) -> String {
+    pub fn compute_definition_hash(&self) -> crate::DefinitionHash {
         #[allow(clippy::too_many_lines)]
         fn hash_continuation(cont: &SerializableContinuation, hasher: &mut Sha256) {
             match cont {
@@ -1344,7 +1413,7 @@ impl SerializableContinuation {
 
         let mut hasher = Sha256::new();
         hash_continuation(self, &mut hasher);
-        hex::encode(hasher.finalize())
+        crate::DefinitionHash::from_hash(crate::Hash32::from_digest(hasher))
     }
 }
 
@@ -1360,7 +1429,7 @@ pub struct SerializedWorkflowState {
     pub workflow_id: String,
     /// SHA256 hash of the workflow definition structure.
     /// Used to detect version mismatches during deserialization.
-    pub definition_hash: String,
+    pub definition_hash: crate::DefinitionHash,
     /// The serializable continuation structure.
     pub continuation: SerializableContinuation,
 }
@@ -1457,14 +1526,14 @@ pub enum WorkflowStatus {
         /// When the delay expires.
         wake_at: chrono::DateTime<chrono::Utc>,
         /// The delay node ID.
-        delay_id: String,
+        delay_id: crate::TaskId,
     },
     /// The workflow is waiting for an external signal.
     #[strum(serialize = "awaiting_signal")]
     AwaitingSignal {
         /// The signal node ID.
-        signal_id: String,
-        /// The named signal being waited on.
+        signal_id: crate::TaskId,
+        /// The named signal being waited on (user-defined string).
         signal_name: String,
         /// Optional timeout deadline.
         wake_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -1521,14 +1590,15 @@ impl From<WorkflowStatus> for FlatWorkflowStatus {
             }
             WorkflowStatus::Waiting { wake_at, delay_id } => {
                 flat.wake_at = Some(wake_at.to_rfc3339());
-                flat.delay_id = Some(delay_id);
+                // FFI / flattened form keeps strings — render the hash as hex.
+                flat.delay_id = Some(delay_id.to_hex());
             }
             WorkflowStatus::AwaitingSignal {
                 signal_id,
                 signal_name,
                 wake_at,
             } => {
-                flat.signal_id = Some(signal_id);
+                flat.signal_id = Some(signal_id.to_hex());
                 flat.signal_name = Some(signal_name);
                 flat.wake_at = wake_at.map(|t| t.to_rfc3339());
             }
@@ -1547,17 +1617,22 @@ use crate::registry::TaskRegistry;
 
 /// A built workflow that can be executed.
 pub struct Workflow<C, Input, M = ()> {
-    pub(crate) definition_hash: String,
+    pub(crate) definition_hash: crate::DefinitionHash,
     pub(crate) context: WorkflowContext<C, M>,
     pub(crate) continuation: WorkflowContinuation,
+    /// Per-workflow `TaskId → metadata` index, built once at `build()` time.
+    ///
+    /// Avoids re-hashing every node id with SHA-256 on every dispatch lookup
+    /// (`find_task_name`, `get_task_*`, `build_task_metadata`).
+    pub(crate) task_index: Arc<crate::task_index::TaskIndex>,
     pub(crate) _phantom: PhantomData<Input>,
 }
 
 impl<C, Input, M> Workflow<C, Input, M> {
-    /// Get the workflow ID.
+    /// Get the workflow name (human-readable).
     #[must_use]
     pub fn workflow_id(&self) -> &str {
-        &self.context.workflow_id
+        &self.context.workflow_name
     }
 
     /// Get the definition hash.
@@ -1566,7 +1641,7 @@ impl<C, Input, M> Workflow<C, Input, M> {
     /// as a version identifier. It can be used to detect when a serialized workflow
     /// state was created with a different workflow definition.
     #[must_use]
-    pub fn definition_hash(&self) -> &str {
+    pub fn definition_hash(&self) -> &crate::DefinitionHash {
         &self.definition_hash
     }
 
@@ -1586,6 +1661,19 @@ impl<C, Input, M> Workflow<C, Input, M> {
     #[must_use]
     pub fn continuation(&self) -> &WorkflowContinuation {
         &self.continuation
+    }
+
+    /// Borrow the `TaskId → metadata` index. Built once at build time.
+    #[must_use]
+    pub fn task_index(&self) -> &crate::task_index::TaskIndex {
+        &self.task_index
+    }
+
+    /// Clone the shared `Arc<TaskIndex>` — for callers (FFI / runtime) that
+    /// want to hold onto the index alongside the continuation.
+    #[must_use]
+    pub fn task_index_arc(&self) -> Arc<crate::task_index::TaskIndex> {
+        Arc::clone(&self.task_index)
     }
 
     /// Get a reference to the metadata attached to this workflow.
@@ -1672,7 +1760,7 @@ impl<C, Input, M> SerializableWorkflow<C, Input, M> {
 
     /// Get the definition hash.
     #[must_use]
-    pub fn definition_hash(&self) -> &str {
+    pub fn definition_hash(&self) -> &crate::DefinitionHash {
         self.inner.definition_hash()
     }
 
@@ -1730,7 +1818,7 @@ impl<C, Input, M> SerializableWorkflow<C, Input, M> {
     pub fn to_serializable(&self) -> SerializedWorkflowState {
         SerializedWorkflowState {
             workflow_id: self.inner.workflow_id().to_string(),
-            definition_hash: self.inner.definition_hash.clone(),
+            definition_hash: self.inner.definition_hash,
             continuation: self.inner.continuation().to_serializable(),
         }
     }
@@ -1750,8 +1838,8 @@ impl<C, Input, M> SerializableWorkflow<C, Input, M> {
     ) -> Result<WorkflowContinuation, crate::error::BuildError> {
         if state.definition_hash != self.inner.definition_hash {
             return Err(crate::error::BuildError::DefinitionMismatch {
-                expected: self.inner.definition_hash.clone(),
-                found: state.definition_hash.clone(),
+                expected: self.inner.definition_hash,
+                found: state.definition_hash,
             });
         }
         state.continuation.to_runnable(&self.registry)
@@ -2118,13 +2206,16 @@ mod tests {
         // Check workflow_id is set correctly
         assert_eq!(workflow.workflow_id(), "my-workflow-id");
 
-        // Definition hash should be non-empty
-        assert!(!workflow.definition_hash().is_empty());
+        // Definition hash should be non-zero
+        assert_ne!(
+            *workflow.definition_hash(),
+            crate::DefinitionHash::from_bytes([0u8; 32])
+        );
 
         // Serializable state should contain the same id and hash
         let state = workflow.to_serializable();
         assert_eq!(state.workflow_id, "my-workflow-id");
-        assert_eq!(state.definition_hash, workflow.definition_hash());
+        assert_eq!(&state.definition_hash, workflow.definition_hash());
     }
 
     #[test]
@@ -2166,7 +2257,7 @@ mod tests {
 
         // Create a state with wrong hash
         let mut state = workflow.to_serializable();
-        state.definition_hash = "wrong-hash".to_string();
+        state.definition_hash = crate::DefinitionHash::sha256(b"wrong-hash");
 
         // to_runnable should fail with DefinitionMismatch
         let result = workflow.to_runnable(&state);

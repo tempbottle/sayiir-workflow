@@ -89,7 +89,7 @@ impl NapiWorkflowClient {
         instance_id: String,
         input: Unknown,
     ) -> Result<NapiWorkflowStatus> {
-        let definition_hash = workflow.definition_hash.clone();
+        let definition_hash = workflow.definition_hash;
         let first_task = workflow.continuation.first_task_hint();
         let conflict_policy = self.conflict_policy;
 
@@ -116,7 +116,7 @@ impl NapiWorkflowClient {
             self.runtime
                 .block_on(async {
                     match prepare_run(
-                        instance_id,
+                        &instance_id,
                         definition_hash,
                         input_bytes,
                         first_task,
@@ -209,11 +209,15 @@ impl NapiWorkflowClient {
     /// the backend's history or cache.
     #[napi(js_name = "getTaskResult")]
     pub fn get_task_result(&self, instance_id: String, task_id: String) -> Result<Option<String>> {
-        let bytes = with_backend!(self, |backend| {
-            self.runtime
-                .block_on(backend.load_task_result(&instance_id, &task_id))
-                .map_err(exceptions::backend_err_to_napi)?
-        });
+        let bytes =
+            with_backend!(self, |backend| {
+                self.runtime
+                    .block_on(backend.load_task_result(
+                        &instance_id,
+                        &sayiir_core::TaskId::from(task_id.as_str()),
+                    ))
+                    .map_err(exceptions::backend_err_to_napi)?
+            });
         Ok(bytes.map(|b| String::from_utf8_lossy(&b).into_owned()))
     }
 

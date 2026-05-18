@@ -143,7 +143,7 @@ impl NapiDurableEngine {
         task_registry: Object,
     ) -> Result<NapiWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
-        let definition_hash = workflow.definition_hash.clone();
+        let definition_hash = workflow.definition_hash;
         let first_task = continuation.first_task_hint();
 
         tracing::info!(
@@ -178,7 +178,7 @@ impl NapiDurableEngine {
             self.runtime
                 .block_on(async {
                     let mut snapshot = match prepare_run(
-                        instance_id,
+                        &instance_id,
                         definition_hash,
                         input_bytes.clone(),
                         first_task,
@@ -239,7 +239,7 @@ impl NapiDurableEngine {
         task_registry: Object,
     ) -> Result<NapiWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
-        let definition_hash = workflow.definition_hash.clone();
+        let definition_hash = workflow.definition_hash;
 
         tracing::info!(
             workflow_id = %workflow.workflow_id,
@@ -456,7 +456,7 @@ fn make_task_executor<'a>(
                 workflow_id: Arc::clone(&wf_id),
                 instance_id: Arc::clone(&inst_id),
                 task_id: Arc::from(task_id),
-                metadata: continuation.build_task_metadata(task_id),
+                metadata: continuation.build_task_metadata(&sayiir_core::TaskId::from(task_id)),
                 workflow_metadata_json: workflow_metadata_json.clone(),
             };
             let registry_ref = Arc::clone(&registry_ref);

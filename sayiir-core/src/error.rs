@@ -14,7 +14,7 @@ pub enum CodecError {
     #[error("Failed to decode input for task '{task_id}' (expected {expected_type}): {source}")]
     DecodeFailed {
         /// The task whose input could not be decoded.
-        task_id: String,
+        task_id: crate::TaskId,
         /// The Rust type name that was expected (via `std::any::type_name`).
         expected_type: &'static str,
         /// The underlying deserialization error.
@@ -24,7 +24,7 @@ pub enum CodecError {
     #[error("Failed to encode output for task '{task_id}': {source}")]
     EncodeFailed {
         /// The task whose output could not be encoded.
-        task_id: String,
+        task_id: crate::TaskId,
         /// The underlying serialization error.
         source: BoxError,
     },
@@ -84,9 +84,9 @@ pub enum BuildError {
     #[error("Workflow definition mismatch: expected hash '{expected}', found '{found}'")]
     DefinitionMismatch {
         /// The expected hash (from current workflow).
-        expected: String,
+        expected: crate::DefinitionHash,
         /// The hash found in the serialized state.
-        found: String,
+        found: crate::DefinitionHash,
     },
 
     /// A `#[task]` requires a dependency that is missing from the `Deps`
@@ -235,9 +235,9 @@ pub enum WorkflowError {
     #[error("Workflow definition mismatch: expected hash '{expected}', found '{found}'")]
     DefinitionMismatch {
         /// The expected hash (from current workflow).
-        expected: String,
+        expected: crate::DefinitionHash,
         /// The hash found in the serialized state.
-        found: String,
+        found: crate::DefinitionHash,
     },
 
     /// The workflow was cancelled.
@@ -297,7 +297,7 @@ pub enum WorkflowError {
     #[error("Task '{task_id}' timed out after {timeout:?}")]
     TaskTimedOut {
         /// The task that timed out.
-        task_id: String,
+        task_id: crate::TaskId,
         /// The configured timeout duration.
         timeout: std::time::Duration,
     },
@@ -306,7 +306,7 @@ pub enum WorkflowError {
     #[error("Workflow awaiting signal '{signal_name}' at node '{signal_id}'")]
     AwaitingSignal {
         /// The signal node ID.
-        signal_id: String,
+        signal_id: crate::TaskId,
         /// The named signal being waited on.
         signal_name: String,
         /// Optional timeout deadline.
@@ -317,7 +317,7 @@ pub enum WorkflowError {
     #[error("Loop '{loop_id}' exceeded max iterations ({max_iterations})")]
     MaxIterationsExceeded {
         /// The loop node ID.
-        loop_id: String,
+        loop_id: crate::TaskId,
         /// The configured maximum.
         max_iterations: u32,
     },

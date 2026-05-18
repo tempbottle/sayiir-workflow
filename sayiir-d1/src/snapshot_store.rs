@@ -15,7 +15,7 @@ where
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         let data = self.encode(snapshot)?;
         let status = snapshot.state.as_ref();
-        let task_id = snapshot.current_task_id().map(ToString::to_string);
+        let task_id = snapshot.current_task_id().map(|t| t.to_hex());
         let task_count = snapshot.completed_task_count();
         let error = snapshot.error_message().map(ToString::to_string);
         let terminal = snapshot.state.is_terminal();
@@ -51,9 +51,9 @@ where
 
         let exec = self.exec();
         sqlx::query(upsert_sql.as_str())
-            .bind(&snapshot.instance_id) // ?1
+            .bind(&*snapshot.instance_id) // ?1
             .bind(status) // ?2
-            .bind(&snapshot.definition_hash) // ?3
+            .bind(snapshot.definition_hash.to_hex()) // ?3
             .bind(&task_id) // ?4
             .bind(i64::from(task_count)) // ?5
             .bind(&data) // ?6
@@ -76,7 +76,7 @@ where
              )";
 
         sqlx::query(history_sql)
-            .bind(&snapshot.instance_id)
+            .bind(&*snapshot.instance_id)
             .bind(status)
             .bind(&task_id)
             .bind(&data)
@@ -90,12 +90,12 @@ where
     async fn save_task_result(
         &self,
         instance_id: &str,
-        task_id: &str,
+        task_id: &sayiir_core::TaskId,
         output: bytes::Bytes,
     ) -> Result<(), BackendError> {
         // Single-Worker: no concurrency, so sequential load → mutate → save is safe.
         let mut snapshot = self.load_snapshot(instance_id).await?;
-        snapshot.mark_task_completed(task_id.to_string(), output);
+        snapshot.mark_task_completed(*task_id, output);
         self.save_snapshot(&snapshot).await
     }
 

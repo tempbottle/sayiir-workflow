@@ -193,7 +193,7 @@ where
     async fn check_and_cancel(
         &self,
         instance_id: &str,
-        interrupted_at_task: Option<&str>,
+        interrupted_at_task: Option<sayiir_core::TaskId>,
     ) -> Result<bool, BackendError> {
         tracing::debug!("checking for cancel signal");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
@@ -231,7 +231,7 @@ where
 
         let reason: Option<String> = signal_row.get("reason");
         let requested_by: Option<String> = signal_row.get("requested_by");
-        snapshot.mark_cancelled(reason, requested_by, interrupted_at_task.map(String::from));
+        snapshot.mark_cancelled(reason, requested_by, interrupted_at_task);
 
         let data = self.encode(&snapshot)?;
         let status = snapshot.state.as_ref();
@@ -341,7 +341,8 @@ where
 
         let data = self.encode(&snapshot)?;
         let status = snapshot.state.as_ref();
-        let task_id = snapshot.current_task_id().map(ToString::to_string);
+        let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
+        let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
@@ -356,7 +357,7 @@ where
              WHERE instance_id = $7",
         )
         .bind(status)
-        .bind(&task_id)
+        .bind(task_id)
         .bind(task_count)
         .bind(pos_kind)
         .bind(wake_at)
@@ -417,7 +418,8 @@ where
 
         let data = self.encode(&snapshot)?;
         let status = snapshot.state.as_ref();
-        let task_id = snapshot.current_task_id().map(ToString::to_string);
+        let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
+        let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
@@ -432,7 +434,7 @@ where
              WHERE instance_id = $7",
         )
         .bind(status)
-        .bind(&task_id)
+        .bind(task_id)
         .bind(task_count)
         .bind(pos_kind)
         .bind(wake_at)

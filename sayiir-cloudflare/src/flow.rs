@@ -17,7 +17,7 @@ use crate::error::to_js_error;
 #[wasm_bindgen]
 pub struct WasmWorkflow {
     pub(crate) workflow_id: String,
-    pub(crate) definition_hash: String,
+    pub(crate) definition_hash: sayiir_core::DefinitionHash,
     pub(crate) continuation: Arc<WorkflowContinuation>,
     pub(crate) metadata_json: Option<String>,
 }
@@ -32,7 +32,7 @@ impl WasmWorkflow {
 
     #[wasm_bindgen(getter, js_name = "definitionHash")]
     pub fn definition_hash(&self) -> String {
-        self.definition_hash.clone()
+        self.definition_hash.to_hex()
     }
 
     #[wasm_bindgen(getter, js_name = "metadataJson")]

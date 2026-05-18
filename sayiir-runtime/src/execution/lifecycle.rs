@@ -32,22 +32,23 @@ use crate::error::RuntimeError;
 /// I/O errors.
 pub async fn check_existing_instance<B>(
     instance_id: &str,
-    definition_hash: &str,
+    definition_hash: &sayiir_core::DefinitionHash,
     backend: &B,
     conflict_policy: ConflictPolicy,
 ) -> Result<Option<(WorkflowStatus, Option<Bytes>)>, RuntimeError>
 where
     B: SnapshotStore,
 {
+    sayiir_core::validate_instance_id(instance_id)?;
     if matches!(conflict_policy, ConflictPolicy::TerminateExisting) {
         return Ok(None);
     }
     match backend.load_snapshot(instance_id).await {
         Ok(existing) => {
-            if existing.definition_hash != definition_hash {
+            if existing.definition_hash != *definition_hash {
                 return Err(WorkflowError::DefinitionMismatch {
-                    expected: definition_hash.to_string(),
-                    found: existing.definition_hash.clone(),
+                    expected: *definition_hash,
+                    found: existing.definition_hash,
                 }
                 .into());
             }
@@ -85,8 +86,8 @@ where
     fields(%instance_id),
 )]
 pub async fn prepare_run<B>(
-    instance_id: String,
-    definition_hash: String,
+    instance_id: &str,
+    definition_hash: sayiir_core::DefinitionHash,
     input_bytes: Bytes,
     first_task: TaskHint,
     backend: &B,
@@ -95,18 +96,17 @@ pub async fn prepare_run<B>(
 where
     B: SnapshotStore + SignalStore,
 {
+    sayiir_core::validate_instance_id(instance_id)?;
     if matches!(conflict_policy, ConflictPolicy::TerminateExisting) {
         // Best-effort cleanup — if nothing exists the deletes are no-ops.
-        match backend.load_snapshot(&instance_id).await {
+        match backend.load_snapshot(instance_id).await {
             Ok(_existing) => {
                 tracing::info!("terminating existing instance before restart");
-                backend.delete_snapshot(&instance_id).await?;
+                backend.delete_snapshot(instance_id).await?;
                 backend
-                    .clear_signal(&instance_id, SignalKind::Cancel)
+                    .clear_signal(instance_id, SignalKind::Cancel)
                     .await?;
-                backend
-                    .clear_signal(&instance_id, SignalKind::Pause)
-                    .await?;
+                backend.clear_signal(instance_id, SignalKind::Pause).await?;
             }
             Err(sayiir_persistence::BackendError::NotFound(_)) => {}
             Err(e) => return Err(e.into()),
@@ -119,7 +119,7 @@ where
         snapshot.trace_parent = crate::trace_context::current_trace_parent();
     }
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: first_task.id.clone(),
+        task_id: first_task.id,
     });
     snapshot.set_task_hint(&first_task);
     backend.save_snapshot(&snapshot).await?;
@@ -143,20 +143,21 @@ where
 )]
 pub async fn prepare_resume<B>(
     instance_id: &str,
-    definition_hash: &str,
+    definition_hash: &sayiir_core::DefinitionHash,
     backend: &B,
 ) -> Result<ResumeOutcome, RuntimeError>
 where
     B: SignalStore,
 {
+    sayiir_core::validate_instance_id(instance_id)?;
     tracing::debug!("preparing workflow resume");
     let mut snapshot = backend.load_snapshot(instance_id).await?;
 
     // Validate definition hash
-    if snapshot.definition_hash != definition_hash {
+    if snapshot.definition_hash != *definition_hash {
         return Err(WorkflowError::DefinitionMismatch {
-            expected: definition_hash.to_string(),
-            found: snapshot.definition_hash.clone(),
+            expected: *definition_hash,
+            found: snapshot.definition_hash,
         }
         .into());
     }
@@ -269,12 +270,12 @@ where
                 WorkflowSnapshotState::InProgress {
                     position: ExecutionPosition::AtDelay { delay_id, .. },
                     ..
-                } => delay_id.clone(),
+                } => *delay_id,
                 WorkflowSnapshotState::InProgress {
                     position: ExecutionPosition::AtFork { fork_id, .. },
                     ..
-                } => fork_id.clone(),
-                _ => String::new(),
+                } => *fork_id,
+                _ => sayiir_core::TaskId::default(),
             };
             tracing::info!(
                 instance_id = %snapshot.instance_id,

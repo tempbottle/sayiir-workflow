@@ -18,7 +18,7 @@ use sayiir_core::error::{CodecError, WorkflowError};
 pub(crate) async fn check_guards<B: SignalStore>(
     backend: &B,
     instance_id: &str,
-    cancel_scope: Option<&str>,
+    cancel_scope: Option<sayiir_core::TaskId>,
 ) -> Result<(), RuntimeError> {
     if backend.check_and_cancel(instance_id, cancel_scope).await? {
         return Err(WorkflowError::cancelled().into());
@@ -38,7 +38,7 @@ pub(crate) enum ParkedCheckResult {
     /// The wake time has not yet arrived.
     StillWaiting {
         wake_at: chrono::DateTime<chrono::Utc>,
-        node_id: String,
+        node_id: sayiir_core::TaskId,
     },
     /// The wake time has passed; execution can continue.
     Expired,
@@ -62,7 +62,7 @@ impl ParkedCheckResult {
 pub(crate) async fn check_parked_position<B: SignalStore>(
     backend: &B,
     instance_id: &str,
-    node_id: &str,
+    node_id: sayiir_core::TaskId,
     wake_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<ParkedCheckResult, RuntimeError> {
     if backend.check_and_cancel(instance_id, Some(node_id)).await? {
@@ -85,10 +85,7 @@ pub(crate) async fn check_parked_position<B: SignalStore>(
         }));
     }
     if chrono::Utc::now() < wake_at {
-        return Ok(ParkedCheckResult::StillWaiting {
-            wake_at,
-            node_id: node_id.to_string(),
-        });
+        return Ok(ParkedCheckResult::StillWaiting { wake_at, node_id });
     }
     Ok(ParkedCheckResult::Expired)
 }
@@ -101,20 +98,20 @@ pub(crate) enum ResumeParkedPosition {
     /// Workflow was parked at a durable delay.
     Delay {
         wake_at: chrono::DateTime<chrono::Utc>,
-        delay_id: String,
-        next_task_id: Option<String>,
+        delay_id: sayiir_core::TaskId,
+        next_task_id: Option<sayiir_core::TaskId>,
     },
     /// Workflow was parked at a fork (one or more branches waiting).
     Fork {
         wake_at: chrono::DateTime<chrono::Utc>,
-        fork_id: String,
+        fork_id: sayiir_core::TaskId,
     },
     /// Workflow was parked waiting for an external signal.
     Signal {
-        signal_id: String,
+        signal_id: sayiir_core::TaskId,
         signal_name: String,
         wake_at: Option<chrono::DateTime<chrono::Utc>>,
-        next_task_id: Option<String>,
+        next_task_id: Option<sayiir_core::TaskId>,
     },
     /// Snapshot is not in a parked position.
     NotParked,
@@ -135,8 +132,8 @@ impl ResumeParkedPosition {
                 ..
             } => Self::Delay {
                 wake_at: *wake_at,
-                delay_id: delay_id.clone(),
-                next_task_id: next_task_id.clone(),
+                delay_id: *delay_id,
+                next_task_id: *next_task_id,
             },
             WorkflowSnapshotState::InProgress {
                 position:
@@ -146,7 +143,7 @@ impl ResumeParkedPosition {
                 ..
             } => Self::Fork {
                 wake_at: *wake_at,
-                fork_id: fork_id.clone(),
+                fork_id: *fork_id,
             },
             WorkflowSnapshotState::InProgress {
                 position:
@@ -158,10 +155,10 @@ impl ResumeParkedPosition {
                     },
                 ..
             } => Self::Signal {
-                signal_id: signal_id.clone(),
+                signal_id: *signal_id,
                 signal_name: signal_name.clone(),
                 wake_at: *wake_at,
-                next_task_id: next_task_id.clone(),
+                next_task_id: *next_task_id,
             },
             _ => Self::NotParked,
         }
@@ -186,8 +183,7 @@ impl ResumeParkedPosition {
                 delay_id,
                 next_task_id,
             } => {
-                let result =
-                    check_parked_position(backend, instance_id, &delay_id, wake_at).await?;
+                let result = check_parked_position(backend, instance_id, delay_id, wake_at).await?;
                 if let Some(status) = result.into_status() {
                     return Ok(Some(status));
                 }
@@ -207,7 +203,7 @@ impl ResumeParkedPosition {
                 Ok(None)
             }
             Self::Fork { wake_at, fork_id } => {
-                let result = check_parked_position(backend, instance_id, &fork_id, wake_at).await?;
+                let result = check_parked_position(backend, instance_id, fork_id, wake_at).await?;
                 if let Some(status) = result.into_status() {
                     return Ok(Some(status));
                 }
@@ -222,7 +218,7 @@ impl ResumeParkedPosition {
             } => {
                 // Check cancel/pause first
                 if backend
-                    .check_and_cancel(instance_id, Some(&signal_id))
+                    .check_and_cancel(instance_id, Some(signal_id))
                     .await?
                 {
                     let snap = backend.load_snapshot(instance_id).await?;
@@ -243,7 +239,7 @@ impl ResumeParkedPosition {
                 if let Some(payload) = backend.consume_event(instance_id, &signal_name).await? {
                     tracing::info!(instance_id, %signal_id, %signal_name, "signal received, advancing");
                     // Store under signal_id (node ID) so the executor's skip logic finds it
-                    snapshot.mark_task_completed(signal_id.clone(), payload);
+                    snapshot.mark_task_completed(signal_id, payload);
                     if let Some(next_id) = next_task_id {
                         snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
                     } else {
@@ -304,7 +300,7 @@ pub(crate) fn resolve_branch<'a, E: sayiir_core::codec::EnvelopeCodec>(
         envelope_codec
             .decode_string(key_bytes)
             .map_err(|e| CodecError::DecodeFailed {
-                task_id: branch_id.to_string(),
+                task_id: sayiir_core::TaskId::from(branch_id),
                 expected_type: "String (branch key)",
                 source: e,
             })?;
@@ -358,14 +354,19 @@ where
     loop {
         match execute(snapshot).await {
             Ok(output) => {
-                snapshot.clear_retry_state(task_id);
+                snapshot.clear_retry_state(&sayiir_core::TaskId::from(task_id));
                 return Ok(output);
             }
             Err(e) => {
                 if let Some(rp) = retry_policy
-                    && !snapshot.retries_exhausted(task_id)
+                    && !snapshot.retries_exhausted(&sayiir_core::TaskId::from(task_id))
                 {
-                    let next_retry_at = snapshot.record_retry(task_id, rp, &e.to_string(), None);
+                    let next_retry_at = snapshot.record_retry(
+                        sayiir_core::TaskId::from(task_id),
+                        rp,
+                        &e.to_string(),
+                        None,
+                    );
                     snapshot.clear_task_deadline();
 
                     if let Some(backend) = save_backend {
@@ -374,7 +375,7 @@ where
 
                     tracing::info!(
                         task_id = %task_id,
-                        attempt = snapshot.get_retry_state(task_id).map_or(0, |rs| rs.attempts),
+                        attempt = snapshot.get_retry_state(&sayiir_core::TaskId::from(task_id)).map_or(0, |rs| rs.attempts),
                         max_retries = rp.max_retries,
                         %next_retry_at,
                         error = %e,
@@ -423,10 +424,12 @@ pub(crate) async fn set_deadline_if_needed<B: SnapshotStore>(
     snapshot: &mut WorkflowSnapshot,
     backend: &B,
 ) -> Result<(), RuntimeError> {
-    if snapshot.get_task_result(id).is_none()
+    if snapshot
+        .get_task_result(&sayiir_core::TaskId::from(id))
+        .is_none()
         && let Some(d) = timeout
     {
-        snapshot.set_task_deadline(id.to_string(), *d);
+        snapshot.set_task_deadline(sayiir_core::TaskId::from(id), *d);
         backend.save_snapshot(snapshot).await?;
     }
     Ok(())
@@ -461,7 +464,10 @@ where
     Fut: Future<Output = Result<Bytes, E>>,
     E: Into<RuntimeError>,
 {
-    if let Some(cached) = snapshot.get_task_result(id).map(|r| r.output.clone()) {
+    if let Some(cached) = snapshot
+        .get_task_result(&sayiir_core::TaskId::from(id))
+        .map(|r| r.output.clone())
+    {
         snapshot.clear_task_deadline();
         return Ok(cached);
     }
@@ -469,7 +475,7 @@ where
     // Crash recovery: deadline from a previous attempt already expired
     if let Some((tid, timeout)) = snapshot.expired_task_deadline() {
         let err = WorkflowError::TaskTimedOut {
-            task_id: tid.to_string(),
+            task_id: tid,
             timeout,
         };
         snapshot.clear_task_deadline();
@@ -492,7 +498,7 @@ where
                 _ = interval.tick() => {
                     if let Some((tid, timeout)) = snapshot.expired_task_deadline() {
                         let err = WorkflowError::TaskTimedOut {
-                            task_id: tid.to_string(),
+                            task_id: tid,
                             timeout,
                         };
                         snapshot.clear_task_deadline();
@@ -506,7 +512,7 @@ where
     };
 
     snapshot.clear_task_deadline();
-    snapshot.mark_task_completed(id.to_string(), output.clone());
+    snapshot.mark_task_completed(sayiir_core::TaskId::from(id), output.clone());
     Ok(output)
 }
 
@@ -533,18 +539,21 @@ where
     E: Into<RuntimeError>,
     B: SnapshotStore,
 {
-    if let Some(cached) = snapshot.get_task_result(id).map(|r| r.output.clone()) {
+    if let Some(cached) = snapshot
+        .get_task_result(&sayiir_core::TaskId::from(id))
+        .map(|r| r.output.clone())
+    {
         return Ok(cached);
     }
 
     if let Some(d) = timeout {
-        snapshot.set_task_deadline(id.to_string(), *d);
+        snapshot.set_task_deadline(sayiir_core::TaskId::from(id), *d);
     }
     let output = execute(input).await.map_err(Into::into)?;
 
     if let Some((tid, t)) = snapshot.expired_task_deadline() {
         let err = WorkflowError::TaskTimedOut {
-            task_id: tid.to_string(),
+            task_id: tid,
             timeout: t,
         };
         snapshot.clear_task_deadline();
@@ -553,7 +562,7 @@ where
     snapshot.clear_task_deadline();
 
     backend
-        .save_task_result(instance_id, id, output.clone())
+        .save_task_result(instance_id, &sayiir_core::TaskId::from(id), output.clone())
         .await?;
     Ok(output)
 }
@@ -590,7 +599,12 @@ where
     E: Into<RuntimeError>,
 {
     tracing::debug!("executing task step");
-    check_guards(backend, &snapshot.instance_id, Some(params.id)).await?;
+    check_guards(
+        backend,
+        &snapshot.instance_id,
+        Some(sayiir_core::TaskId::from(params.id)),
+    )
+    .await?;
     set_deadline_if_needed(params.id, params.timeout, snapshot, backend).await?;
 
     let output = retry_with_checkpoint(
@@ -605,9 +619,7 @@ where
 
     if let Some(next_cont) = params.next {
         let hint = next_cont.first_task_hint();
-        snapshot.update_position(ExecutionPosition::AtTask {
-            task_id: hint.id.clone(),
-        });
+        snapshot.update_position(ExecutionPosition::AtTask { task_id: hint.id });
         snapshot.set_task_hint(&hint);
     }
     #[cfg(feature = "otel")]

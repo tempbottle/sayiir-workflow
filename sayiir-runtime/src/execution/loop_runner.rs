@@ -75,7 +75,7 @@ pub(crate) fn resolve_loop_iteration(
     cfg: &LoopConfig<'_>,
 ) -> Result<ControlFlow<LoopExit, LoopNext>, RuntimeError> {
     let (decision, inner) = decode_loop_envelope(output).map_err(|e| CodecError::DecodeFailed {
-        task_id: cfg.id.to_string(),
+        task_id: sayiir_core::TaskId::from(cfg.id),
         expected_type: "LoopEnvelope",
         source: e,
     })?;
@@ -85,7 +85,7 @@ pub(crate) fn resolve_loop_iteration(
             if iteration + 1 >= cfg.max_iterations {
                 match cfg.on_max {
                     MaxIterationsPolicy::Fail => Err(WorkflowError::MaxIterationsExceeded {
-                        loop_id: cfg.id.to_string(),
+                        loop_id: sayiir_core::TaskId::from(cfg.id),
                         max_iterations: cfg.max_iterations,
                     }
                     .into()),
@@ -150,14 +150,15 @@ impl<B: SnapshotStore> LoopHooks for CheckpointingLoopHooks<'_, B> {
     fn clear_body_tasks(&mut self, body: &WorkflowContinuation) {
         let body_ser = body.to_serializable();
         for tid in &body_ser.task_ids() {
-            self.snapshot.remove_task_result(tid);
+            self.snapshot
+                .remove_task_result(&sayiir_core::TaskId::from(*tid));
         }
     }
 
     async fn on_loop_exit(&mut self, loop_id: &str, output: &Bytes) -> Result<(), RuntimeError> {
-        self.snapshot.clear_loop_iteration(loop_id);
-        self.snapshot
-            .mark_task_completed(loop_id.to_string(), output.clone());
+        let loop_id = sayiir_core::TaskId::from(loop_id);
+        self.snapshot.clear_loop_iteration(&loop_id);
+        self.snapshot.mark_task_completed(loop_id, output.clone());
         self.backend.save_snapshot(self.snapshot).await?;
         Ok(())
     }
@@ -168,12 +169,14 @@ impl<B: SnapshotStore> LoopHooks for CheckpointingLoopHooks<'_, B> {
         next_iteration: u32,
         body: &WorkflowContinuation,
     ) -> Result<(), RuntimeError> {
-        self.snapshot.set_loop_iteration(loop_id, next_iteration);
+        let loop_id_hash = sayiir_core::TaskId::from(loop_id);
+        self.snapshot
+            .set_loop_iteration(loop_id_hash, next_iteration);
         if self.track_position {
             self.snapshot.update_position(ExecutionPosition::InLoop {
-                loop_id: loop_id.to_string(),
+                loop_id: loop_id_hash,
                 iteration: next_iteration,
-                next_task_id: Some(body.first_task_id().to_string()),
+                next_task_id: Some(sayiir_core::TaskId::from(body.first_task_id())),
             });
         }
         // Always persist: the cleared body task results and updated iteration
@@ -228,7 +231,7 @@ where
     }
 
     Err(WorkflowError::MaxIterationsExceeded {
-        loop_id: cfg.id.to_string(),
+        loop_id: sayiir_core::TaskId::from(cfg.id),
         max_iterations: cfg.max_iterations,
     }
     .into())

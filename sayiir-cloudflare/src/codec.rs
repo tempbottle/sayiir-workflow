@@ -224,6 +224,12 @@ pub(crate) fn decode_loop_result(bytes: &[u8]) -> Result<(String, Bytes), JsValu
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
     use wasm_bindgen_test::*;
