@@ -1797,11 +1797,7 @@ where
     /// dispatching, so the worker would loop on a phantom task ID.
     fn set_position_at(cont: &WorkflowContinuation, snapshot: &mut WorkflowSnapshot) {
         match cont {
-            WorkflowContinuation::Delay {
-                id,
-                duration,
-                next,
-            } => {
+            WorkflowContinuation::Delay { id, duration, next } => {
                 let now = chrono::Utc::now();
                 let wake_at = chrono::Duration::from_std(*duration)
                     .map(|d| now + d)

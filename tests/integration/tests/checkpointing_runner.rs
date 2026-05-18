@@ -1109,19 +1109,13 @@ async fn pooled_worker_handles_delay_in_chain() {
     let def_hash = *wf.definition_hash();
 
     let client = WorkflowClient::new(backend_client);
-    let (status, _) = client
-        .submit(wf.as_ref(), "delay-1", 5u32)
-        .await
-        .unwrap();
+    let (status, _) = client.submit(wf.as_ref(), "delay-1", 5u32).await.unwrap();
     assert!(matches!(status, WorkflowStatus::InProgress));
 
     let registry = sayiir_core::registry::TaskRegistry::new();
     let worker = PooledWorker::new("delay-w-0", backend_w, registry)
         .with_claim_ttl(Some(Duration::from_secs(30)));
-    let handle = worker.spawn(
-        Duration::from_millis(50),
-        vec![(def_hash, Arc::clone(&wf))],
-    );
+    let handle = worker.spawn(Duration::from_millis(50), vec![(def_hash, Arc::clone(&wf))]);
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
