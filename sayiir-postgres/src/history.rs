@@ -113,10 +113,11 @@ where
     }
 }
 
-/// Append a row to `sayiir_workflow_snapshot_history` with the
-/// encoded blob and its hash. Caller is responsible for advancing
-/// `sayiir_workflow_snapshots.history_version` to `version` in the
-/// same transaction so loads find this row through the JOIN.
+/// Append a row to `sayiir_workflow_snapshot_history`. Caller must
+/// advance `history_version` AND `data_hash` on the snapshot row in
+/// the same transaction so the two stay in lockstep. `data_hash` is
+/// passed in (not recomputed) so the caller can bind the same value
+/// into the snapshot-row UPDATE.
 pub(crate) async fn append_history(
     tx: &mut PgConnection,
     instance_id: &str,
@@ -124,8 +125,8 @@ pub(crate) async fn append_history(
     status: &str,
     current_task_id: Option<&[u8]>,
     data: &[u8],
+    data_hash: &[u8; 32],
 ) -> Result<(), BackendError> {
-    let data_hash = snapshot_hash(data);
     sqlx::query(
         "INSERT INTO sayiir_workflow_snapshot_history
             (instance_id, version, status, current_task_id, data, data_hash)

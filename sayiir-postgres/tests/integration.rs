@@ -188,8 +188,9 @@ async fn history_is_canonical_data_column_stays_null() {
         .await
         .unwrap();
 
-    let snap: (Option<Vec<u8>>, i32) = sqlx::query_as(
-        "SELECT data, history_version FROM sayiir_workflow_snapshots WHERE instance_id = $1",
+    let snap: (Option<Vec<u8>>, i32, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT data, history_version, data_hash
+         FROM sayiir_workflow_snapshots WHERE instance_id = $1",
     )
     .bind("wf-can")
     .fetch_one(&pool)
@@ -201,6 +202,7 @@ async fn history_is_canonical_data_column_stays_null() {
         snap.0,
     );
     assert_eq!(snap.1, 2, "history_version should advance per save");
+    let snap_hash = snap.2.expect("snapshots.data_hash must be populated");
 
     // Both history rows carry the encoded blob and matching SHA-256.
     let history: Vec<(i32, Vec<u8>, Vec<u8>)> = sqlx::query_as(
@@ -218,6 +220,10 @@ async fn history_is_canonical_data_column_stays_null() {
         let expected: [u8; 32] = Sha256::digest(data).into();
         assert_eq!(hash.as_slice(), expected.as_slice(), "version {version}");
     }
+
+    // snapshots.data_hash mirrors the latest history row's hash.
+    let (_, _, latest_hash) = history.last().unwrap();
+    assert_eq!(snap_hash.as_slice(), latest_hash.as_slice());
 
     // Round-trip through the JOIN'd load path.
     let loaded = backend.load_snapshot("wf-can").await.unwrap();

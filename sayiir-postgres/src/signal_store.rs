@@ -11,7 +11,7 @@ use sqlx::Row;
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
-use crate::history::append_history;
+use crate::history::{append_history, snapshot_hash};
 use crate::wakeup::emit_task_ready;
 
 impl<C> SignalStore for PostgresBackend<C>
@@ -235,6 +235,7 @@ where
         snapshot.mark_cancelled(reason, requested_by, interrupted_at_task);
 
         let data = self.encode(&snapshot)?;
+        let data_hash = snapshot_hash(&data);
         let status = snapshot.state.as_ref();
         let error = snapshot.error_message().map(ToString::to_string);
         let pos_kind = snapshot.position_kind();
@@ -247,15 +248,16 @@ where
             "UPDATE sayiir_workflow_snapshots
              SET status = $1, error = $2,
                  position_kind = $3, delay_wake_at = $4,
-                 history_version = $5,
+                 history_version = $5, data_hash = $6,
                  completed_at = now(), updated_at = now()
-             WHERE instance_id = $6",
+             WHERE instance_id = $7",
         )
         .bind(status)
         .bind(&error)
         .bind(pos_kind)
         .bind(wake_at)
         .bind(next_history_version)
+        .bind(data_hash.as_slice())
         .bind(instance_id)
         .execute(&mut *tx)
         .await
@@ -268,6 +270,7 @@ where
             status,
             task_id,
             &data,
+            &data_hash,
         )
         .await?;
 
@@ -344,6 +347,7 @@ where
         snapshot.mark_paused(&pause_request);
 
         let data = self.encode(&snapshot)?;
+        let data_hash = snapshot_hash(&data);
         let status = snapshot.state.as_ref();
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
@@ -357,8 +361,8 @@ where
              SET status = $1, current_task_id = $2,
                  completed_task_count = $3, position_kind = $4,
                  delay_wake_at = $5, history_version = $6,
-                 updated_at = now()
-             WHERE instance_id = $7",
+                 data_hash = $7, updated_at = now()
+             WHERE instance_id = $8",
         )
         .bind(status)
         .bind(task_id)
@@ -366,6 +370,7 @@ where
         .bind(pos_kind)
         .bind(wake_at)
         .bind(next_history_version)
+        .bind(data_hash.as_slice())
         .bind(instance_id)
         .execute(&mut *tx)
         .await
@@ -378,6 +383,7 @@ where
             status,
             task_id,
             &data,
+            &data_hash,
         )
         .await?;
 
@@ -421,6 +427,7 @@ where
         snapshot.mark_unpaused();
 
         let data = self.encode(&snapshot)?;
+        let data_hash = snapshot_hash(&data);
         let status = snapshot.state.as_ref();
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
@@ -434,8 +441,8 @@ where
              SET status = $1, current_task_id = $2,
                  completed_task_count = $3, position_kind = $4,
                  delay_wake_at = $5, history_version = $6,
-                 updated_at = now()
-             WHERE instance_id = $7",
+                 data_hash = $7, updated_at = now()
+             WHERE instance_id = $8",
         )
         .bind(status)
         .bind(task_id)
@@ -443,6 +450,7 @@ where
         .bind(pos_kind)
         .bind(wake_at)
         .bind(next_history_version)
+        .bind(data_hash.as_slice())
         .bind(instance_id)
         .execute(&mut *tx)
         .await
@@ -455,6 +463,7 @@ where
             status,
             task_id,
             &data,
+            &data_hash,
         )
         .await?;
 

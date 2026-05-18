@@ -7,7 +7,7 @@ use sqlx::Row;
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
-use crate::history::append_history;
+use crate::history::{append_history, snapshot_hash};
 use crate::wakeup::emit_task_ready;
 
 impl<C> SnapshotStore for PostgresBackend<C>
@@ -31,6 +31,7 @@ where
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         tracing::debug!("saving snapshot");
         let data = self.encode(snapshot)?;
+        let data_hash = snapshot_hash(&data);
         let status = snapshot.state.as_ref();
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
@@ -57,9 +58,9 @@ where
             "INSERT INTO sayiir_workflow_snapshots
                 (instance_id, status, definition_hash, current_task_id,
                  completed_task_count, error, position_kind, delay_wake_at,
-                 trace_parent, task_priority, task_tags,
+                 trace_parent, task_priority, task_tags, data_hash,
                  completed_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $8, $9, $10, $11, $12,
+             VALUES ($1, $2, $3, $4, $5, $6, $8, $9, $10, $11, $12, $13,
                      CASE WHEN $7 THEN now() ELSE NULL END, now())
              ON CONFLICT (instance_id) DO UPDATE SET
                 status = $2,
@@ -72,6 +73,7 @@ where
                 trace_parent = $10,
                 task_priority = $11,
                 task_tags = $12,
+                data_hash = $13,
                 history_version = sayiir_workflow_snapshots.history_version + 1,
                 completed_at = CASE WHEN $7 THEN now() ELSE sayiir_workflow_snapshots.completed_at END,
                 updated_at = now()
@@ -89,6 +91,7 @@ where
         .bind(snapshot.trace_parent.as_deref()) // $10
         .bind(task_priority) // $11
         .bind(&task_tags) // $12
+        .bind(data_hash.as_slice()) // $13
         .fetch_one(&mut *tx)
         .await
         .map_err(PgError)?;
@@ -102,6 +105,7 @@ where
             status,
             task_id,
             &data,
+            &data_hash,
         )
         .await?;
 
@@ -181,6 +185,7 @@ where
         snapshot.mark_task_completed(*task_id, output);
 
         let data = self.encode(&snapshot)?;
+        let data_hash = snapshot_hash(&data);
         let status = snapshot.state.as_ref();
         let current_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let current: Option<&[u8]> = current_bytes.as_ref().map(<[u8; 32]>::as_slice);
@@ -191,13 +196,14 @@ where
             "UPDATE sayiir_workflow_snapshots
              SET status = $1, current_task_id = $2,
                  completed_task_count = $3, history_version = $4,
-                 updated_at = now()
-             WHERE instance_id = $5",
+                 data_hash = $5, updated_at = now()
+             WHERE instance_id = $6",
         )
         .bind(status)
         .bind(current)
         .bind(task_count)
         .bind(next_history_version)
+        .bind(data_hash.as_slice())
         .bind(instance_id)
         .execute(&mut *tx)
         .await
@@ -210,6 +216,7 @@ where
             status,
             current,
             &data,
+            &data_hash,
         )
         .await?;
 
