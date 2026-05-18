@@ -30,6 +30,7 @@ backon = { workspace = true }
 # `Receiver: Clone` + `recv_async(&self)` means we can hand a shared
 # receiver to every backend clone without wrapping in a mutex.
 flume = { workspace = true }
+sha2 = { workspace = true }
 
 [[bench]]
 name = "postgres"

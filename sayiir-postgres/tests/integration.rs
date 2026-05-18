@@ -29,14 +29,25 @@ async fn setup_with(
     testcontainers::ContainerAsync<Postgres>,
     PostgresBackend<JsonCodec>,
 ) {
+    let (container, backend, _pool) = setup_with_pool(tag).await;
+    (container, backend)
+}
+
+async fn setup_with_pool(
+    tag: &str,
+) -> (
+    testcontainers::ContainerAsync<Postgres>,
+    PostgresBackend<JsonCodec>,
+    PgPool,
+) {
     let container = Postgres::default().with_tag(tag).start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgresql://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPool::connect(&url).await.unwrap();
-    let backend = PostgresBackend::<JsonCodec>::connect_with(pool)
+    let backend = PostgresBackend::<JsonCodec>::connect_with(pool.clone())
         .await
         .unwrap();
-    (container, backend)
+    (container, backend, pool)
 }
 
 async fn setup() -> (
@@ -153,6 +164,111 @@ async fn save_task_result() {
     let result = loaded.get_task_result(&sayiir_core::TaskId::from("task-1"));
     assert!(result.is_some());
     assert_eq!(result.unwrap().output, Bytes::from(r#""done""#));
+}
+
+/// Canonical-history contract: new saves must leave `snapshots.data` NULL
+/// while history accumulates one row per version, each carrying a
+/// `data_hash` equal to SHA-256 of the encoded blob. Loads must still
+/// round-trip the snapshot through the history JOIN.
+#[tokio::test]
+async fn history_is_canonical_data_column_stays_null() {
+    use sha2::{Digest, Sha256};
+
+    let (_c, backend, pool) = setup_with_pool(DEFAULT_PG_VERSION).await;
+
+    // Save once (creates version 1), then complete a task (creates
+    // version 2 via save_task_result). Both writes must land in history
+    // and leave snapshots.data NULL.
+    let task_id = sayiir_core::TaskId::from("task-can");
+    let mut snapshot = WorkflowSnapshot::new("wf-can", "hash-can".into());
+    snapshot.update_position(ExecutionPosition::AtTask { task_id });
+    backend.save_snapshot(&snapshot).await.unwrap();
+    backend
+        .save_task_result("wf-can", &task_id, Bytes::from_static(b"first-result"))
+        .await
+        .unwrap();
+
+    let snap: (Option<Vec<u8>>, i32, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT data, history_version, data_hash
+         FROM sayiir_workflow_snapshots WHERE instance_id = $1",
+    )
+    .bind("wf-can")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        snap.0.is_none(),
+        "snapshots.data must stay NULL on new saves; got {:?}",
+        snap.0,
+    );
+    assert_eq!(snap.1, 2, "history_version should advance per save");
+    let snap_hash = snap.2.expect("snapshots.data_hash must be populated");
+
+    // Both history rows carry the encoded blob and matching SHA-256.
+    let history: Vec<(i32, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT version, data, data_hash
+         FROM sayiir_workflow_snapshot_history
+         WHERE instance_id = $1
+         ORDER BY version",
+    )
+    .bind("wf-can")
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(history.len(), 2);
+    for (version, data, hash) in &history {
+        let expected: [u8; 32] = Sha256::digest(data).into();
+        assert_eq!(hash.as_slice(), expected.as_slice(), "version {version}");
+    }
+
+    // snapshots.data_hash mirrors the latest history row's hash.
+    let (_, _, latest_hash) = history.last().unwrap();
+    assert_eq!(snap_hash.as_slice(), latest_hash.as_slice());
+
+    // Round-trip through the JOIN'd load path.
+    let loaded = backend.load_snapshot("wf-can").await.unwrap();
+    assert_eq!(
+        loaded.get_task_result(&task_id).unwrap().output,
+        Bytes::from_static(b"first-result"),
+    );
+}
+
+/// Dual-write: save_task_result must persist the output bytes into the
+/// `sayiir_workflow_tasks.output` column in addition to the snapshot's
+/// `completed_tasks` map. Once the cutover lands and the map is removed
+/// from the blob, this column becomes the canonical source — this test
+/// pins the contract that gets us there.
+#[tokio::test]
+async fn save_task_result_dual_writes_output_column() {
+    let (_c, backend, pool) = setup_with_pool(DEFAULT_PG_VERSION).await;
+    let task_id = sayiir_core::TaskId::from("task-dw");
+    let mut snapshot = WorkflowSnapshot::new("wf-dw", "hash-dw".into());
+    snapshot.update_position(ExecutionPosition::AtTask { task_id });
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let payload = Bytes::from_static(b"\x00\x01\x02hello");
+    backend
+        .save_task_result("wf-dw", &task_id, payload.clone())
+        .await
+        .unwrap();
+
+    let row: (Option<Vec<u8>>,) = sqlx::query_as(
+        "SELECT output FROM sayiir_workflow_tasks WHERE instance_id = $1 AND task_id = $2",
+    )
+    .bind("wf-dw")
+    .bind(task_id.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let stored = row
+        .0
+        .expect("output column should be populated by dual-write");
+    assert_eq!(stored.as_slice(), payload.as_ref());
+
+    // The snapshot blob must still carry the result during the dual-write
+    // phase — read paths haven't migrated yet.
+    let loaded = backend.load_snapshot("wf-dw").await.unwrap();
+    assert_eq!(loaded.get_task_result(&task_id).unwrap().output, payload,);
 }
 
 // ─── SignalStore ─────────────────────────────────────────────────────────────

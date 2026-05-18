@@ -27,13 +27,8 @@ use tokio_util::sync::CancellationToken;
 /// share this single source of truth.
 pub(crate) const TASK_READY_CHANNEL: &str = "sayiir_task_ready";
 
-/// Wakeup channel capacity. When full, the listener drops the incoming
-/// hint with a warn log; the worker recovers via the timer-tick poll.
-/// Sized so that ~256 saves can stack up before drops kick in — at
-/// the typical 30 s fallback interval, the worker would need to be
-/// processing fewer than ~8.5 hints/s sustained for drops to matter,
-/// which is well below normal load.
-const WAKEUP_CHANNEL_CAPACITY: usize = 256;
+/// When full, the listener drops the incoming wake messages (fallback to poll)
+const WAKEUP_CHANNEL_CAPACITY: usize = 1024;
 
 /// First reconnect delay after a listener failure. The exponential policy
 /// grows from here so a flapping PG doesn't get hammered, and the jitter

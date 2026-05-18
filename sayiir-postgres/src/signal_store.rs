@@ -11,6 +11,8 @@ use sqlx::Row;
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
+use crate::history::{append_history, snapshot_hash};
+use crate::wakeup::emit_task_ready;
 
 impl<C> SignalStore for PostgresBackend<C>
 where
@@ -214,17 +216,14 @@ where
             return Ok(false);
         };
 
-        // Lock and load the snapshot
-        let snap_row = sqlx::query(
-            "SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE",
-        )
-        .bind(instance_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(PgError)?;
-
-        let raw: &[u8] = snap_row.get("data");
-        let mut snapshot = self.decode(raw)?;
+        // Lock the snapshot row and load the latest blob from history.
+        let Some((mut snapshot, prev_history_version)) = self
+            .lock_snapshot_for_mutation(&mut tx, instance_id)
+            .await?
+        else {
+            tx.rollback().await.map_err(PgError)?;
+            return Ok(false);
+        };
 
         if !snapshot.state.is_in_progress() {
             tx.rollback().await.map_err(PgError)?;
@@ -236,27 +235,44 @@ where
         snapshot.mark_cancelled(reason, requested_by, interrupted_at_task);
 
         let data = self.encode(&snapshot)?;
+        let data_hash = snapshot_hash(&data);
         let status = snapshot.state.as_ref();
         let error = snapshot.error_message().map(ToString::to_string);
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
+        let next_history_version = prev_history_version + 1;
+        let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
+        let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
 
         sqlx::query(
             "UPDATE sayiir_workflow_snapshots
-             SET data = $1, status = $2, error = $3,
-                 position_kind = $4, delay_wake_at = $5,
+             SET status = $1, error = $2,
+                 position_kind = $3, delay_wake_at = $4,
+                 history_version = $5, data_hash = $6,
                  completed_at = now(), updated_at = now()
-             WHERE instance_id = $6",
+             WHERE instance_id = $7",
         )
-        .bind(&data)
         .bind(status)
         .bind(&error)
         .bind(pos_kind)
         .bind(wake_at)
+        .bind(next_history_version)
+        .bind(data_hash.as_slice())
         .bind(instance_id)
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;
+
+        append_history(
+            &mut tx,
+            instance_id,
+            next_history_version,
+            status,
+            task_id,
+            &data,
+            &data_hash,
+        )
+        .await?;
 
         // Mark any still-active tasks as cancelled
         sqlx::query(
@@ -275,6 +291,8 @@ where
             .execute(&mut *tx)
             .await
             .map_err(PgError)?;
+
+        emit_task_ready(&mut tx, &snapshot).await.map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
         tracing::info!(instance_id, "workflow cancelled");
@@ -309,17 +327,14 @@ where
             return Ok(false);
         };
 
-        // Lock and load the snapshot
-        let snap_row = sqlx::query(
-            "SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE",
-        )
-        .bind(instance_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(PgError)?;
-
-        let raw: &[u8] = snap_row.get("data");
-        let mut snapshot = self.decode(raw)?;
+        // Lock the snapshot row and load the latest blob from history.
+        let Some((mut snapshot, prev_history_version)) = self
+            .lock_snapshot_for_mutation(&mut tx, instance_id)
+            .await?
+        else {
+            tx.rollback().await.map_err(PgError)?;
+            return Ok(false);
+        };
 
         if !snapshot.state.is_in_progress() {
             tx.rollback().await.map_err(PgError)?;
@@ -332,30 +347,45 @@ where
         snapshot.mark_paused(&pause_request);
 
         let data = self.encode(&snapshot)?;
+        let data_hash = snapshot_hash(&data);
         let status = snapshot.state.as_ref();
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
+        let next_history_version = prev_history_version + 1;
 
         sqlx::query(
             "UPDATE sayiir_workflow_snapshots
-             SET data = $1, status = $2, current_task_id = $3,
-                 completed_task_count = $4, position_kind = $5,
-                 delay_wake_at = $6, updated_at = now()
-             WHERE instance_id = $7",
+             SET status = $1, current_task_id = $2,
+                 completed_task_count = $3, position_kind = $4,
+                 delay_wake_at = $5, history_version = $6,
+                 data_hash = $7, updated_at = now()
+             WHERE instance_id = $8",
         )
-        .bind(&data)
         .bind(status)
         .bind(task_id)
         .bind(task_count)
         .bind(pos_kind)
         .bind(wake_at)
+        .bind(next_history_version)
+        .bind(data_hash.as_slice())
         .bind(instance_id)
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;
+
+        append_history(
+            &mut tx,
+            instance_id,
+            next_history_version,
+            status,
+            task_id,
+            &data,
+            &data_hash,
+        )
+        .await?;
 
         // Clear the signal
         sqlx::query("DELETE FROM sayiir_workflow_signals WHERE instance_id = $1 AND kind = $2")
@@ -364,6 +394,8 @@ where
             .execute(&mut *tx)
             .await
             .map_err(PgError)?;
+
+        emit_task_ready(&mut tx, &snapshot).await.map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
         tracing::info!(instance_id, "workflow paused");
@@ -380,17 +412,10 @@ where
         tracing::debug!("unpausing workflow");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
-        let row = sqlx::query(
-            "SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE",
-        )
-        .bind(instance_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(PgError)?
-        .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
-
-        let raw: &[u8] = row.get("data");
-        let mut snapshot = self.decode(raw)?;
+        let (mut snapshot, prev_history_version) = self
+            .lock_snapshot_for_mutation(&mut tx, instance_id)
+            .await?
+            .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
 
         if !snapshot.state.is_paused() {
             let state_name = snapshot.state.as_ref();
@@ -402,30 +427,47 @@ where
         snapshot.mark_unpaused();
 
         let data = self.encode(&snapshot)?;
+        let data_hash = snapshot_hash(&data);
         let status = snapshot.state.as_ref();
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
+        let next_history_version = prev_history_version + 1;
 
         sqlx::query(
             "UPDATE sayiir_workflow_snapshots
-             SET data = $1, status = $2, current_task_id = $3,
-                 completed_task_count = $4, position_kind = $5,
-                 delay_wake_at = $6, updated_at = now()
-             WHERE instance_id = $7",
+             SET status = $1, current_task_id = $2,
+                 completed_task_count = $3, position_kind = $4,
+                 delay_wake_at = $5, history_version = $6,
+                 data_hash = $7, updated_at = now()
+             WHERE instance_id = $8",
         )
-        .bind(&data)
         .bind(status)
         .bind(task_id)
         .bind(task_count)
         .bind(pos_kind)
         .bind(wake_at)
+        .bind(next_history_version)
+        .bind(data_hash.as_slice())
         .bind(instance_id)
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;
+
+        append_history(
+            &mut tx,
+            instance_id,
+            next_history_version,
+            status,
+            task_id,
+            &data,
+            &data_hash,
+        )
+        .await?;
+
+        emit_task_ready(&mut tx, &snapshot).await.map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
         tracing::info!(instance_id, "workflow unpaused");

@@ -9,6 +9,7 @@ use sqlx::Row;
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
+use crate::history::HISTORY_JOIN;
 
 /// SQL fragment that gates a snapshot row to "claimable right now":
 /// no active claim on the named task, and no signal pending on the
@@ -252,10 +253,20 @@ where
         // instant will tend to receive disjoint row sets instead of fully
         // overlapping ones, reducing wasted snapshot decodes when fleet
         // size is high.
+        // FOR UPDATE OF s names only the snapshot row so SKIP LOCKED
+        // behaves as before — history rows are append-only and never
+        // contended for write locks.
+        //
+        // This bulk scan keeps the inline JOIN against history instead of
+        // routing through `fetch_blob`. When blob storage moves to a KV
+        // store this becomes "select metadata + history_version, then
+        // batch-fetch blobs" — `fetch_blob` will need a sibling that
+        // takes `&[(instance_id, version)]` and pipelines.
         let eligibility = eligibility_predicate("s.current_task_id");
         let query = format!(
-            "SELECT s.instance_id, s.data, s.trace_parent
+            "SELECT s.instance_id, h.data, s.trace_parent
              FROM sayiir_workflow_snapshots s
+             {HISTORY_JOIN}
              WHERE s.status = 'InProgress'
                AND (
                    s.position_kind = 'AtTask'
@@ -396,7 +407,7 @@ where
         // signal blocking, snapshot advanced, no row — return None so
         // the caller falls back to the full poll.
         let query = format!(
-            "SELECT s.data, s.trace_parent
+            "SELECT s.history_version, s.trace_parent
              FROM sayiir_workflow_snapshots s
              WHERE s.instance_id = $1
                AND s.status = 'InProgress'
@@ -412,8 +423,11 @@ where
 
         let Some(row) = row else { return Ok(None) };
 
-        let raw: &[u8] = row.get("data");
-        let mut snapshot = self.decode(raw)?;
+        let history_version: i32 = row.get("history_version");
+        let data = self
+            .fetch_blob(&self.pool, &hint.instance_id, history_version)
+            .await?;
+        let mut snapshot = self.decode(&data)?;
         snapshot.trace_parent = row.get("trace_parent");
 
         // The snapshot must still be at the hinted task — otherwise the
