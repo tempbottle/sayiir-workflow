@@ -1,0 +1,39 @@
+global:
+  scrape_interval: 1s
+  evaluation_interval: 5s
+  external_labels:
+    cluster: sayiir-bench
+
+scrape_configs:
+  # The benchmark driver — emits hdrhistogram-backed completion latencies and
+  # throughput counters via the `metrics-exporter-prometheus` crate.
+  - job_name: sayiir-bench-driver
+    static_configs:
+      - targets:
+          # When the driver runs inside compose (`--profile run`):
+          - driver:9464
+          # When the driver runs on the host machine, mac/win:
+          - host.docker.internal:9464
+        labels:
+          source: driver
+
+  # Sayiir runtime spans → OTLP → otel-collector → Prometheus.
+  - job_name: sayiir-runtime-otel
+    static_configs:
+      - targets: [otel-collector:8889]
+        labels:
+          source: runtime
+
+  # Postgres backend.
+  - job_name: postgres
+    static_configs:
+      - targets: [postgres-exporter:9187]
+        labels:
+          source: postgres
+
+  # Container resources (CPU, mem, network for postgres + driver + others).
+  - job_name: cadvisor
+    static_configs:
+      - targets: [cadvisor:8080]
+        labels:
+          source: cadvisor

@@ -1,0 +1,172 @@
+# Sayiir performance benchmark — full observability stack.
+#
+# `docker compose up -d`           → infrastructure only (driver runs locally)
+# `docker compose --profile run up`→ also runs the containerised driver
+#
+# Driver expects:
+#   SAYIIR_BENCH_POSTGRES_URL   = postgresql://postgres:postgres@postgres:5432/sayiir_bench
+#   OTEL_EXPORTER_OTLP_ENDPOINT = http://otel-collector:4317
+#   SAYIIR_BENCH_METRICS_ADDR   = 0.0.0.0:9464   (so Prometheus can scrape it)
+#
+# Designed to be reproducible: every image is pinned by tag and runs with explicit
+# resource caveats so published numbers are defensible.
+
+name: sayiir-bench
+
+networks:
+  bench:
+
+volumes:
+  pg-data:
+  prom-data:
+  grafana-data:
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: sayiir-bench-postgres
+    networks: [bench]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: sayiir_bench
+    command:
+      - "-c"
+      - "max_connections=500"
+      - "-c"
+      - "shared_buffers=2GB"
+      - "-c"
+      - "effective_cache_size=6GB"
+      - "-c"
+      - "work_mem=16MB"
+      - "-c"
+      - "maintenance_work_mem=512MB"
+      - "-c"
+      - "synchronous_commit=off"
+      - "-c"
+      - "wal_compression=on"
+      - "-c"
+      - "checkpoint_timeout=15min"
+      - "-c"
+      - "max_wal_size=4GB"
+      - "-c"
+      - "random_page_cost=1.1"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sayiir_bench"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    container_name: sayiir-bench-pg-exporter
+    networks: [bench]
+    environment:
+      DATA_SOURCE_NAME: "postgresql://postgres:postgres@postgres:5432/sayiir_bench?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.118.0
+    container_name: sayiir-bench-otel
+    networks: [bench]
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel/collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus scrape endpoint for OTLP-derived metrics
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: sayiir-bench-prometheus
+    networks: [bench]
+    ports:
+      - "9090:9090"
+    # Lets `host.docker.internal` resolve from inside the container — needed
+    # when the driver runs on the host (Mac/colima/Linux all supported).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=24h"
+      - "--web.enable-lifecycle"
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: sayiir-bench-grafana
+    networks: [bench]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  # NOTE: cadvisor requires a Linux host. On macOS/colima the underlying VM
+  # often fails inotify_init ("too many open files"). For production-grade
+  # numbers, run the benchmark on a Linux host (the recommended AWS c7i.4xlarge).
+  # On Mac, this service may exit; `docker stats` is a usable fallback.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: sayiir-bench-cadvisor
+    networks: [bench]
+    privileged: true
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  # Optional: containerised driver. Enable via `docker compose --profile run up`.
+  driver:
+    profiles: ["run"]
+    build:
+      # Use the workspace root as context so the Dockerfile can include the
+      # sibling sayiir-* path deps.
+      context: ..
+      dockerfile: benchmarks/Dockerfile
+    container_name: sayiir-bench-driver
+    networks: [bench]
+    environment:
+      RUST_LOG: info
+      SAYIIR_BENCH_POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/sayiir_bench
+      SAYIIR_BENCH_PROMETHEUS_URL: http://prometheus:9090
+      SAYIIR_BENCH_METRICS_ADDR: 0.0.0.0:9464
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: sayiir-bench
+    ports:
+      - "9464:9464"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    volumes:
+      - ./results:/app/results
+    # Override `command:` at run time to pick a scenario, e.g.
+    # `docker compose --profile run run driver throughput --workflows 100000`
+    command: ["throughput"]
