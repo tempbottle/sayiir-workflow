@@ -1,0 +1,27 @@
+-- Drop `idx_snapshots_updated`.
+--
+-- Added in migration 001 as a single-column btree on
+-- `sayiir_workflow_snapshots(updated_at)`. Migration 008 later introduced
+-- a partial index `idx_snapshots_inprogress(task_priority, updated_at)
+-- WHERE status = 'InProgress'` that serves the polling dequeue's
+-- `ORDER BY (task_priority - …(now() - updated_at)…), updated_at`. Every
+-- other code path that touches `updated_at` writes it; nothing reads
+-- by it standalone, so the legacy index is dead weight.
+--
+-- Why dropping it matters for write throughput: HOT (Heap-Only Tuple)
+-- updates require all indexed columns to be unchanged in the new row
+-- version. `updated_at` is bumped on every save (mark_task_completed +
+-- update_position both touch it), so as long as it's indexed every
+-- snapshot save forces a non-HOT update — new heap tuple + new index
+-- entry on every save, plus more WAL and vacuum churn. Dropping the
+-- single-column index lets the planner still serve the polling scan
+-- via the partial index while removing the HOT blocker for the common
+-- write path (where status = 'InProgress', task_priority, task_tags
+-- are unchanged).
+--
+-- Operator note: this is `IF EXISTS` so re-running is a no-op, and the
+-- DROP is fast even on large tables (metadata-only). Pre-7.x Postgres
+-- would have needed CONCURRENTLY for online drops; 8+ takes a brief
+-- AccessExclusive lock but completes in microseconds for an index of
+-- any realistic size.
+DROP INDEX IF EXISTS idx_snapshots_updated;
