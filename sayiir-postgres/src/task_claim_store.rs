@@ -1,4 +1,13 @@
 //! [`TaskClaimStore`] implementation for Postgres.
+//!
+//! Claims live in two columns on `sayiir_workflow_snapshots`
+//! (`claim_owner`, `claim_expires_at`) rather than a dedicated
+//! `sayiir_task_claims` table. Acquisition is gated by a fast-fail
+//! `pg_try_advisory_xact_lock(hashtext(instance_id))` so racing workers
+//! short-circuit without blocking on a row lock. Each acquisition and
+//! release is one UPDATE on the snapshot row (HOT-eligible when no
+//! other indexed columns change). See migration 013 for the schema
+//! change and rationale.
 
 use chrono::{Duration, Utc};
 use sayiir_core::codec::{self, Decoder, Encoder};
@@ -12,26 +21,15 @@ use crate::error::PgError;
 use crate::history::HISTORY_JOIN;
 
 /// SQL fragment that gates a snapshot row to "claimable right now":
-/// no active claim on the named task, and no signal pending on the
-/// instance. Shared between `find_available_tasks` (polling scan,
-/// `claim_task_id_expr = s.current_task_id`) and `find_hinted_task`
-/// (single-row lookup, `claim_task_id_expr = $N` bind parameter) so a
-/// future change to the eligibility rules can't silently desynchronise
-/// the two paths.
-fn eligibility_predicate(claim_task_id_expr: &str) -> String {
-    format!(
-        "NOT EXISTS (
-            SELECT 1 FROM sayiir_task_claims c
-            WHERE c.instance_id = s.instance_id
-              AND c.task_id = {claim_task_id_expr}
-              AND (c.expires_at IS NULL OR c.expires_at > now())
-        )
+/// the per-row claim slot is free or expired, and no signal is pending
+/// on the instance. Shared between `find_available_tasks` (polling scan)
+/// and `find_hinted_task` (single-row lookup) so a future change to the
+/// eligibility rules can't silently desynchronise the two paths.
+const ELIGIBILITY_PREDICATE: &str = "(s.claim_owner IS NULL OR s.claim_expires_at < now())
         AND NOT EXISTS (
             SELECT 1 FROM sayiir_workflow_signals sig
             WHERE sig.instance_id = s.instance_id
-        )"
-    )
-}
+        )";
 
 impl<C> TaskClaimStore for PostgresBackend<C>
 where
@@ -56,46 +54,58 @@ where
         tracing::debug!("claiming task");
         let expires_at = ttl.and_then(|d| Utc::now().checked_add_signed(d));
 
-        // Insert claim; on conflict only replace if the existing claim has expired.
-        let row = sqlx::query(
-            "INSERT INTO sayiir_task_claims (instance_id, task_id, worker_id, expires_at)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (instance_id, task_id) DO UPDATE
-                SET worker_id = $3, claimed_at = now(), expires_at = $4
-                WHERE sayiir_task_claims.expires_at IS NOT NULL AND sayiir_task_claims.expires_at < now()
-             RETURNING instance_id, task_id, worker_id,
-                       EXTRACT(EPOCH FROM claimed_at)::BIGINT AS claimed_epoch,
-                       EXTRACT(EPOCH FROM expires_at)::BIGINT AS expires_epoch",
-        )
-        .bind(instance_id)
-        .bind(task_id.as_bytes().as_slice())
-        .bind(worker_id)
-        .bind(expires_at)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(PgError)?;
+        // Advisory lock as a fast-fail gate, then conditional UPDATE.
+        //
+        // The CTE evaluates `pg_try_advisory_xact_lock(hashtext($1))`
+        // first; the `FROM lock WHERE lock.got` join means if the lock
+        // wasn't acquired (another worker is racing this same instance),
+        // no row is updated and `RETURNING` is empty. The lock auto-
+        // releases at end of the implicit transaction wrapping this
+        // statement — it's not held across our caller's subsequent
+        // execution. Race protection from there on is provided by the
+        // `claim_owner` / `claim_expires_at` columns themselves.
+        //
+        // The `current_task_id = $2` guard is defensive: if the snapshot
+        // has advanced past the task we're trying to claim (because
+        // another worker beat us through a chain of saves), the UPDATE
+        // affects 0 rows and we return None — caller falls back to the
+        // polling scan.
+        let query = "
+            WITH lock AS (
+                SELECT pg_try_advisory_xact_lock(hashtext($1::text)) AS got
+            )
+            UPDATE sayiir_workflow_snapshots s
+            SET claim_owner = $3,
+                claim_expires_at = $4
+            FROM lock
+            WHERE s.instance_id = $1
+              AND lock.got
+              AND s.status = 'InProgress'
+              AND s.current_task_id = $2
+              AND (s.claim_owner IS NULL OR s.claim_expires_at < now())
+            RETURNING
+                s.instance_id,
+                EXTRACT(EPOCH FROM now())::BIGINT AS claimed_epoch,
+                EXTRACT(EPOCH FROM s.claim_expires_at)::BIGINT AS expires_epoch
+        ";
+        let row = sqlx::query(query)
+            .bind(instance_id)
+            .bind(task_id.as_bytes().as_slice())
+            .bind(worker_id)
+            .bind(expires_at)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(PgError)?;
 
-        row.map(|r| {
-            let task_id_bytes: &[u8] = r.get("task_id");
-            // Fail loudly on a malformed (wrong-length) task_id column —
-            // silently defaulting would cause incorrect claim ownership.
-            let task_id = sayiir_core::TaskId::from_slice(task_id_bytes).map_err(|e| {
-                BackendError::Backend(format!(
-                    "invalid task_id bytes in sayiir_task_claims (len={}): {e}",
-                    task_id_bytes.len(),
-                ))
-            })?;
-            Ok(TaskClaim {
-                instance_id: std::sync::Arc::from(r.get::<&str, _>("instance_id")),
-                task_id,
-                worker_id: r.get("worker_id"),
-                claimed_at: r.get::<i64, _>("claimed_epoch").cast_unsigned(),
-                expires_at: r
-                    .get::<Option<i64>, _>("expires_epoch")
-                    .map(i64::cast_unsigned),
-            })
-        })
-        .transpose()
+        Ok(row.map(|r| TaskClaim {
+            instance_id: std::sync::Arc::from(r.get::<&str, _>("instance_id")),
+            task_id: *task_id,
+            worker_id: worker_id.to_string(),
+            claimed_at: r.get::<i64, _>("claimed_epoch").cast_unsigned(),
+            expires_at: r
+                .get::<Option<i64>, _>("expires_epoch")
+                .map(i64::cast_unsigned),
+        }))
     }
 
     #[tracing::instrument(
@@ -107,39 +117,27 @@ where
     async fn release_task_claim(
         &self,
         instance_id: &str,
-        task_id: &sayiir_core::TaskId,
+        _task_id: &sayiir_core::TaskId,
         worker_id: &str,
     ) -> Result<(), BackendError> {
         tracing::debug!("releasing task claim");
-        // Check ownership first
-        let row = sqlx::query(
-            "SELECT worker_id FROM sayiir_task_claims WHERE instance_id = $1 AND task_id = $2",
-        )
-        .bind(instance_id)
-        .bind(task_id.as_bytes().as_slice())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(PgError)?
-        .ok_or_else(|| BackendError::NotFound(format!("{instance_id}:{task_id}")))?;
-
-        let owner: String = row.get("worker_id");
-        if owner != worker_id {
-            return Err(BackendError::Backend(format!(
-                "Claim owned by different worker: {owner}"
-            )));
-        }
-
+        // Clear the claim slot iff this worker still owns it. If the slot
+        // is empty (already released) or owned by someone else (claim
+        // expired and another worker re-claimed), the UPDATE affects 0
+        // rows and we silently no-op — Sayiir's claim model has always
+        // allowed expired claims to be re-acquired and the original
+        // owner's release of a stale claim is a benign no-op rather than
+        // an error.
         sqlx::query(
-            "DELETE FROM sayiir_task_claims
-             WHERE instance_id = $1 AND task_id = $2 AND worker_id = $3",
+            "UPDATE sayiir_workflow_snapshots
+             SET claim_owner = NULL, claim_expires_at = NULL
+             WHERE instance_id = $1 AND claim_owner = $2",
         )
         .bind(instance_id)
-        .bind(task_id.as_bytes().as_slice())
         .bind(worker_id)
         .execute(&self.pool)
         .await
         .map_err(PgError)?;
-
         Ok(())
     }
 
@@ -152,48 +150,27 @@ where
     async fn extend_task_claim(
         &self,
         instance_id: &str,
-        task_id: &sayiir_core::TaskId,
+        _task_id: &sayiir_core::TaskId,
         worker_id: &str,
         additional_duration: Duration,
     ) -> Result<(), BackendError> {
         tracing::debug!("extending task claim");
-        let row = sqlx::query(
-            "SELECT worker_id, expires_at FROM sayiir_task_claims
-             WHERE instance_id = $1 AND task_id = $2",
+        // Heartbeat: bump `claim_expires_at` by `additional_duration` iff
+        // this worker still owns the slot. If the claim has already been
+        // stolen (TTL elapsed → another worker re-claimed), the UPDATE
+        // affects 0 rows; the caller's next `find_available_tasks` will
+        // surface the new state.
+        sqlx::query(
+            "UPDATE sayiir_workflow_snapshots
+             SET claim_expires_at = COALESCE(claim_expires_at, now()) + $3
+             WHERE instance_id = $1 AND claim_owner = $2",
         )
         .bind(instance_id)
-        .bind(task_id.as_bytes().as_slice())
-        .fetch_optional(&self.pool)
+        .bind(worker_id)
+        .bind(additional_duration)
+        .execute(&self.pool)
         .await
-        .map_err(PgError)?
-        .ok_or_else(|| BackendError::NotFound(format!("{instance_id}:{task_id}")))?;
-
-        let owner: String = row.get("worker_id");
-        if owner != worker_id {
-            return Err(BackendError::Backend(format!(
-                "Claim owned by different worker: {owner}"
-            )));
-        }
-
-        // Only extend if there's an expiration set
-        let expires_at: Option<chrono::DateTime<Utc>> = row.get("expires_at");
-        if let Some(exp) = expires_at {
-            let new_exp = exp
-                .checked_add_signed(additional_duration)
-                .ok_or_else(|| BackendError::Backend("Time overflow".to_string()))?;
-
-            sqlx::query(
-                "UPDATE sayiir_task_claims SET expires_at = $1
-                 WHERE instance_id = $2 AND task_id = $3",
-            )
-            .bind(new_exp)
-            .bind(instance_id)
-            .bind(task_id.as_bytes().as_slice())
-            .execute(&self.pool)
-            .await
-            .map_err(PgError)?;
-        }
-
+        .map_err(PgError)?;
         Ok(())
     }
 
@@ -211,58 +188,24 @@ where
         aging_interval: Duration,
         worker_tags: &[String],
     ) -> Result<Vec<AvailableTask>, BackendError> {
-        // Step 1: Clean expired claims
-        sqlx::query(
-            "DELETE FROM sayiir_task_claims WHERE expires_at IS NOT NULL AND expires_at < now()",
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(PgError)?;
+        // Expired claims are no longer a separate table — there's nothing
+        // to garbage-collect here. The eligibility predicate uses
+        // `claim_expires_at < now()` so stale claim slots are picked up
+        // implicitly on the next dequeue.
 
-        // Step 2: Fetch candidate workflows ordered by effective priority with aging.
-        // effective_priority = task_priority - (seconds_waiting / aging_interval)
-        // Clamp to a minimum of 1s to prevent division by zero in the SQL expression.
         let aging_secs = (aging_interval.num_milliseconds() as f64 / 1000.0).max(1.0);
         let worker_tags_vec: Vec<&str> = worker_tags.iter().map(String::as_str).collect();
-
-        // When worker has tags, add filter: task_tags must be a subset of
-        // worker_tags. The `<@` operator checks array containment; an empty
-        // array is a subset of every array, so untagged tasks always pass.
         let tag_filter = if worker_tags.is_empty() {
             ""
         } else {
             "AND s.task_tags <@ $3"
         };
 
-        // Pre-filter on position_kind so rows that would just hit the
-        // `_ => continue` branch in app are never decoded. AtTask is the
-        // primary claim target; AtDelay only matters once its wake_at has
-        // elapsed (we then advance the snapshot in app). All other variants
-        // (NotStarted, AtJoin, InLoop, AtFork, AtSignal, Paused, terminal …)
-        // are ignored by this routine. See `position_kind_strings_are_stable`
-        // in sayiir-core for the literal pin.
-        //
-        // FOR UPDATE OF s SKIP LOCKED has **marginal** benefit here, and is
-        // intentionally narrow. This SELECT runs through sqlx without an
-        // enclosing transaction, so the row locks are released as soon as
-        // the statement completes — they do NOT persist across the caller's
-        // subsequent `claim_task` INSERT. The actual claim race is resolved
-        // by the `INSERT … ON CONFLICT` in `claim_task`, which is the sole
-        // arbiter for "who owns this task." All we get here is statement-
-        // scope dedup: two pollers issuing this SELECT at the exact same
-        // instant will tend to receive disjoint row sets instead of fully
-        // overlapping ones, reducing wasted snapshot decodes when fleet
-        // size is high.
-        // FOR UPDATE OF s names only the snapshot row so SKIP LOCKED
-        // behaves as before — history rows are append-only and never
-        // contended for write locks.
-        //
-        // This bulk scan keeps the inline JOIN against history instead of
-        // routing through `fetch_blob`. When blob storage moves to a KV
-        // store this becomes "select metadata + history_version, then
-        // batch-fetch blobs" — `fetch_blob` will need a sibling that
-        // takes `&[(instance_id, version)]` and pipelines.
-        let eligibility = eligibility_predicate("s.current_task_id");
+        // `FOR UPDATE OF s SKIP LOCKED` keeps statement-scope dedup —
+        // two pollers running simultaneously skip each other's rows
+        // instead of returning the full set in duplicate. The actual
+        // claim race is resolved by the conditional UPDATE in
+        // `claim_task` plus its advisory lock.
         let query = format!(
             "SELECT s.instance_id, h.data, s.trace_parent
              FROM sayiir_workflow_snapshots s
@@ -274,7 +217,7 @@ where
                        AND s.delay_wake_at IS NOT NULL
                        AND s.delay_wake_at <= now())
                )
-               AND {eligibility}
+               AND {ELIGIBILITY_PREDICATE}
                {tag_filter}
              ORDER BY
                (s.task_priority - EXTRACT(EPOCH FROM (now() - s.updated_at)) / $2) ASC,
@@ -291,9 +234,6 @@ where
         }
         let rows = q.fetch_all(&self.pool).await.map_err(PgError)?;
 
-        // Step 3: App-level evaluation per candidate.
-        // Collect (worker_failed_here, task) pairs so we can stable-sort by
-        // worker bias afterwards without re-decoding.
         let mut available: Vec<(bool, AvailableTask)> = Vec::with_capacity(rows.len());
         for row in &rows {
             let raw: &[u8] = row.get("data");
@@ -335,24 +275,19 @@ where
                     }
                 }
 
-                // Task: check retry backoff, then add to available
                 WorkflowSnapshotState::InProgress {
                     position: ExecutionPosition::AtTask { task_id },
                     completed_tasks,
                     ..
                 } => {
-                    // Skip if task is already completed
                     if completed_tasks.contains_key(task_id) {
                         continue;
                     }
-
-                    // Skip if retry backoff hasn't elapsed
                     if let Some(rs) = snapshot.task_retries.get(task_id)
                         && Utc::now() < rs.next_retry_at
                     {
                         continue;
                     }
-
                     if let Some(task) = build_available_task(&snapshot, task_id, completed_tasks) {
                         let bias = snapshot.has_failed_on_worker(task_id, worker_id);
                         available.push((bias, task));
@@ -367,11 +302,7 @@ where
             }
         }
 
-        // Step 4: Stable-sort by worker bias so tasks whose last failure was on
-        // this worker sink to the bottom, while preserving the effective-priority
-        // order from the SQL query for everything else.
         available.sort_by_key(|(bias, _)| *bias);
-
         tracing::debug!(count = available.len(), "available tasks found");
         Ok(available.into_iter().map(|(_, task)| task).collect())
     }
@@ -389,8 +320,6 @@ where
         fields(
             db.system = "postgresql",
             instance_id = %hint.instance_id,
-            // Display via the `TaskId` newtype so the span field renders as
-            // 64-char hex like every other task_id log line.
             task_id = %sayiir_core::TaskId::from_bytes(hint.task_id),
         ),
         err(level = tracing::Level::ERROR),
@@ -399,20 +328,16 @@ where
         &self,
         hint: &sayiir_persistence::TaskWakeupHint,
     ) -> Result<Option<AvailableTask>, BackendError> {
-        // Single-row eligibility check: skip the priority-ordered scan
-        // in find_available_tasks and verify just the hinted row. No
-        // claim happens here — the caller runs the AvailableTask
-        // through the normal execute pipeline (which claims atomically
-        // against the race). On any negative outcome — claim held,
-        // signal blocking, snapshot advanced, no row — return None so
-        // the caller falls back to the full poll.
+        // Single-row eligibility check. Same predicate shape as
+        // find_available_tasks, but the matching task_id (here from the
+        // hint payload) lets us read just the named row.
         let query = format!(
             "SELECT s.history_version, s.trace_parent
              FROM sayiir_workflow_snapshots s
              WHERE s.instance_id = $1
+               AND s.current_task_id = $2
                AND s.status = 'InProgress'
-               AND {eligibility}",
-            eligibility = eligibility_predicate("$2"),
+               AND {ELIGIBILITY_PREDICATE}"
         );
         let row = sqlx::query(&query)
             .bind(&hint.instance_id)
@@ -430,8 +355,6 @@ where
         let mut snapshot = self.decode(&data)?;
         snapshot.trace_parent = row.get("trace_parent");
 
-        // The snapshot must still be at the hinted task — otherwise the
-        // hint is stale (workflow moved on between NOTIFY and our read).
         let WorkflowSnapshotState::InProgress {
             position: ExecutionPosition::AtTask { task_id },
             completed_tasks,
@@ -440,7 +363,6 @@ where
         else {
             return Ok(None);
         };
-        // hint.task_id is 32 raw bytes from the NOTIFY payload — wrap and compare.
         let hint_task_id = sayiir_core::TaskId::from_bytes(hint.task_id);
         if *task_id != hint_task_id || completed_tasks.contains_key(task_id) {
             return Ok(None);
