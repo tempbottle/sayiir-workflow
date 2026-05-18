@@ -259,7 +259,9 @@ where
         .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
 
         let history_version: i32 = row.get("history_version");
-        let data = self.fetch_blob(&self.pool, instance_id, history_version).await?;
+        let data = self
+            .fetch_blob(&self.pool, instance_id, history_version)
+            .await?;
         let mut snapshot = self.decode(&data)?;
         snapshot.trace_parent = row.get("trace_parent");
         Ok(snapshot)

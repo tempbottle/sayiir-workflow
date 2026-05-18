@@ -261,13 +261,14 @@ async fn backfill_task_outputs_copies_from_snapshot_blob() {
     assert_eq!(stats.outputs_written, 1);
     assert_eq!(stats.snapshots_scanned, 1);
 
-    let row: (Option<Vec<u8>>,) =
-        sqlx::query_as("SELECT output FROM sayiir_workflow_tasks WHERE instance_id = $1 AND task_id = $2")
-            .bind("wf-bf")
-            .bind(task_id.as_bytes().as_slice())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let row: (Option<Vec<u8>>,) = sqlx::query_as(
+        "SELECT output FROM sayiir_workflow_tasks WHERE instance_id = $1 AND task_id = $2",
+    )
+    .bind("wf-bf")
+    .bind(task_id.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(row.0.unwrap().as_slice(), payload.as_ref());
 
     // Idempotence: a second run finds nothing left to fill.
@@ -295,23 +296,23 @@ async fn save_task_result_dual_writes_output_column() {
         .await
         .unwrap();
 
-    let row: (Option<Vec<u8>>,) =
-        sqlx::query_as("SELECT output FROM sayiir_workflow_tasks WHERE instance_id = $1 AND task_id = $2")
-            .bind("wf-dw")
-            .bind(task_id.as_bytes().as_slice())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let stored = row.0.expect("output column should be populated by dual-write");
+    let row: (Option<Vec<u8>>,) = sqlx::query_as(
+        "SELECT output FROM sayiir_workflow_tasks WHERE instance_id = $1 AND task_id = $2",
+    )
+    .bind("wf-dw")
+    .bind(task_id.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let stored = row
+        .0
+        .expect("output column should be populated by dual-write");
     assert_eq!(stored.as_slice(), payload.as_ref());
 
     // The snapshot blob must still carry the result during the dual-write
     // phase — read paths haven't migrated yet.
     let loaded = backend.load_snapshot("wf-dw").await.unwrap();
-    assert_eq!(
-        loaded.get_task_result(&task_id).unwrap().output,
-        payload,
-    );
+    assert_eq!(loaded.get_task_result(&task_id).unwrap().output, payload,);
 }
 
 // ─── SignalStore ─────────────────────────────────────────────────────────────

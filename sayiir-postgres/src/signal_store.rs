@@ -217,8 +217,9 @@ where
         };
 
         // Lock the snapshot row and load the latest blob from history.
-        let Some((mut snapshot, prev_history_version)) =
-            self.lock_snapshot_for_mutation(&mut tx, instance_id).await?
+        let Some((mut snapshot, prev_history_version)) = self
+            .lock_snapshot_for_mutation(&mut tx, instance_id)
+            .await?
         else {
             tx.rollback().await.map_err(PgError)?;
             return Ok(false);
@@ -239,8 +240,7 @@ where
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
         let next_history_version = prev_history_version + 1;
-        let task_id_bytes: Option<[u8; 32]> =
-            snapshot.current_task_id().map(|t| *t.as_bytes());
+        let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
 
         sqlx::query(
@@ -325,8 +325,9 @@ where
         };
 
         // Lock the snapshot row and load the latest blob from history.
-        let Some((mut snapshot, prev_history_version)) =
-            self.lock_snapshot_for_mutation(&mut tx, instance_id).await?
+        let Some((mut snapshot, prev_history_version)) = self
+            .lock_snapshot_for_mutation(&mut tx, instance_id)
+            .await?
         else {
             tx.rollback().await.map_err(PgError)?;
             return Ok(false);
