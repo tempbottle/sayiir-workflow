@@ -1799,9 +1799,7 @@ where
         match cont {
             WorkflowContinuation::Delay { id, duration, next } => {
                 let now = chrono::Utc::now();
-                let wake_at = chrono::Duration::from_std(*duration)
-                    .map(|d| now + d)
-                    .unwrap_or(now);
+                let wake_at = chrono::Duration::from_std(*duration).map_or(now, |d| now + d);
                 let next_task_id = next
                     .as_deref()
                     .map(|n| sayiir_core::TaskId::from(n.first_task_id()));
