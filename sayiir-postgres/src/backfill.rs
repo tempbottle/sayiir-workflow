@@ -44,10 +44,11 @@ where
     /// `WHERE output IS NULL` so re-running the call is safe and never
     /// clobbers a value the live dual-write put there.
     ///
-    /// Only non-terminal snapshots are inspected — terminal states
-    /// (`Completed`/`Failed`) discard `completed_tasks` from the blob,
-    /// so there is nothing to copy. If the legacy task-result fallback
-    /// in `load_task_result` is being relied on, recover those values
+    /// Only snapshots whose blobs may still retain `completed_tasks`
+    /// are inspected. `Completed` and `Failed` snapshots discard
+    /// `completed_tasks` from the blob, so there is nothing to copy
+    /// from those states. If the legacy task-result fallback in
+    /// `load_task_result` is being relied on, recover those values
     /// separately from `sayiir_workflow_snapshot_history`.
     ///
     /// # Errors
