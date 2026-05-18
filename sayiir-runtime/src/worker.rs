@@ -22,7 +22,7 @@ use sayiir_core::context::{TaskExecutionContext, with_task_context};
 use sayiir_core::error::{BoxError, CodecError, WorkflowError};
 use sayiir_core::registry::TaskRegistry;
 use sayiir_core::snapshot::{
-    ExecutionPosition, SignalKind, SignalRequest, TaskDeadline, WorkflowSnapshot,
+    ExecutionPosition, SignalKind, SignalRequest, TaskDeadline, TaskHint, WorkflowSnapshot,
 };
 use sayiir_core::task_claim::AvailableTask;
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
@@ -1535,7 +1535,7 @@ where
             "Task completed"
         );
 
-        Self::update_position_after_task(continuation, &available_task.task_id, snapshot);
+        Self::update_position_after_task(continuation, &available_task.task_id, snapshot)?;
         #[cfg(feature = "otel")]
         {
             snapshot.trace_parent = crate::trace_context::current_trace_parent();
@@ -1786,34 +1786,100 @@ where
         }
     }
 
+    /// Set the snapshot's execution position to reflect "execution is now at
+    /// the head of `cont`".
+    ///
+    /// For Task heads (and Branch / Fork / Loop / `ChildWorkflow` which all
+    /// start with a Task-shaped node), set `AtTask(first_task_hint)`. For
+    /// `Delay` / `AwaitSignal` heads, enter the corresponding park state
+    /// directly — using `first_task_hint(...).id` would name the Delay or
+    /// Signal node itself, but `execute_task_by_id` skips past those when
+    /// dispatching, so the worker would loop on a phantom task ID.
+    fn set_position_at(
+        cont: &WorkflowContinuation,
+        snapshot: &mut WorkflowSnapshot,
+    ) -> Result<(), crate::error::RuntimeError> {
+        use crate::execution::control_flow::{compute_signal_timeout, compute_wake_at};
+        match cont {
+            WorkflowContinuation::Delay { id, duration, next } => {
+                let wake_at = compute_wake_at(duration)?;
+                let entered_at = chrono::Utc::now();
+                let next_hint = next.as_deref().map(WorkflowContinuation::first_task_hint);
+                let next_task_id = next_hint.as_ref().map(|h| h.id);
+                // Update task_priority/task_tags so backends advancing
+                // AtDelay -> AtTask inherit the next task's routing hints
+                // (mirrors save_park_checkpoint).
+                snapshot.set_task_hint(next_hint.as_ref().unwrap_or(&TaskHint::default()));
+                let delay_id = sayiir_core::TaskId::from(id.as_str());
+                snapshot.update_position(ExecutionPosition::AtDelay {
+                    delay_id,
+                    entered_at,
+                    wake_at,
+                    next_task_id,
+                });
+                // Mirror the executor's behaviour when it parks at a delay:
+                // mark the delay node as completed with the passthrough input
+                // (which is the *last* completed task's output, sitting at the
+                // top of `completed_tasks`) so downstream nodes see the same
+                // continuous output chain.
+                let passthrough = snapshot.get_last_task_output().unwrap_or_default();
+                snapshot.mark_task_completed(delay_id, passthrough);
+            }
+            WorkflowContinuation::AwaitSignal {
+                id,
+                signal_name,
+                timeout,
+                next,
+            } => {
+                let wake_at = compute_signal_timeout(timeout.as_ref());
+                let next_hint = next.as_deref().map(WorkflowContinuation::first_task_hint);
+                let next_task_id = next_hint.as_ref().map(|h| h.id);
+                // Update task_priority/task_tags so backends advancing
+                // AtSignal -> AtTask inherit the next task's routing hints
+                // (mirrors save_park_checkpoint).
+                snapshot.set_task_hint(next_hint.as_ref().unwrap_or(&TaskHint::default()));
+                snapshot.update_position(ExecutionPosition::AtSignal {
+                    signal_id: sayiir_core::TaskId::from(id.as_str()),
+                    signal_name: signal_name.clone(),
+                    wake_at,
+                    next_task_id,
+                });
+            }
+            _ => {
+                let hint = cont.first_task_hint();
+                snapshot.update_position(ExecutionPosition::AtTask { task_id: hint.id });
+                snapshot.set_task_hint(&hint);
+            }
+        }
+        Ok(())
+    }
+
     /// Update execution position after a task completes.
     fn update_position_after_task(
         continuation: &WorkflowContinuation,
         completed_task_id: &sayiir_core::TaskId,
         snapshot: &mut WorkflowSnapshot,
-    ) {
+    ) -> Result<(), crate::error::RuntimeError> {
         match continuation {
             WorkflowContinuation::Task { id, next, .. }
             | WorkflowContinuation::Delay { id, next, .. }
             | WorkflowContinuation::AwaitSignal { id, next, .. } => {
                 if sayiir_core::TaskId::from(id.as_str()) == *completed_task_id {
-                    if let Some(next_cont) = next {
-                        let hint = next_cont.first_task_hint();
-                        snapshot.update_position(ExecutionPosition::AtTask { task_id: hint.id });
-                        snapshot.set_task_hint(&hint);
+                    if let Some(next_cont) = next.as_deref() {
+                        Self::set_position_at(next_cont, snapshot)?;
                     }
                 } else if let Some(next_cont) = next {
-                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot)?;
                 }
             }
             WorkflowContinuation::Fork { branches, join, .. } => {
                 // Check if any branch task completed
                 for branch in branches {
-                    Self::update_position_after_task(branch, completed_task_id, snapshot);
+                    Self::update_position_after_task(branch, completed_task_id, snapshot)?;
                 }
                 // Check join
                 if let Some(join_cont) = join {
-                    Self::update_position_after_task(join_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(join_cont, completed_task_id, snapshot)?;
                 }
             }
             WorkflowContinuation::Branch {
@@ -1823,28 +1889,29 @@ where
                 ..
             } => {
                 for branch_cont in branches.values() {
-                    Self::update_position_after_task(branch_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(branch_cont, completed_task_id, snapshot)?;
                 }
                 if let Some(def) = default {
-                    Self::update_position_after_task(def, completed_task_id, snapshot);
+                    Self::update_position_after_task(def, completed_task_id, snapshot)?;
                 }
                 if let Some(next_cont) = next {
-                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot)?;
                 }
             }
             WorkflowContinuation::Loop { body, next, .. } => {
-                Self::update_position_after_task(body, completed_task_id, snapshot);
+                Self::update_position_after_task(body, completed_task_id, snapshot)?;
                 if let Some(next_cont) = next {
-                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot)?;
                 }
             }
             WorkflowContinuation::ChildWorkflow { child, next, .. } => {
-                Self::update_position_after_task(child, completed_task_id, snapshot);
+                Self::update_position_after_task(child, completed_task_id, snapshot)?;
                 if let Some(next_cont) = next {
-                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot)?;
                 }
             }
         }
+        Ok(())
     }
 
     /// Create a builder with sensible defaults.
