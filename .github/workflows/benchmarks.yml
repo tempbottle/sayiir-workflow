@@ -1,0 +1,111 @@
+name: Benchmarks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmarks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      bench: ${{ steps.filter.outputs.bench }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          token: ''
+          filters: |
+            bench:
+              - 'sayiir-core/**'
+              - 'sayiir-persistence/**'
+              - 'sayiir-postgres/**'
+              - 'sayiir-runtime/**'
+              - 'sayiir-macros/**'
+              - 'benchmarks/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+
+  bench-smoke:
+    name: Benchmark smoke
+    needs: changes
+    if: needs.changes.outputs.bench == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sayiir_bench
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sayiir_bench"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+          --shm-size=512m
+
+    env:
+      SAYIIR_BENCH_POSTGRES_URL: postgresql://postgres:postgres@127.0.0.1:5432/sayiir_bench
+      RUST_LOG: warn,sayiir_bench=info
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "benchmarks -> target"
+          key: bench-smoke
+
+      - name: Build sayiir-bench
+        run: cargo build --release --manifest-path benchmarks/Cargo.toml --bin sayiir-bench
+
+      - name: Throughput smoke (500 wf, 4 workers)
+        run: |
+          ./benchmarks/target/release/sayiir-bench \
+            --results-dir benchmarks/results \
+            throughput \
+              --workflows 500 \
+              --concurrency 16 \
+              --workers 4 \
+              --poll-ms 5 \
+              --batch-size 32
+
+      - name: Sleeping-giants smoke (100 wf x 3s sleep, 4 workers)
+        run: |
+          ./benchmarks/target/release/sayiir-bench \
+            --results-dir benchmarks/results \
+            sleeping-giants \
+              --workflows 100 \
+              --concurrency 16 \
+              --workers 4 \
+              --sleep-secs 3 \
+              --poll-ms 50 \
+              --batch-size 16
+
+      - name: Upload result JSONs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.run_id }}
+          path: benchmarks/results/*.json
+          if-no-files-found: warn
+          retention-days: 30

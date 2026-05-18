@@ -228,6 +228,15 @@ pub async fn run(ctx: crate::CommonContext, args: ThroughputArgs) -> Result<()> 
         tracing::warn!(error = %e, "failed to write report");
     }
 
+    // Exit non-zero in CI / scripts when the run didn't finish what it
+    // submitted. Done last so the JSON report is always written first.
+    if completed < args.workflows {
+        anyhow::bail!(
+            "incomplete run: completed {} of {} workflows (deadline or shutdown race)",
+            completed,
+            args.workflows
+        );
+    }
     Ok(())
 }
 
