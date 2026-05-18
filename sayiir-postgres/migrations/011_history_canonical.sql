@@ -40,4 +40,4 @@ ALTER TABLE sayiir_workflow_snapshot_history
     ADD COLUMN IF NOT EXISTS data_hash BYTEA;
 
 COMMENT ON COLUMN sayiir_workflow_snapshot_history.data_hash IS
-    'WIP: SHA-256 of the encoded blob. Pre-migration-010 rows are NULL and unsupported by the future KV offload — see migration 010 header for details.';
+    'WIP: SHA-256 of the encoded blob. Pre-migration-011 rows are NULL and unsupported by the future KV offload — see migration 011 header for details.';
