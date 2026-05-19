@@ -655,10 +655,7 @@ where
             let _ = tracing::Span::current().set_parent(remote_ctx);
         }
 
-        let mut snapshot = self
-            .backend
-            .load_snapshot(&available_task.instance_id)
-            .await?;
+        let mut snapshot = available_task.snapshot.clone();
         let already_completed = Self::validate_task_preconditions(
             definition_hash,
             &ext_wf.task_index,
@@ -1033,11 +1030,8 @@ where
             let _ = tracing::Span::current().set_parent(remote_ctx);
         }
 
-        // 1. Load snapshot + pure validation
-        let mut snapshot = self
-            .backend
-            .load_snapshot(&available_task.instance_id)
-            .await?;
+        // 1. Use the snapshot the dispatch SELECT already decoded
+        let mut snapshot = available_task.snapshot.clone();
         let already_completed = Self::validate_task_preconditions(
             workflow.definition_hash(),
             workflow.task_index(),

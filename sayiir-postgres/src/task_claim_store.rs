@@ -460,5 +460,6 @@ fn build_available_task(
         input: input_bytes,
         workflow_definition_hash: snapshot.definition_hash,
         trace_parent: snapshot.trace_parent.clone(),
+        snapshot: snapshot.clone(),
     })
 }

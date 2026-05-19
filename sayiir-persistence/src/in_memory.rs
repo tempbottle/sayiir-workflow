@@ -698,6 +698,7 @@ impl TaskClaimStore for InMemoryBackend {
                             input: input_bytes,
                             workflow_definition_hash: snapshot.definition_hash,
                             trace_parent: None,
+                            snapshot: snapshot.clone(),
                         });
 
                         if available.len() >= limit {
