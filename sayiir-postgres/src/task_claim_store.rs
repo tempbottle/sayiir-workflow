@@ -1,24 +1,11 @@
 //! [`TaskClaimStore`] implementation for Postgres.
 //!
-//! Claim ownership lives in a dedicated narrow table
-//! `sayiir_workflow_claims` (one row per in-flight workflow,
-//! keyed on `instance_id`). Acquisition is still gated by a
+//! Claim ownership lives in `sayiir_workflow_claims` — one row per
+//! in-flight workflow, PK on `instance_id`. Off the snapshot row so
+//! `find_available_tasks`' `FOR UPDATE OF s SKIP LOCKED` doesn't
+//! lock-fight with claim/release. Acquisition is gated by a
 //! fast-fail `pg_try_advisory_xact_lock(hashtextextended(instance_id, 0))`
 //! so racing workers short-circuit without blocking on a row lock.
-//!
-//! Decoupling from the snapshot row matters because the polling
-//! `find_available_tasks` scan takes `FOR UPDATE OF s SKIP LOCKED`
-//! on `sayiir_workflow_snapshots`. When claim/release wrote to that
-//! same row, every dispatch tick produced a lock fight between the
-//! poller and the worker that just released. With ownership on a
-//! separate table, polling and claim/release never touch the same
-//! row and the snapshot UPDATE budget per tick drops to just the
-//! state writes (save_snapshot / save_task_result).
-//!
-//! Eligibility for dispatch is a NOT EXISTS join into this table.
-//! The table only holds rows for currently-running workflows so it
-//! stays hot in shared_buffers; the planner picks an index-only
-//! plan via the PK.
 
 use chrono::{Duration, Utc};
 use sayiir_core::codec::{self, Decoder, Encoder};
@@ -69,38 +56,37 @@ where
         let expires_at = ttl.and_then(|d| Utc::now().checked_add_signed(d));
 
         // One round-trip: the conditional INSERT and the
-        // `snapshot_exists` probe share a single statement, so a
+        // `snapshot_exists` probe share a single statement so a
         // concurrent insert/delete can't interleave between them. A
         // missing snapshot is reported as `NotFound` (almost always a
         // stale caller); the other no-update reasons — non-InProgress,
         // task advanced, lost advisory lock, slot held and unexpired —
         // collapse to `Ok(None)` for the caller to retry.
         //
-        // The INSERT pulls (instance_id, current_task_id) from the
-        // matching snapshot row and is gated by the advisory lock plus
-        // a NOT EXISTS check on any live claim. ON CONFLICT (instance_id)
-        // DO UPDATE overwrites an expired-but-still-present row.
-        //
         // Epoch fields use `FLOOR(EXTRACT(EPOCH ...))::BIGINT`: a bare
         // cast to BIGINT rounds, so a `.5+` fractional second would
         // return an epoch one ahead of the stored timestamp and break
         // round-trips against `chrono::DateTime::timestamp()` (floor).
         let query = "
-            WITH lock AS (
+            WITH probe AS (
+                SELECT instance_id, current_task_id, status
+                FROM sayiir_workflow_snapshots
+                WHERE instance_id = $1
+            ),
+            lock AS (
                 SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS got
             ),
             upsert AS (
                 INSERT INTO sayiir_workflow_claims
                     (instance_id, task_id, worker_id, expires_at)
-                SELECT s.instance_id, s.current_task_id, $3, $4
-                FROM sayiir_workflow_snapshots s, lock
-                WHERE s.instance_id = $1
-                  AND lock.got
-                  AND s.status = 'InProgress'
-                  AND s.current_task_id = $2
+                SELECT probe.instance_id, probe.current_task_id, $3, $4
+                FROM probe, lock
+                WHERE lock.got
+                  AND probe.status = 'InProgress'
+                  AND probe.current_task_id = $2
                   AND NOT EXISTS (
                       SELECT 1 FROM sayiir_workflow_claims c
-                      WHERE c.instance_id = s.instance_id
+                      WHERE c.instance_id = probe.instance_id
                         AND (c.expires_at IS NULL OR c.expires_at > now())
                   )
                 ON CONFLICT (instance_id) DO UPDATE
@@ -109,16 +95,15 @@ where
                         claimed_at = now(),
                         expires_at = EXCLUDED.expires_at
                 RETURNING
-                    instance_id,
                     FLOOR(EXTRACT(EPOCH FROM claimed_at))::BIGINT AS claimed_epoch,
                     FLOOR(EXTRACT(EPOCH FROM expires_at))::BIGINT AS expires_epoch
             )
-            SELECT instance_id, claimed_epoch, expires_epoch, TRUE AS snapshot_exists
+            SELECT claimed_epoch, expires_epoch, TRUE AS snapshot_exists
             FROM upsert
             UNION ALL
             SELECT
-                NULL::text, NULL::bigint, NULL::bigint,
-                EXISTS (SELECT 1 FROM sayiir_workflow_snapshots WHERE instance_id = $1)
+                NULL::bigint, NULL::bigint,
+                EXISTS (SELECT 1 FROM probe)
             WHERE NOT EXISTS (SELECT 1 FROM upsert)
         ";
         let row = sqlx::query(query)
@@ -130,21 +115,19 @@ where
             .await
             .map_err(PgError)?;
 
-        let claimed_instance_id: Option<&str> = row.get("instance_id");
-        if let Some(claimed_instance_id) = claimed_instance_id {
+        if let Some(claimed_epoch) = row.get::<Option<i64>, _>("claimed_epoch") {
             return Ok(Some(TaskClaim {
-                instance_id: std::sync::Arc::from(claimed_instance_id),
+                instance_id: std::sync::Arc::from(instance_id),
                 task_id: *task_id,
                 worker_id: worker_id.to_string(),
-                claimed_at: row.get::<i64, _>("claimed_epoch").cast_unsigned(),
+                claimed_at: claimed_epoch.cast_unsigned(),
                 expires_at: row
                     .get::<Option<i64>, _>("expires_epoch")
                     .map(i64::cast_unsigned),
             }));
         }
 
-        let snapshot_exists: bool = row.get("snapshot_exists");
-        if !snapshot_exists {
+        if !row.get::<bool, _>("snapshot_exists") {
             return Err(BackendError::NotFound(format!("{instance_id}:{task_id}")));
         }
         Ok(None)
@@ -162,12 +145,11 @@ where
         task_id: &sayiir_core::TaskId,
         worker_id: &str,
     ) -> Result<(), BackendError> {
-        // DELETE + disambiguating SELECT in one statement: `released`
-        // (driven by the writable CTE's RETURNING) carries the
-        // success/failure signal, and bundling both into a single
-        // round-trip closes the inter-statement window where a
-        // concurrent release/re-claim could otherwise make the
-        // disambiguation report a misleading error variant.
+        // DELETE + owner disambiguation in one statement closes the
+        // inter-statement window where a concurrent release/re-claim
+        // could otherwise make the error path misreport the owner.
+        // The owner subselect is gated on `NOT EXISTS (del)` so the
+        // hot success path skips it.
         let row = sqlx::query(
             "WITH del AS (
                  DELETE FROM sayiir_workflow_claims
@@ -175,9 +157,9 @@ where
                  RETURNING 1
              )
              SELECT
-                 EXISTS (SELECT 1 FROM del) AS released,
+                 EXISTS (SELECT 1 FROM del) AS done,
                  (SELECT worker_id FROM sayiir_workflow_claims
-                  WHERE instance_id = $1) AS owner",
+                  WHERE instance_id = $1 AND NOT EXISTS (SELECT 1 FROM del)) AS owner",
         )
         .bind(instance_id)
         .bind(worker_id)
@@ -185,15 +167,7 @@ where
         .await
         .map_err(PgError)?;
 
-        if row.get::<bool, _>("released") {
-            return Ok(());
-        }
-        match row.get::<Option<String>, _>("owner") {
-            None => Err(BackendError::NotFound(format!("{instance_id}:{task_id}"))),
-            Some(other) => Err(BackendError::Backend(format!(
-                "Claim owned by different worker: {other}"
-            ))),
-        }
+        disambiguate_writeback(&row, instance_id, task_id, worker_id)
     }
 
     #[tracing::instrument(
@@ -212,10 +186,10 @@ where
         // Heartbeat. A no-TTL claim is eternal-until-released; mirror
         // the in-memory backend by silently no-op'ing the extension in
         // that case (no `COALESCE` — that would *introduce* a TTL).
-        // Pairing the UPDATE and the disambiguation SELECT in one
-        // statement (one round-trip) avoids the inter-statement window
-        // where a concurrent release/re-claim could let the
-        // disambiguation lie about who held the slot.
+        // When the row exists with our worker but `expires_at IS NULL`
+        // the UPDATE returns 0 rows, the owner subselect returns our
+        // worker_id, and `disambiguate_writeback` treats self-owned-
+        // not-done as Ok(()).
         let row = sqlx::query(
             "WITH upd AS (
                  UPDATE sayiir_workflow_claims
@@ -226,9 +200,9 @@ where
                  RETURNING 1
              )
              SELECT
-                 EXISTS (SELECT 1 FROM upd) AS extended,
+                 EXISTS (SELECT 1 FROM upd) AS done,
                  (SELECT worker_id FROM sayiir_workflow_claims
-                  WHERE instance_id = $1) AS owner",
+                  WHERE instance_id = $1 AND NOT EXISTS (SELECT 1 FROM upd)) AS owner",
         )
         .bind(instance_id)
         .bind(worker_id)
@@ -237,17 +211,7 @@ where
         .await
         .map_err(PgError)?;
 
-        if row.get::<bool, _>("extended") {
-            return Ok(());
-        }
-        match row.get::<Option<String>, _>("owner") {
-            None => Err(BackendError::NotFound(format!("{instance_id}:{task_id}"))),
-            Some(other) if other != worker_id => Err(BackendError::Backend(format!(
-                "Claim owned by different worker: {other}"
-            ))),
-            // Own the claim but it had no TTL — deliberate no-op.
-            Some(_) => Ok(()),
-        }
+        disambiguate_writeback(&row, instance_id, task_id, worker_id)
     }
 
     #[tracing::instrument(
@@ -448,6 +412,30 @@ where
             &hint_task_id,
             completed_tasks,
         ))
+    }
+}
+
+/// Decode the `(done, owner)` shape returned by the release/extend
+/// writable-CTE queries. `done` carries the success signal; `owner` is
+/// the current worker_id when the write didn't match, used to map the
+/// failure to the correct error variant. Self-owned-not-done is the
+/// extend heartbeat's no-TTL no-op (release never reaches that arm
+/// because `WHERE worker_id = $2` already excludes the case).
+fn disambiguate_writeback(
+    row: &sqlx::postgres::PgRow,
+    instance_id: &str,
+    task_id: &sayiir_core::TaskId,
+    worker_id: &str,
+) -> Result<(), BackendError> {
+    if row.get::<bool, _>("done") {
+        return Ok(());
+    }
+    match row.get::<Option<String>, _>("owner") {
+        None => Err(BackendError::NotFound(format!("{instance_id}:{task_id}"))),
+        Some(other) if other == worker_id => Ok(()),
+        Some(other) => Err(BackendError::Backend(format!(
+            "Claim owned by different worker: {other}"
+        ))),
     }
 }
 

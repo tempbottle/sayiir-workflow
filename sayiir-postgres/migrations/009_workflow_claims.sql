@@ -11,10 +11,6 @@ CREATE TABLE IF NOT EXISTS sayiir_workflow_claims (
     expires_at  TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_workflow_claims_expires
-    ON sayiir_workflow_claims (expires_at)
-    WHERE expires_at IS NOT NULL;
-
 ALTER TABLE sayiir_workflow_snapshots
     DROP COLUMN IF EXISTS claim_owner,
     DROP COLUMN IF EXISTS claim_expires_at;

@@ -285,13 +285,7 @@ where
 
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
-        for table in [
-            "sayiir_workflow_snapshot_history",
-            "sayiir_workflow_tasks",
-            "sayiir_workflow_events",
-            "sayiir_workflow_signals",
-            "sayiir_workflow_claims",
-        ] {
+        for table in crate::WORKFLOW_CHILD_TABLES {
             sqlx::query(&format!("DELETE FROM {table} WHERE instance_id = $1"))
                 .bind(instance_id)
                 .execute(&mut *tx)

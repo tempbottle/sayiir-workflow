@@ -154,20 +154,17 @@ impl CommonContext {
 
 /// Truncate Sayiir tables so each run starts with a clean slate.
 pub async fn reset_sayiir_tables(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-    sqlx::query(
-        "TRUNCATE TABLE \
-            sayiir_workflow_claims, \
-            sayiir_workflow_events, \
-            sayiir_workflow_signals, \
-            sayiir_workflow_snapshot_history, \
-            sayiir_workflow_snapshots, \
-            sayiir_workflow_tasks \
-         RESTART IDENTITY",
-    )
-    .execute(pool)
-    .await
-    .map(|_| ())
-    .map_err(anyhow::Error::from)
+    let tables = sayiir_postgres::WORKFLOW_CHILD_TABLES
+        .iter()
+        .copied()
+        .chain(std::iter::once("sayiir_workflow_snapshots"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    sqlx::query(&format!("TRUNCATE TABLE {tables} RESTART IDENTITY"))
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
 }
 
 /// If `OTEL_EXPORTER_OTLP_ENDPOINT` is set, ship runtime spans there via Sayiir's
