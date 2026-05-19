@@ -44,27 +44,41 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: sayiir_bench
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d sayiir_bench"
-          --health-interval 2s
-          --health-timeout 3s
-          --health-retries 30
-          --shm-size=512m
-
     env:
       SAYIIR_BENCH_POSTGRES_URL: postgresql://postgres:postgres@127.0.0.1:5432/sayiir_bench
       RUST_LOG: warn,sayiir_bench=info
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Start tuned Postgres
+        run: |
+          docker run -d --name pg-bench \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=sayiir_bench \
+            -p 5432:5432 \
+            --shm-size=1g \
+            postgres:17-alpine \
+            -c shared_buffers=1GB \
+            -c effective_cache_size=3GB \
+            -c work_mem=16MB \
+            -c maintenance_work_mem=256MB \
+            -c wal_buffers=16MB \
+            -c max_wal_size=4GB \
+            -c checkpoint_timeout=15min \
+            -c checkpoint_completion_target=0.9 \
+            -c synchronous_commit=off \
+            -c random_page_cost=1.1 \
+            -c max_connections=200 \
+            -c jit=off
+          for i in $(seq 1 30); do
+            if docker exec pg-bench pg_isready -U postgres -d sayiir_bench >/dev/null 2>&1; then
+              echo "postgres ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          docker exec pg-bench psql -U postgres -d sayiir_bench -c "SHOW shared_buffers; SHOW synchronous_commit;"
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
