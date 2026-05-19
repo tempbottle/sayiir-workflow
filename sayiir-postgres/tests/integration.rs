@@ -682,8 +682,8 @@ async fn extend_task_claim() {
     // ~the additional duration.
     let (claim_owner, claim_expires_at): (Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
         sqlx::query_as(
-            "SELECT claim_owner, claim_expires_at
-         FROM sayiir_workflow_snapshots WHERE instance_id = $1",
+            "SELECT worker_id, expires_at
+         FROM sayiir_workflow_claims WHERE instance_id = $1",
         )
         .bind("wf-1")
         .fetch_one(&pool)
@@ -695,7 +695,7 @@ async fn extend_task_claim() {
     assert_eq!(
         new_expiry_secs,
         original_expiry_secs + 300,
-        "extend should move claim_expires_at forward by exactly 300s"
+        "extend should move expires_at forward by exactly 300s"
     );
 }
 
