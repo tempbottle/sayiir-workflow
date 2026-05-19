@@ -58,6 +58,11 @@ where
         // stale caller); the other no-update reasons — non-InProgress,
         // task advanced, lost advisory lock, slot held and unexpired —
         // collapse to `Ok(None)` for the caller to retry.
+        //
+        // Epoch fields use `FLOOR(EXTRACT(EPOCH ...))::BIGINT`: a bare
+        // cast to BIGINT rounds, so a `.5+` fractional second would
+        // return an epoch one ahead of the stored timestamp and break
+        // round-trips against `chrono::DateTime::timestamp()` (floor).
         let query = "
             WITH lock AS (
                 SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS got
@@ -74,8 +79,8 @@ where
                   AND (s.claim_owner IS NULL OR s.claim_expires_at < now())
                 RETURNING
                     s.instance_id,
-                    EXTRACT(EPOCH FROM now())::BIGINT AS claimed_epoch,
-                    EXTRACT(EPOCH FROM s.claim_expires_at)::BIGINT AS expires_epoch
+                    FLOOR(EXTRACT(EPOCH FROM now()))::BIGINT AS claimed_epoch,
+                    FLOOR(EXTRACT(EPOCH FROM s.claim_expires_at))::BIGINT AS expires_epoch
             )
             SELECT instance_id, claimed_epoch, expires_epoch, TRUE AS snapshot_exists
             FROM upd
