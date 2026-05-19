@@ -285,10 +285,9 @@ where
 
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
-        // sayiir_task_claims was removed in migration 013 (claim state is
-        // now folded into sayiir_workflow_snapshots' claim_owner /
-        // claim_expires_at columns, which get cleared when the snapshot
-        // row itself is deleted below).
+        // Claim state lives in `sayiir_workflow_snapshots.claim_owner` /
+        // `claim_expires_at`, cleared when the snapshot row is deleted
+        // below — no separate task_claims table to purge.
         for table in [
             "sayiir_workflow_snapshot_history",
             "sayiir_workflow_tasks",

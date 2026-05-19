@@ -5,7 +5,7 @@
 //! fast-fail `pg_try_advisory_xact_lock(hashtextextended(instance_id, 0))`
 //! so racing workers short-circuit without blocking on a row lock.
 //! Neither claim column is btree-indexed, which keeps the
-//! claim/release/heartbeat UPDATEs HOT-eligible. See migration 013.
+//! claim/release/heartbeat UPDATEs HOT-eligible.
 
 use chrono::{Duration, Utc};
 use sayiir_core::codec::{self, Decoder, Encoder};
