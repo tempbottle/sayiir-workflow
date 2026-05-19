@@ -57,6 +57,19 @@ where
         };
         let notify_payload = build_task_ready_payload(snapshot);
 
+        // The runtime calls `mark_task_completed` then `save_snapshot`
+        // (not `save_task_result`); persist the just-completed task's
+        // output into the sidecar table here too, so dispatch can
+        // hydrate `completed_tasks[*].output` from `workflow_tasks`.
+        let last_completed_bytes: Option<[u8; 32]> =
+            snapshot.last_completed_task_id().map(|t| *t.as_bytes());
+        let last_completed_slice: Option<&[u8]> =
+            last_completed_bytes.as_ref().map(<[u8; 32]>::as_slice);
+        let last_completed_output: Option<bytes::Bytes> = snapshot
+            .last_completed_task_id()
+            .and_then(|id| snapshot.get_task_result(&id).map(|r| r.output.clone()));
+        let last_completed_output_slice: Option<&[u8]> = last_completed_output.as_deref();
+
         // One round-trip via a CTE chain: bump the snapshot version,
         // append the history row at that version, refresh the
         // workflow_tasks lifecycle, and queue the wakeup NOTIFY — all
@@ -115,6 +128,20 @@ where
                 WHERE instance_id = $1 AND status = 'active' AND $7
                 RETURNING 1
             ),
+            task_output AS (
+                INSERT INTO sayiir_workflow_tasks
+                    (instance_id, task_id, status, completed_at, output)
+                SELECT $1, $18, 'completed', now(), $19
+                WHERE $18 IS NOT NULL
+                ON CONFLICT (instance_id, task_id) DO UPDATE SET
+                    status = 'completed',
+                    completed_at = now(),
+                    error = NULL,
+                    output = EXCLUDED.output
+                WHERE sayiir_workflow_tasks.output IS NULL
+                   OR sayiir_workflow_tasks.output IS DISTINCT FROM EXCLUDED.output
+                RETURNING 1
+            ),
             notify AS (
                 SELECT pg_notify($16, $17) WHERE $17 IS NOT NULL
             )
@@ -139,6 +166,8 @@ where
             .bind(terminal_status) // $15
             .bind(TASK_READY_CHANNEL) // $16
             .bind(notify_payload.as_deref()) // $17
+            .bind(last_completed_slice) // $18
+            .bind(last_completed_output_slice) // $19
             .fetch_one(&self.pool)
             .await
             .map_err(PgError)?;

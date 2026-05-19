@@ -719,6 +719,25 @@ impl WorkflowSnapshot {
         }
     }
 
+    /// ID of the most recently completed task, if any. Set by
+    /// [`mark_task_completed`] and surfaced here so persistence
+    /// backends can write the just-completed output without scanning
+    /// the entire `completed_tasks` map.
+    #[must_use]
+    pub fn last_completed_task_id(&self) -> Option<crate::TaskId> {
+        match &self.state {
+            WorkflowSnapshotState::InProgress {
+                last_completed_task_id,
+                ..
+            }
+            | WorkflowSnapshotState::Paused {
+                last_completed_task_id,
+                ..
+            } => *last_completed_task_id,
+            _ => None,
+        }
+    }
+
     /// Get the last completed task's output, if any.
     pub fn get_last_task_output(&self) -> Option<Bytes> {
         match &self.state {
