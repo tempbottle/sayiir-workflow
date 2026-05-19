@@ -57,6 +57,18 @@ async fn setup() -> (
     setup_with(DEFAULT_PG_VERSION).await
 }
 
+/// Seed an `InProgress` snapshot for `instance_id` parked at `task_id`
+/// so claim/extend/release tests have a row for the UPDATE to match.
+async fn seed_snapshot_at_task(
+    backend: &PostgresBackend<JsonCodec>,
+    instance_id: &str,
+    task_id: &sayiir_core::TaskId,
+) {
+    let mut snapshot = WorkflowSnapshot::new(instance_id, "test-hash".into());
+    snapshot.update_position(ExecutionPosition::AtTask { task_id: *task_id });
+    backend.save_snapshot(&snapshot).await.unwrap();
+}
+
 // ─── SnapshotStore ───────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -481,6 +493,7 @@ async fn unpause_success() {
 #[tokio::test]
 async fn claim_task_success() {
     let (_c, backend) = setup().await;
+    seed_snapshot_at_task(&backend, "wf-1", &sayiir_core::TaskId::from("task-1")).await;
 
     let claim = backend
         .claim_task(
@@ -503,6 +516,7 @@ async fn claim_task_success() {
 #[tokio::test]
 async fn claim_task_already_claimed() {
     let (_c, backend) = setup().await;
+    seed_snapshot_at_task(&backend, "wf-1", &sayiir_core::TaskId::from("task-1")).await;
 
     let claim1 = backend
         .claim_task(
@@ -531,6 +545,7 @@ async fn claim_task_already_claimed() {
 #[tokio::test]
 async fn claim_task_expired_claim_replaced() {
     let (_c, backend) = setup().await;
+    seed_snapshot_at_task(&backend, "wf-1", &sayiir_core::TaskId::from("task-1")).await;
 
     // Claim with 1-second TTL then wait for it to expire
     backend
@@ -562,6 +577,7 @@ async fn claim_task_expired_claim_replaced() {
 #[tokio::test]
 async fn claim_task_no_ttl() {
     let (_c, backend) = setup().await;
+    seed_snapshot_at_task(&backend, "wf-1", &sayiir_core::TaskId::from("task-1")).await;
 
     let claim = backend
         .claim_task(
@@ -582,6 +598,7 @@ async fn claim_task_no_ttl() {
 #[tokio::test]
 async fn release_task_claim() {
     let (_c, backend) = setup().await;
+    seed_snapshot_at_task(&backend, "wf-1", &sayiir_core::TaskId::from("task-1")).await;
 
     backend
         .claim_task(
@@ -614,6 +631,7 @@ async fn release_task_claim() {
 #[tokio::test]
 async fn release_task_claim_wrong_worker() {
     let (_c, backend) = setup().await;
+    seed_snapshot_at_task(&backend, "wf-1", &sayiir_core::TaskId::from("task-1")).await;
 
     backend
         .claim_task(
@@ -633,7 +651,8 @@ async fn release_task_claim_wrong_worker() {
 
 #[tokio::test]
 async fn extend_task_claim() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, pool) = setup_with_pool(DEFAULT_PG_VERSION).await;
+    seed_snapshot_at_task(&backend, "wf-1", &sayiir_core::TaskId::from("task-1")).await;
 
     let claim = backend
         .claim_task(
@@ -645,7 +664,7 @@ async fn extend_task_claim() {
         .await
         .unwrap()
         .unwrap();
-    let original_expiry = claim.expires_at.unwrap();
+    let original_expiry_secs = claim.expires_at.unwrap();
 
     backend
         .extend_task_claim(
@@ -657,24 +676,33 @@ async fn extend_task_claim() {
         .await
         .unwrap();
 
-    // Re-claim to verify extension (claim should fail since it's still held)
-    let reclaim = backend
-        .claim_task(
-            "wf-1",
-            &sayiir_core::TaskId::from("task-1"),
-            "worker-2",
-            Some(Duration::seconds(10)),
+    // Read the column directly: a "still held" reclaim probe would
+    // pass even if extend was a silent no-op (the original 10s TTL
+    // hasn't elapsed yet), so check the actual expiration moved by
+    // ~the additional duration.
+    let (claim_owner, claim_expires_at): (Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as(
+            "SELECT claim_owner, claim_expires_at
+         FROM sayiir_workflow_snapshots WHERE instance_id = $1",
         )
+        .bind("wf-1")
+        .fetch_one(&pool)
         .await
         .unwrap();
-    assert!(reclaim.is_none(), "claim should still be held after extend");
-    // The original_expiry was 10s from now, extension added 300s — well beyond original
-    let _ = original_expiry; // used above conceptually
+
+    assert_eq!(claim_owner.as_deref(), Some("worker-1"));
+    let new_expiry_secs = claim_expires_at.unwrap().timestamp().cast_unsigned();
+    assert_eq!(
+        new_expiry_secs,
+        original_expiry_secs + 300,
+        "extend should move claim_expires_at forward by exactly 300s"
+    );
 }
 
 #[tokio::test]
 async fn extend_task_claim_wrong_worker() {
     let (_c, backend) = setup().await;
+    seed_snapshot_at_task(&backend, "wf-1", &sayiir_core::TaskId::from("task-1")).await;
 
     backend
         .claim_task(
@@ -1026,7 +1054,8 @@ async fn works_on_minimum_pg_version() {
         .unwrap();
     assert!(cancelled);
 
-    // Task claims
+    // Task claims (seed snapshot at the target task first).
+    seed_snapshot_at_task(&backend, "min-pg-3", &sayiir_core::TaskId::from("task-1")).await;
     let claim = backend
         .claim_task(
             "min-pg-3",
