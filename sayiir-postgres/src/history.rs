@@ -90,14 +90,16 @@ where
         tx: &mut PgConnection,
         instance_id: &str,
     ) -> Result<Option<(WorkflowSnapshot, i32)>, BackendError> {
-        // Lock the metadata row first; the blob is then fetched through
-        // `fetch_blob` so the read-side abstraction stays uniform with
-        // the rest of the codebase.
-        let row = sqlx::query(
-            "SELECT history_version FROM sayiir_workflow_snapshots
-             WHERE instance_id = $1
-             FOR UPDATE",
-        )
+        // Lock + blob fetch in one round-trip via the history JOIN.
+        // `FOR UPDATE OF s` locks only the snapshot row (not the
+        // immutable history row).
+        let row = sqlx::query(&format!(
+            "SELECT s.history_version, h.data
+             FROM sayiir_workflow_snapshots s
+             {HISTORY_JOIN}
+             WHERE s.instance_id = $1
+             FOR UPDATE OF s"
+        ))
         .bind(instance_id)
         .fetch_optional(&mut *tx)
         .await
@@ -105,9 +107,7 @@ where
 
         let Some(row) = row else { return Ok(None) };
         let history_version: i32 = row.get("history_version");
-        let data = self
-            .fetch_blob(&mut *tx, instance_id, history_version)
-            .await?;
+        let data: Vec<u8> = row.get("data");
         let snapshot = self.decode(&data)?;
         Ok(Some((snapshot, history_version)))
     }

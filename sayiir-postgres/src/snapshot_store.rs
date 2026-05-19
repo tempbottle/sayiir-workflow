@@ -7,8 +7,8 @@ use sqlx::Row;
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
-use crate::history::{append_history, snapshot_hash};
-use crate::wakeup::emit_task_ready;
+use crate::history::snapshot_hash;
+use crate::wakeup::{TASK_READY_CHANNEL, build_task_ready_payload};
 
 impl<C> SnapshotStore for PostgresBackend<C>
 where
@@ -40,118 +40,104 @@ where
         let terminal = snapshot.state.is_terminal();
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
-
         let task_priority = i16::from(snapshot.current_task_priority());
         let task_tags: Vec<&str> = snapshot
             .current_task_tags()
             .iter()
             .map(String::as_str)
             .collect();
+        let terminal_status = match SnapshotStatus::from(&snapshot.state) {
+            SnapshotStatus::Failed => "failed",
+            SnapshotStatus::Cancelled => "cancelled",
+            _ => "completed",
+        };
+        let notify_payload = build_task_ready_payload(snapshot);
 
-        let mut tx = self.pool.begin().await.map_err(PgError)?;
-
-        // `history_version` is omitted from the column list so the column
-        // DEFAULT supplies version 1 on INSERT; the ON CONFLICT branch
-        // increments from the locked existing value, then RETURNING hands
-        // the chosen version to the history insert below.
-        let upsert_row = sqlx::query(
-            "INSERT INTO sayiir_workflow_snapshots
-                (instance_id, status, definition_hash, current_task_id,
-                 completed_task_count, error, position_kind, delay_wake_at,
-                 trace_parent, task_priority, task_tags, data_hash,
-                 completed_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $8, $9, $10, $11, $12, $13,
-                     CASE WHEN $7 THEN now() ELSE NULL END, now())
-             ON CONFLICT (instance_id) DO UPDATE SET
-                status = $2,
-                definition_hash = $3,
-                current_task_id = $4,
-                completed_task_count = $5,
-                error = $6,
-                position_kind = $8,
-                delay_wake_at = $9,
-                trace_parent = $10,
-                task_priority = $11,
-                task_tags = $12,
-                data_hash = $13,
-                history_version = sayiir_workflow_snapshots.history_version + 1,
-                completed_at = CASE WHEN $7 THEN now() ELSE sayiir_workflow_snapshots.completed_at END,
-                updated_at = now()
-             RETURNING history_version",
-        )
-        .bind(&*snapshot.instance_id) // $1
-        .bind(status) // $2
-        .bind(snapshot.definition_hash.as_bytes().as_slice()) // $3
-        .bind(task_id) // $4
-        .bind(task_count) // $5
-        .bind(&error) // $6
-        .bind(terminal) // $7
-        .bind(pos_kind) // $8
-        .bind(wake_at) // $9
-        .bind(snapshot.trace_parent.as_deref()) // $10
-        .bind(task_priority) // $11
-        .bind(&task_tags) // $12
-        .bind(data_hash.as_slice()) // $13
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(PgError)?;
-
-        let history_version: i32 = upsert_row.get("history_version");
-
-        append_history(
-            &mut tx,
-            &snapshot.instance_id,
-            history_version,
-            status,
-            task_id,
-            &data,
-            &data_hash,
-        )
-        .await?;
-
-        // --- Maintain sayiir_workflow_tasks lifecycle ---
-
-        // If at a task, mark it as active
-        if let Some(tid) = task_id {
-            sqlx::query(
-                "INSERT INTO sayiir_workflow_tasks (instance_id, task_id, status, started_at)
-                 VALUES ($1, $2, 'active', now())
-                 ON CONFLICT (instance_id, task_id) DO UPDATE SET
+        // One round-trip via a CTE chain: bump the snapshot version,
+        // append the history row at that version, refresh the
+        // workflow_tasks lifecycle, and queue the wakeup NOTIFY — all
+        // in one statement. Sibling DML CTEs in PG always run; the
+        // gates (`WHERE $task_id IS NOT NULL`, `WHERE $terminal`,
+        // `WHERE $notify IS NOT NULL`) make zero-row branches cheap
+        // no-ops without conditional Rust string building.
+        let query = "
+            WITH snap AS (
+                INSERT INTO sayiir_workflow_snapshots
+                    (instance_id, status, definition_hash, current_task_id,
+                     completed_task_count, error, position_kind, delay_wake_at,
+                     trace_parent, task_priority, task_tags, data_hash,
+                     completed_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $8, $9, $10, $11, $12, $13,
+                        CASE WHEN $7 THEN now() ELSE NULL END, now())
+                ON CONFLICT (instance_id) DO UPDATE SET
+                    status = $2,
+                    definition_hash = $3,
+                    current_task_id = $4,
+                    completed_task_count = $5,
+                    error = $6,
+                    position_kind = $8,
+                    delay_wake_at = $9,
+                    trace_parent = $10,
+                    task_priority = $11,
+                    task_tags = $12,
+                    data_hash = $13,
+                    history_version = sayiir_workflow_snapshots.history_version + 1,
+                    completed_at = CASE WHEN $7 THEN now() ELSE sayiir_workflow_snapshots.completed_at END,
+                    updated_at = now()
+                RETURNING history_version
+            ),
+            hist AS (
+                INSERT INTO sayiir_workflow_snapshot_history
+                    (instance_id, version, status, current_task_id, data, data_hash)
+                SELECT $1, snap.history_version, $2, $4, $14, $13
+                FROM snap
+                RETURNING 1
+            ),
+            task_active AS (
+                INSERT INTO sayiir_workflow_tasks (instance_id, task_id, status, started_at)
+                SELECT $1, $4, 'active', now()
+                WHERE $4 IS NOT NULL AND NOT $7
+                ON CONFLICT (instance_id, task_id) DO UPDATE SET
                     status = CASE
                         WHEN sayiir_workflow_tasks.status = 'completed' THEN sayiir_workflow_tasks.status
                         ELSE 'active'
                     END,
-                    started_at = COALESCE(sayiir_workflow_tasks.started_at, now())",
+                    started_at = COALESCE(sayiir_workflow_tasks.started_at, now())
+                RETURNING 1
+            ),
+            task_terminal AS (
+                UPDATE sayiir_workflow_tasks
+                SET status = $15, completed_at = now(), error = $6
+                WHERE instance_id = $1 AND status = 'active' AND $7
+                RETURNING 1
+            ),
+            notify AS (
+                SELECT pg_notify($16, $17) WHERE $17 IS NOT NULL
             )
-            .bind(&*snapshot.instance_id)
-            .bind(tid)
-            .execute(&mut *tx)
+            SELECT history_version FROM snap
+        ";
+
+        sqlx::query(query)
+            .bind(&*snapshot.instance_id) // $1
+            .bind(status) // $2
+            .bind(snapshot.definition_hash.as_bytes().as_slice()) // $3
+            .bind(task_id) // $4
+            .bind(task_count) // $5
+            .bind(&error) // $6
+            .bind(terminal) // $7
+            .bind(pos_kind) // $8
+            .bind(wake_at) // $9
+            .bind(snapshot.trace_parent.as_deref()) // $10
+            .bind(task_priority) // $11
+            .bind(&task_tags) // $12
+            .bind(data_hash.as_slice()) // $13
+            .bind(&data) // $14
+            .bind(terminal_status) // $15
+            .bind(TASK_READY_CHANNEL) // $16
+            .bind(notify_payload.as_deref()) // $17
+            .fetch_one(&self.pool)
             .await
             .map_err(PgError)?;
-        }
-
-        // On terminal states, mark any still-active task as failed/cancelled
-        if terminal {
-            let terminal_status = match SnapshotStatus::from(&snapshot.state) {
-                SnapshotStatus::Failed => "failed",
-                SnapshotStatus::Cancelled => "cancelled",
-                _ => "completed",
-            };
-            sqlx::query(
-                "UPDATE sayiir_workflow_tasks SET status = $1, completed_at = now(), error = $2
-                 WHERE instance_id = $3 AND status = 'active'",
-            )
-            .bind(terminal_status)
-            .bind(&error)
-            .bind(&*snapshot.instance_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(PgError)?;
-        }
-
-        emit_task_ready(&mut tx, snapshot).await.map_err(PgError)?;
-
-        tx.commit().await.map_err(PgError)?;
         Ok(())
     }
 
@@ -170,17 +156,14 @@ where
         tracing::debug!("saving task result");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
-        // Lock the snapshot row and read the current blob from history.
-        // `FOR UPDATE OF s` serialises concurrent task completions on the
-        // same instance — two racing read-modify-writes would otherwise
-        // lose one completion.
+        // FOR UPDATE OF s serialises read-modify-write across this path
+        // and signal_store's mutators — TaskClaim only protects against
+        // peer workers, not against concurrent check_and_cancel.
         let (mut snapshot, prev_history_version) = self
             .lock_snapshot_for_mutation(&mut tx, instance_id)
             .await?
             .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
 
-        // `output` is consumed by mark_task_completed; the Arc clone keeps
-        // a refcount alive for the workflow_tasks UPSERT below.
         let output_bytes = output.clone();
         snapshot.mark_task_completed(*task_id, output);
 
@@ -191,56 +174,55 @@ where
         let current: Option<&[u8]> = current_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
         let next_history_version = prev_history_version + 1;
+        let notify_payload = build_task_ready_payload(&snapshot);
 
+        // UPDATE snapshots + INSERT history + UPSERT workflow_tasks +
+        // pg_notify in one CTE — the lock acquired above by
+        // lock_snapshot_for_mutation is still held in this same tx, so
+        // all four writes commit together.
         sqlx::query(
-            "UPDATE sayiir_workflow_snapshots
-             SET status = $1, current_task_id = $2,
-                 completed_task_count = $3, history_version = $4,
-                 data_hash = $5, updated_at = now()
-             WHERE instance_id = $6",
+            "WITH upd AS (
+                 UPDATE sayiir_workflow_snapshots
+                 SET status = $1, current_task_id = $2,
+                     completed_task_count = $3, history_version = $4,
+                     data_hash = $5, updated_at = now()
+                 WHERE instance_id = $6
+                 RETURNING 1
+             ),
+             hist AS (
+                 INSERT INTO sayiir_workflow_snapshot_history
+                     (instance_id, version, status, current_task_id, data, data_hash)
+                 VALUES ($6, $4, $1, $2, $7, $5)
+                 RETURNING 1
+             ),
+             task AS (
+                 INSERT INTO sayiir_workflow_tasks
+                     (instance_id, task_id, status, completed_at, output)
+                 VALUES ($6, $8, 'completed', now(), $9)
+                 ON CONFLICT (instance_id, task_id) DO UPDATE SET
+                     status = 'completed', completed_at = now(), error = NULL,
+                     output = EXCLUDED.output
+                 RETURNING 1
+             ),
+             notify AS (
+                 SELECT pg_notify($10, $11) WHERE $11 IS NOT NULL
+             )
+             SELECT 1 AS done",
         )
-        .bind(status)
-        .bind(current)
-        .bind(task_count)
-        .bind(next_history_version)
-        .bind(data_hash.as_slice())
-        .bind(instance_id)
-        .execute(&mut *tx)
+        .bind(status) // $1
+        .bind(current) // $2
+        .bind(task_count) // $3
+        .bind(next_history_version) // $4
+        .bind(data_hash.as_slice()) // $5
+        .bind(instance_id) // $6
+        .bind(&data) // $7
+        .bind(task_id.as_bytes().as_slice()) // $8
+        .bind(output_bytes.as_ref()) // $9
+        .bind(TASK_READY_CHANNEL) // $10
+        .bind(notify_payload.as_deref()) // $11
+        .fetch_one(&mut *tx)
         .await
         .map_err(PgError)?;
-
-        append_history(
-            &mut tx,
-            instance_id,
-            next_history_version,
-            status,
-            current,
-            &data,
-            &data_hash,
-        )
-        .await?;
-
-        // Dual-write the output to workflow_tasks during the cutover
-        // phase. The blob still carries `completed_tasks` for reads; once
-        // that map is removed from the snapshot, this column becomes the
-        // canonical source. Nullable because save_snapshot creates the
-        // row earlier (status='active') before any output exists.
-        sqlx::query(
-            "INSERT INTO sayiir_workflow_tasks
-                (instance_id, task_id, status, completed_at, output)
-             VALUES ($1, $2, 'completed', now(), $3)
-             ON CONFLICT (instance_id, task_id) DO UPDATE SET
-                status = 'completed', completed_at = now(), error = NULL,
-                output = EXCLUDED.output",
-        )
-        .bind(instance_id)
-        .bind(task_id.as_bytes().as_slice())
-        .bind(output_bytes.as_ref())
-        .execute(&mut *tx)
-        .await
-        .map_err(PgError)?;
-
-        emit_task_ready(&mut tx, &snapshot).await.map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
         Ok(())

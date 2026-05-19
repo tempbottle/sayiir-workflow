@@ -42,45 +42,48 @@ const RECONNECT_MIN_DELAY: Duration = Duration::from_secs(5);
 /// retries at least this often, so a recovered PG is picked up promptly.
 const RECONNECT_MAX_DELAY: Duration = Duration::from_mins(1);
 
-/// Fire `pg_notify(sayiir_task_ready, <hint bytes>)` on the given connection.
+/// Build the wakeup-hint payload for a snapshot, if it warrants a wake.
+/// Only `InProgress AtTask` qualifies — `find_hinted_task` targets a
+/// concrete task, and every other in-progress position relies on the
+/// timer-tick fallback poll. Returns the base64-encoded hint bytes
+/// ready for `pg_notify($channel, $payload)`.
 ///
-/// Call unconditionally from any save site — the eligibility predicate is
-/// evaluated here. Only `InProgress AtTask` produces a wake; everything
-/// else (terminal, paused, AtDelay, AtJoin, …) returns without touching
-/// the connection.
-///
-/// Call from inside the transaction that wrote the snapshot (pass
-/// `&mut *tx`) — NOTIFY is deferred to commit, so a rollback correctly
-/// drops the wake. Uses the function form of NOTIFY because it accepts
-/// bind parameters, keeping the channel name and payload out of SQL
-/// string interpolation.
+/// Pipelined save paths bind the payload into the same statement that
+/// writes the snapshot and gate `pg_notify` on `payload IS NOT NULL`,
+/// so NOTIFY is deferred to the transaction's commit (a rollback
+/// correctly drops the wake) without a separate round-trip.
+pub(crate) fn build_task_ready_payload(
+    snapshot: &sayiir_core::snapshot::WorkflowSnapshot,
+) -> Option<String> {
+    let task_id = snapshot.current_task_id()?;
+    Some(
+        TaskWakeupHint {
+            instance_id: snapshot.instance_id.to_string(),
+            task_id: *task_id.as_bytes(),
+            definition_hash: *snapshot.definition_hash.as_bytes(),
+            tags: snapshot.current_task_tags().to_vec(),
+        }
+        .encode(),
+    )
+}
+
+/// Standalone NOTIFY for save paths that can't yet pipeline into a
+/// single statement (`signal_store` writes a multi-statement TX where
+/// folding into one CTE chain would obscure the FOR UPDATE → mutate →
+/// write read-modify-write boundary).
 pub(crate) async fn emit_task_ready(
     conn: &mut sqlx::PgConnection,
     snapshot: &sayiir_core::snapshot::WorkflowSnapshot,
 ) -> Result<(), sqlx::Error> {
-    let Some(hint) = build_hint(snapshot) else {
+    let Some(payload) = build_task_ready_payload(snapshot) else {
         return Ok(());
     };
     sqlx::query("SELECT pg_notify($1, $2)")
         .bind(TASK_READY_CHANNEL)
-        .bind(hint.encode())
+        .bind(payload)
         .execute(conn)
         .await?;
     Ok(())
-}
-
-/// Build a wakeup hint from a snapshot if a save should wake workers.
-/// Only `InProgress AtTask` qualifies — `find_hinted_task` targets a
-/// concrete task, and every other in-progress position relies on the
-/// timer-tick fallback poll.
-fn build_hint(snapshot: &sayiir_core::snapshot::WorkflowSnapshot) -> Option<TaskWakeupHint> {
-    let task_id = snapshot.current_task_id()?;
-    Some(TaskWakeupHint {
-        instance_id: snapshot.instance_id.to_string(),
-        task_id: *task_id.as_bytes(),
-        definition_hash: *snapshot.definition_hash.as_bytes(),
-        tags: snapshot.current_task_tags().to_vec(),
-    })
 }
 
 pub(crate) struct WakeupListener {
