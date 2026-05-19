@@ -680,17 +680,15 @@ async fn extend_task_claim() {
     // pass even if extend was a silent no-op (the original 10s TTL
     // hasn't elapsed yet), so check the actual expiration moved by
     // ~the additional duration.
-    let (claim_owner, claim_expires_at): (
-        Option<String>,
-        Option<chrono::DateTime<chrono::Utc>>,
-    ) = sqlx::query_as(
-        "SELECT claim_owner, claim_expires_at
+    let (claim_owner, claim_expires_at): (Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as(
+            "SELECT claim_owner, claim_expires_at
          FROM sayiir_workflow_snapshots WHERE instance_id = $1",
-    )
-    .bind("wf-1")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+        )
+        .bind("wf-1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
     assert_eq!(claim_owner.as_deref(), Some("worker-1"));
     let new_expiry_secs = claim_expires_at.unwrap().timestamp().cast_unsigned();
