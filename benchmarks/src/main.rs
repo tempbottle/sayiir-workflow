@@ -156,7 +156,6 @@ impl CommonContext {
 pub async fn reset_sayiir_tables(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     sqlx::query(
         "TRUNCATE TABLE \
-            sayiir_task_claims, \
             sayiir_workflow_events, \
             sayiir_workflow_signals, \
             sayiir_workflow_snapshot_history, \
