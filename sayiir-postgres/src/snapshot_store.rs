@@ -30,7 +30,11 @@ where
     #[allow(clippy::too_many_lines)]
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         tracing::debug!("saving snapshot");
-        let data = self.encode(snapshot)?;
+        // Outputs live in `sayiir_workflow_tasks.output`; the blob carries
+        // only control state. Hydrate happens on every load path.
+        let mut stripped = snapshot.clone();
+        stripped.strip_task_outputs();
+        let data = self.encode(&stripped)?;
         let data_hash = snapshot_hash(&data);
         let status = snapshot.state.as_ref();
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
@@ -167,7 +171,11 @@ where
         let output_bytes = output.clone();
         snapshot.mark_task_completed(*task_id, output);
 
-        let data = self.encode(&snapshot)?;
+        // The newly-completed output is written below to
+        // `sayiir_workflow_tasks.output`; strip from the blob.
+        let mut stripped = snapshot.clone();
+        stripped.strip_task_outputs();
+        let data = self.encode(&stripped)?;
         let data_hash = snapshot_hash(&data);
         let status = snapshot.state.as_ref();
         let current_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
@@ -253,6 +261,8 @@ where
             .await?;
         let mut snapshot = self.decode(&data)?;
         snapshot.trace_parent = row.get("trace_parent");
+        let outputs = crate::history::fetch_task_outputs(&self.pool, instance_id).await?;
+        snapshot.hydrate_task_outputs(outputs);
         Ok(snapshot)
     }
 

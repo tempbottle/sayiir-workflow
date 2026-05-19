@@ -273,12 +273,27 @@ where
         }
         let rows = q.fetch_all(&self.pool).await.map_err(PgError)?;
 
-        let mut available: Vec<(bool, AvailableTask)> = Vec::with_capacity(rows.len());
+        // Decode-then-hydrate: outputs no longer live in the snapshot
+        // blob, so batch-fetch them from `sayiir_workflow_tasks` once for
+        // every candidate before the match loop touches `completed_tasks`.
+        let mut decoded: Vec<WorkflowSnapshot> = Vec::with_capacity(rows.len());
         for row in &rows {
             let raw: &[u8] = row.get("data");
             let mut snapshot = self.decode(raw)?;
             snapshot.trace_parent = row.get("trace_parent");
+            decoded.push(snapshot);
+        }
+        let instance_id_strs: Vec<&str> = decoded.iter().map(|s| s.instance_id.as_ref()).collect();
+        let mut outputs_by_instance =
+            crate::history::fetch_task_outputs_batched(&self.pool, &instance_id_strs).await?;
+        for snapshot in &mut decoded {
+            if let Some(outputs) = outputs_by_instance.remove(snapshot.instance_id.as_ref()) {
+                snapshot.hydrate_task_outputs(outputs);
+            }
+        }
 
+        let mut available: Vec<(bool, AvailableTask)> = Vec::with_capacity(decoded.len());
+        for mut snapshot in decoded {
             match &snapshot.state {
                 // Delay: if expired, advance past it
                 WorkflowSnapshotState::InProgress {
@@ -393,6 +408,8 @@ where
             .await?;
         let mut snapshot = self.decode(&data)?;
         snapshot.trace_parent = row.get("trace_parent");
+        let outputs = crate::history::fetch_task_outputs(&self.pool, &hint.instance_id).await?;
+        snapshot.hydrate_task_outputs(outputs);
 
         let WorkflowSnapshotState::InProgress {
             position: ExecutionPosition::AtTask { task_id },

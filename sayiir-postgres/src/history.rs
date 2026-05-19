@@ -19,6 +19,9 @@
 //! history shape, including the `data_hash` (SHA-256 of the encoded
 //! blob) that paves the way for a future KV/object-store offload.
 
+use std::collections::HashMap;
+
+use bytes::Bytes;
 use sayiir_core::codec::{self, Decoder};
 use sayiir_core::snapshot::WorkflowSnapshot;
 use sayiir_persistence::BackendError;
@@ -27,6 +30,77 @@ use sqlx::{PgConnection, Row};
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
+
+/// Fetch the per-task `output` blobs from `sayiir_workflow_tasks` for one
+/// instance and return them keyed by `TaskId`. Snapshot blobs no longer
+/// carry the outputs (see [`WorkflowSnapshot::strip_task_outputs`]), so
+/// every load path that hands a snapshot to the runtime calls this and
+/// then [`WorkflowSnapshot::hydrate_task_outputs`].
+pub(crate) async fn fetch_task_outputs<'e, E>(
+    executor: E,
+    instance_id: &str,
+) -> Result<HashMap<sayiir_core::TaskId, Bytes>, BackendError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let rows = sqlx::query(
+        "SELECT task_id, output FROM sayiir_workflow_tasks
+         WHERE instance_id = $1 AND status = 'completed' AND output IS NOT NULL",
+    )
+    .bind(instance_id)
+    .fetch_all(executor)
+    .await
+    .map_err(PgError)?;
+
+    let mut outputs = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let task_id_bytes: &[u8] = row.get("task_id");
+        let Ok(task_id) = sayiir_core::TaskId::from_slice(task_id_bytes) else {
+            continue;
+        };
+        let output: Vec<u8> = row.get("output");
+        outputs.insert(task_id, Bytes::from(output));
+    }
+    Ok(outputs)
+}
+
+/// Batched variant of [`fetch_task_outputs`] for dispatch SELECTs that
+/// load multiple snapshots at once. Returns rows grouped by
+/// `instance_id` so each snapshot can be hydrated independently.
+pub(crate) async fn fetch_task_outputs_batched<'e, E>(
+    executor: E,
+    instance_ids: &[&str],
+) -> Result<HashMap<String, HashMap<sayiir_core::TaskId, Bytes>>, BackendError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    if instance_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        "SELECT instance_id, task_id, output FROM sayiir_workflow_tasks
+         WHERE instance_id = ANY($1) AND status = 'completed' AND output IS NOT NULL",
+    )
+    .bind(instance_ids)
+    .fetch_all(executor)
+    .await
+    .map_err(PgError)?;
+
+    let mut grouped: HashMap<String, HashMap<sayiir_core::TaskId, Bytes>> = HashMap::new();
+    for row in rows {
+        let instance_id: String = row.get("instance_id");
+        let task_id_bytes: &[u8] = row.get("task_id");
+        let Ok(task_id) = sayiir_core::TaskId::from_slice(task_id_bytes) else {
+            continue;
+        };
+        let output: Vec<u8> = row.get("output");
+        grouped
+            .entry(instance_id)
+            .or_default()
+            .insert(task_id, Bytes::from(output));
+    }
+    Ok(grouped)
+}
 
 /// SQL fragment joining `sayiir_workflow_snapshots s` to its canonical
 /// history row. Inlined into every read path that needs the blob —
@@ -108,7 +182,9 @@ where
         let Some(row) = row else { return Ok(None) };
         let history_version: i32 = row.get("history_version");
         let data: Vec<u8> = row.get("data");
-        let snapshot = self.decode(&data)?;
+        let mut snapshot = self.decode(&data)?;
+        let outputs = fetch_task_outputs(&mut *tx, instance_id).await?;
+        snapshot.hydrate_task_outputs(outputs);
         Ok(Some((snapshot, history_version)))
     }
 }
