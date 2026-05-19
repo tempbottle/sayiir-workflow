@@ -285,12 +285,14 @@ where
 
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
+        // Claim state lives in `sayiir_workflow_snapshots.claim_owner` /
+        // `claim_expires_at`, cleared when the snapshot row is deleted
+        // below — no separate task_claims table to purge.
         for table in [
             "sayiir_workflow_snapshot_history",
             "sayiir_workflow_tasks",
             "sayiir_workflow_events",
             "sayiir_workflow_signals",
-            "sayiir_task_claims",
         ] {
             sqlx::query(&format!("DELETE FROM {table} WHERE instance_id = $1"))
                 .bind(instance_id)
