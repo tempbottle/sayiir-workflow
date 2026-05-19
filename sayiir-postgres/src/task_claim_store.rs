@@ -51,11 +51,9 @@ where
     ) -> Result<Option<TaskClaim>, BackendError> {
         let expires_at = ttl.and_then(|d| Utc::now().checked_add_signed(d));
 
-        // One statement: try the conditional UPDATE and, in the same
-        // snapshot, observe whether a snapshot row even exists. The
-        // outer SELECT runs in the pre-UPDATE snapshot per writable-CTE
-        // semantics, so its `snapshot_exists` reading can't be poisoned
-        // by a concurrent insert/delete between two round-trips. A
+        // One round-trip: the conditional UPDATE and the
+        // `snapshot_exists` probe share a single statement, so a
+        // concurrent insert/delete can't interleave between them. A
         // missing snapshot is reported as `NotFound` (almost always a
         // stale caller); the other no-update reasons — non-InProgress,
         // task advanced, lost advisory lock, slot held and unexpired —
@@ -128,11 +126,12 @@ where
         task_id: &sayiir_core::TaskId,
         worker_id: &str,
     ) -> Result<(), BackendError> {
-        // UPDATE + disambiguating SELECT in one statement so the read
-        // can't observe a concurrent release/re-claim that landed
-        // between the two — under the writable-CTE snapshot, the outer
-        // SELECT sees `claim_owner` as it was *before* our UPDATE ran,
-        // and `released` reflects whether we actually cleared the slot.
+        // UPDATE + disambiguating SELECT in one statement: `released`
+        // (driven by the writable CTE's RETURNING) carries the
+        // success/failure signal, and bundling both into a single
+        // round-trip closes the inter-statement window where a
+        // concurrent release/re-claim could otherwise make the
+        // disambiguation report a misleading error variant.
         let row = sqlx::query(
             "WITH upd AS (
                  UPDATE sayiir_workflow_snapshots
@@ -179,10 +178,11 @@ where
     ) -> Result<(), BackendError> {
         // Heartbeat. A no-TTL claim is eternal-until-released; mirror
         // the in-memory backend by silently no-op'ing the extension in
-        // that case (no `COALESCE` — that would *introduce* a TTL). The
-        // CTE pairs the UPDATE with a same-snapshot read of the
-        // current owner, so a concurrent release/re-claim can't make
-        // the disambiguation lie about who held the slot.
+        // that case (no `COALESCE` — that would *introduce* a TTL).
+        // Pairing the UPDATE and the disambiguation SELECT in one
+        // statement (one round-trip) avoids the inter-statement window
+        // where a concurrent release/re-claim could let the
+        // disambiguation lie about who held the slot.
         let row = sqlx::query(
             "WITH upd AS (
                  UPDATE sayiir_workflow_snapshots

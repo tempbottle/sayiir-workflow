@@ -651,7 +651,7 @@ async fn release_task_claim_wrong_worker() {
 
 #[tokio::test]
 async fn extend_task_claim() {
-    let (_c, backend) = setup().await;
+    let (_c, backend, pool) = setup_with_pool(DEFAULT_PG_VERSION).await;
     seed_snapshot_at_task(&backend, "wf-1", &sayiir_core::TaskId::from("task-1")).await;
 
     let claim = backend
@@ -664,7 +664,7 @@ async fn extend_task_claim() {
         .await
         .unwrap()
         .unwrap();
-    let original_expiry = claim.expires_at.unwrap();
+    let original_expiry_secs = claim.expires_at.unwrap();
 
     backend
         .extend_task_claim(
@@ -676,19 +676,29 @@ async fn extend_task_claim() {
         .await
         .unwrap();
 
-    // Re-claim to verify extension (claim should fail since it's still held)
-    let reclaim = backend
-        .claim_task(
-            "wf-1",
-            &sayiir_core::TaskId::from("task-1"),
-            "worker-2",
-            Some(Duration::seconds(10)),
-        )
-        .await
-        .unwrap();
-    assert!(reclaim.is_none(), "claim should still be held after extend");
-    // The original_expiry was 10s from now, extension added 300s — well beyond original
-    let _ = original_expiry; // used above conceptually
+    // Read the column directly: a "still held" reclaim probe would
+    // pass even if extend was a silent no-op (the original 10s TTL
+    // hasn't elapsed yet), so check the actual expiration moved by
+    // ~the additional duration.
+    let (claim_owner, claim_expires_at): (
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
+        "SELECT claim_owner, claim_expires_at
+         FROM sayiir_workflow_snapshots WHERE instance_id = $1",
+    )
+    .bind("wf-1")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(claim_owner.as_deref(), Some("worker-1"));
+    let new_expiry_secs = claim_expires_at.unwrap().timestamp().cast_unsigned();
+    assert_eq!(
+        new_expiry_secs,
+        original_expiry_secs + 300,
+        "extend should move claim_expires_at forward by exactly 300s"
+    );
 }
 
 #[tokio::test]
