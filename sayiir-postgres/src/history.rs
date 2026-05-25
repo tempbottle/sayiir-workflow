@@ -198,7 +198,9 @@ where
 
         let Some(row) = row else { return Ok(None) };
         let history_version: i32 = row.get("history_version");
-        let data = self.fetch_blob(&mut *tx, instance_id, history_version).await?;
+        let data = self
+            .fetch_blob(&mut *tx, instance_id, history_version)
+            .await?;
         let mut snapshot = self.decode(&data)?;
         let outputs = fetch_task_outputs(&mut *tx, instance_id).await?;
         snapshot.hydrate_task_outputs(outputs);
