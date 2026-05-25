@@ -41,7 +41,6 @@ jobs:
               - 'sayiir-py/**'
               - 'sayiir-node/**'
               - 'tests/**'
-              - 'benches/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
             python:
@@ -288,47 +287,6 @@ jobs:
       - name: Dry-run npm publish
         working-directory: sayiir-cloudflare-js
         run: pnpm publish --dry-run --no-git-checks
-
-  bench:
-    name: Benchmarks
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' && contains(github.event.pull_request.labels.*.name, 'benchmarks')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout PR branch
-        uses: actions/checkout@v6
-
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install critcmp
-        uses: taiki-e/install-action@v2
-        with:
-          tool: critcmp
-
-      - name: Run benchmarks (PR)
-        run: cargo bench -p sayiir-postgres --bench postgres -- --save-baseline pr
-
-      - name: Checkout main branch
-        uses: actions/checkout@v6
-        with:
-          ref: main
-          clean: false
-
-      - name: Run benchmarks (baseline)
-        id: baseline
-        continue-on-error: true
-        run: cargo bench -p sayiir-postgres --bench postgres -- --save-baseline main
-
-      - name: Checkout PR branch again
-        uses: actions/checkout@v6
-        with:
-          clean: false
-
-      - name: Compare benchmarks
-        if: steps.baseline.outcome == 'success'
-        continue-on-error: true
-        run: critcmp main pr
 
   docs-lint:
     name: Docs Lint
