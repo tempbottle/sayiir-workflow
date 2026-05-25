@@ -12,7 +12,7 @@ use sqlx::Row;
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
 use crate::history::append_history;
-use crate::wakeup::emit_task_ready;
+use crate::wakeup::{TASK_READY_CHANNEL, build_task_ready_payload};
 
 impl<C> SignalStore for PostgresBackend<C>
 where
@@ -242,14 +242,25 @@ where
         let next_history_version = prev_history_version + 1;
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
+        let notify_payload = build_task_ready_payload(&snapshot);
 
+        // Pipeline the snapshot UPDATE and pg_notify into one statement.
+        // pg_notify lands in the outer SELECT (not a sibling CTE) so it
+        // can't be pruned by the planner — `FROM upd` forces upd to
+        // execute, and the WHERE gates the notify when there's no
+        // payload (cancel typically lands on a terminal state with no
+        // current_task_id, so payload is NULL).
         sqlx::query(
-            "UPDATE sayiir_workflow_snapshots
-             SET status = $1, error = $2,
-                 position_kind = $3, delay_wake_at = $4,
-                 history_version = $5, data_hash = $6,
-                 completed_at = now(), updated_at = now()
-             WHERE instance_id = $7",
+            "WITH upd AS (
+                 UPDATE sayiir_workflow_snapshots
+                 SET status = $1, error = $2,
+                     position_kind = $3, delay_wake_at = $4,
+                     history_version = $5, data_hash = $6,
+                     completed_at = now(), updated_at = now()
+                 WHERE instance_id = $7
+                 RETURNING 1
+             )
+             SELECT pg_notify($8, $9) FROM upd WHERE $9 IS NOT NULL",
         )
         .bind(status)
         .bind(&error)
@@ -258,6 +269,8 @@ where
         .bind(next_history_version)
         .bind(data_hash.as_slice())
         .bind(instance_id)
+        .bind(TASK_READY_CHANNEL)
+        .bind(notify_payload.as_deref())
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;
@@ -290,8 +303,6 @@ where
             .execute(&mut *tx)
             .await
             .map_err(PgError)?;
-
-        emit_task_ready(&mut tx, &snapshot).await.map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
         tracing::info!(instance_id, "workflow cancelled");
@@ -353,14 +364,23 @@ where
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
         let next_history_version = prev_history_version + 1;
+        let notify_payload = build_task_ready_payload(&snapshot);
 
+        // Pipeline UPDATE + pg_notify in one statement. Paused snapshots
+        // typically don't carry a wakeup payload, but mirroring the
+        // pattern keeps the signal-store write paths uniform with
+        // save_snapshot.
         sqlx::query(
-            "UPDATE sayiir_workflow_snapshots
-             SET status = $1, current_task_id = $2,
-                 completed_task_count = $3, position_kind = $4,
-                 delay_wake_at = $5, history_version = $6,
-                 data_hash = $7, updated_at = now()
-             WHERE instance_id = $8",
+            "WITH upd AS (
+                 UPDATE sayiir_workflow_snapshots
+                 SET status = $1, current_task_id = $2,
+                     completed_task_count = $3, position_kind = $4,
+                     delay_wake_at = $5, history_version = $6,
+                     data_hash = $7, updated_at = now()
+                 WHERE instance_id = $8
+                 RETURNING 1
+             )
+             SELECT pg_notify($9, $10) FROM upd WHERE $10 IS NOT NULL",
         )
         .bind(status)
         .bind(task_id)
@@ -370,6 +390,8 @@ where
         .bind(next_history_version)
         .bind(data_hash.as_slice())
         .bind(instance_id)
+        .bind(TASK_READY_CHANNEL)
+        .bind(notify_payload.as_deref())
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;
@@ -392,8 +414,6 @@ where
             .execute(&mut *tx)
             .await
             .map_err(PgError)?;
-
-        emit_task_ready(&mut tx, &snapshot).await.map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
         tracing::info!(instance_id, "workflow paused");
@@ -432,14 +452,23 @@ where
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
         let next_history_version = prev_history_version + 1;
+        let notify_payload = build_task_ready_payload(&snapshot);
 
+        // Unpause restores the snapshot to InProgress AtTask, so this is
+        // the one signal-store path that actually emits a NOTIFY.
+        // Folding it into the UPDATE eliminates the separate pg_notify
+        // round-trip.
         sqlx::query(
-            "UPDATE sayiir_workflow_snapshots
-             SET status = $1, current_task_id = $2,
-                 completed_task_count = $3, position_kind = $4,
-                 delay_wake_at = $5, history_version = $6,
-                 data_hash = $7, updated_at = now()
-             WHERE instance_id = $8",
+            "WITH upd AS (
+                 UPDATE sayiir_workflow_snapshots
+                 SET status = $1, current_task_id = $2,
+                     completed_task_count = $3, position_kind = $4,
+                     delay_wake_at = $5, history_version = $6,
+                     data_hash = $7, updated_at = now()
+                 WHERE instance_id = $8
+                 RETURNING 1
+             )
+             SELECT pg_notify($9, $10) FROM upd WHERE $10 IS NOT NULL",
         )
         .bind(status)
         .bind(task_id)
@@ -449,6 +478,8 @@ where
         .bind(next_history_version)
         .bind(data_hash.as_slice())
         .bind(instance_id)
+        .bind(TASK_READY_CHANNEL)
+        .bind(notify_payload.as_deref())
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;
@@ -463,8 +494,6 @@ where
             &data_hash,
         )
         .await?;
-
-        emit_task_ready(&mut tx, &snapshot).await.map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
         tracing::info!(instance_id, "workflow unpaused");

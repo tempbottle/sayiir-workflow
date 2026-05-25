@@ -73,6 +73,7 @@ mod task_result_store;
 mod wakeup;
 
 pub use backend::{PoolOptions, PostgresBackend};
+pub use wakeup::wakeup_drops_total;
 
 /// Per-instance child tables — i.e. everything that holds rows keyed by
 /// `instance_id` other than `sayiir_workflow_snapshots` itself. Source

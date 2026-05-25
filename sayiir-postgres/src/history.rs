@@ -102,12 +102,6 @@ where
     Ok(grouped)
 }
 
-/// SQL fragment joining `sayiir_workflow_snapshots s` to its canonical
-/// history row. Inlined into every read path that needs the blob —
-/// kept in one place so the join shape can't drift across sites.
-pub(crate) const HISTORY_JOIN: &str = "JOIN sayiir_workflow_snapshot_history h
-                 ON h.instance_id = s.instance_id AND h.version = s.history_version";
-
 /// SHA-256 of the encoded snapshot bytes. Persisted on every history
 /// row so a future migration can move blob storage to a KV/object
 /// store keyed by hash without changing the on-disk row shape further.
@@ -164,7 +158,10 @@ where
         tx: &mut PgConnection,
         instance_id: &str,
     ) -> Result<Option<(WorkflowSnapshot, i32)>, BackendError> {
-        // IMPORTANT — must be two separate statements, not one JOIN:
+        // Statement 1 — take FOR UPDATE on s alone.
+        //
+        // IMPORTANT: this MUST be its own statement, not folded into a
+        // CTE with the blob+outputs read below.
         //
         // Under READ COMMITTED, `SELECT s.history_version, h.data FROM s
         // JOIN h ... WHERE s.instance_id = $1 FOR UPDATE OF s` interacts
@@ -182,10 +179,6 @@ where
         // is right there in the DB. Repro:
         // `multi_stage_scatter_gather` with 4 parallel branches racing
         // `save_task_result`.
-        //
-        // The fix: take the FOR UPDATE on s alone, THEN read h with
-        // the locked `history_version`. Both reads run under the same
-        // transaction so the lock holds across the second query.
         let row = sqlx::query(
             "SELECT history_version FROM sayiir_workflow_snapshots
              WHERE instance_id = $1
@@ -198,11 +191,45 @@ where
 
         let Some(row) = row else { return Ok(None) };
         let history_version: i32 = row.get("history_version");
-        let data = self
-            .fetch_blob(&mut *tx, instance_id, history_version)
-            .await?;
+
+        // Statement 2 — blob + outputs in one round-trip.
+        //
+        // The lock from statement 1 is still held in this same tx, so
+        // both reads observe the version we just locked. We could
+        // expand to fetch via correlated subqueries; using a single
+        // CTE for outputs avoids scanning sayiir_workflow_tasks twice.
+        let row = sqlx::query(
+            "WITH outputs AS (
+                 SELECT task_id, output FROM sayiir_workflow_tasks
+                 WHERE instance_id = $1
+                   AND status = 'completed'
+                   AND output IS NOT NULL
+             )
+             SELECT
+                 (SELECT data FROM sayiir_workflow_snapshot_history
+                  WHERE instance_id = $1 AND version = $2) AS data,
+                 COALESCE((SELECT array_agg(task_id) FROM outputs),
+                          ARRAY[]::bytea[]) AS task_ids,
+                 COALESCE((SELECT array_agg(output) FROM outputs),
+                          ARRAY[]::bytea[]) AS outputs",
+        )
+        .bind(instance_id)
+        .bind(history_version)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(PgError)?;
+
+        let data: Vec<u8> = row.get("data");
         let mut snapshot = self.decode(&data)?;
-        let outputs = fetch_task_outputs(&mut *tx, instance_id).await?;
+        let task_ids: Vec<Vec<u8>> = row.get("task_ids");
+        let outputs_vec: Vec<Vec<u8>> = row.get("outputs");
+        let mut outputs = std::collections::HashMap::with_capacity(task_ids.len());
+        for (tid_bytes, output) in task_ids.into_iter().zip(outputs_vec.into_iter()) {
+            let Ok(task_id) = sayiir_core::TaskId::from_slice(&tid_bytes) else {
+                continue;
+            };
+            outputs.insert(task_id, Bytes::from(output));
+        }
         snapshot.hydrate_task_outputs(outputs);
         Ok(Some((snapshot, history_version)))
     }

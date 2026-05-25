@@ -16,7 +16,6 @@ use sqlx::Row;
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
-use crate::history::HISTORY_JOIN;
 
 /// SQL fragment that gates a snapshot row to "claimable right now":
 /// no active claim on the instance and no pending signal. Shared
@@ -245,24 +244,40 @@ where
         // instead of returning the full set in duplicate. The actual
         // claim race is resolved by the conditional UPDATE in
         // `claim_task` plus its advisory lock.
+        //
+        // The inner subquery filters, sorts and locks snapshots without
+        // pulling the 1 KB history blob through the sort. JOINing
+        // history outside the LIMIT means only `$limit` blob rows are
+        // ever materialised — at 200k InProgress rows this drops
+        // EXPLAIN ANALYZE from ~615ms / 214 MB temp-file spill down to
+        // ~190ms / 11 MB on the bench fixture. The order-by expression
+        // is non-SARGable either way, but sorting narrow rows
+        // (instance_id + i32 + nullable text) keeps the spill (if any)
+        // small enough to stay inside work_mem on a reasonably tuned
+        // PG. `FOR UPDATE OF s SKIP LOCKED` stays scoped to the
+        // snapshot row; the outer history join is a non-locking read.
         let query = format!(
-            "SELECT s.instance_id, h.data, s.trace_parent
-             FROM sayiir_workflow_snapshots s
-             {HISTORY_JOIN}
-             WHERE s.status = 'InProgress'
-               AND (
-                   s.position_kind = 'AtTask'
-                   OR (s.position_kind = 'AtDelay'
-                       AND s.delay_wake_at IS NOT NULL
-                       AND s.delay_wake_at <= now())
-               )
-               AND {ELIGIBILITY_PREDICATE}
-               {tag_filter}
-             ORDER BY
-               (s.task_priority - EXTRACT(EPOCH FROM (now() - s.updated_at)) / $2) ASC,
-               s.updated_at ASC
-             LIMIT $1
-             FOR UPDATE OF s SKIP LOCKED"
+            "SELECT r.instance_id, h.data, r.trace_parent
+             FROM (
+                 SELECT s.instance_id, s.history_version, s.trace_parent
+                 FROM sayiir_workflow_snapshots s
+                 WHERE s.status = 'InProgress'
+                   AND (
+                       s.position_kind = 'AtTask'
+                       OR (s.position_kind = 'AtDelay'
+                           AND s.delay_wake_at IS NOT NULL
+                           AND s.delay_wake_at <= now())
+                   )
+                   AND {ELIGIBILITY_PREDICATE}
+                   {tag_filter}
+                 ORDER BY
+                   (s.task_priority - EXTRACT(EPOCH FROM (now() - s.updated_at)) / $2) ASC,
+                   s.updated_at ASC
+                 LIMIT $1
+                 FOR UPDATE OF s SKIP LOCKED
+             ) r
+             JOIN sayiir_workflow_snapshot_history h
+               ON h.instance_id = r.instance_id AND h.version = r.history_version"
         );
 
         let mut q = sqlx::query(&query)

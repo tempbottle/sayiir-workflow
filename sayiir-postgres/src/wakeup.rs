@@ -1,12 +1,13 @@
 //! LISTEN/NOTIFY plumbing for the polling wakeup path.
 //!
-//! Producers ([`emit_task_ready`]) fire `pg_notify` inside whatever
-//! transaction wrote the snapshot — PG defers delivery to commit time, so
-//! readers never see a wakeup without an underlying row change. The
-//! payload is a nanoserde-encoded [`TaskWakeupHint`] wrapped in base64
-//! (PG `NOTIFY` payloads must be valid text). The hint lets the worker
-//! filter at receive time and target the named task with a one-row
-//! eligibility check, skipping the full `find_available_tasks` scan.
+//! Producers pipeline `pg_notify` into the same statement that writes
+//! the snapshot via [`build_task_ready_payload`] — PG defers delivery
+//! to commit time, so readers never see a wakeup without an underlying
+//! row change. The payload is a nanoserde-encoded [`TaskWakeupHint`]
+//! wrapped in base64 (PG `NOTIFY` payloads must be valid text). The
+//! hint lets the worker filter at receive time and target the named
+//! task with a one-row eligibility check, skipping the full
+//! `find_available_tasks` scan.
 //!
 //! The consumer is one long-lived tokio task spawned in `init`. It runs
 //! `LISTEN sayiir_task_ready` over a `PgListener` (sqlx auto-reconnects
@@ -15,6 +16,7 @@
 //! mpmc channel.
 
 use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
@@ -22,6 +24,20 @@ use sayiir_persistence::TaskWakeupHint;
 use sqlx::PgPool;
 use sqlx::postgres::PgListener;
 use tokio_util::sync::CancellationToken;
+
+/// Process-global counter of wakeup hints dropped because the in-memory
+/// mpmc channel was full. Surfaced to the runtime via
+/// [`wakeup_drops_total`] so the benchmark harness can include "fell back
+/// to poll" rate in its report without taking a metrics-crate dep.
+static WAKEUP_DROPS: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of the wakeup-drop counter. Monotonic; a benchmark records
+/// the value at scenario start and again at scenario end and reports
+/// the delta.
+#[must_use]
+pub fn wakeup_drops_total() -> u64 {
+    WAKEUP_DROPS.load(Ordering::Relaxed)
+}
 
 /// PG channel name for "a task is ready" wakeups. Listener and producers
 /// share this single source of truth.
@@ -65,25 +81,6 @@ pub(crate) fn build_task_ready_payload(
         }
         .encode(),
     )
-}
-
-/// Standalone NOTIFY for save paths that can't yet pipeline into a
-/// single statement (`signal_store` writes a multi-statement TX where
-/// folding into one CTE chain would obscure the FOR UPDATE → mutate →
-/// write read-modify-write boundary).
-pub(crate) async fn emit_task_ready(
-    conn: &mut sqlx::PgConnection,
-    snapshot: &sayiir_core::snapshot::WorkflowSnapshot,
-) -> Result<(), sqlx::Error> {
-    let Some(payload) = build_task_ready_payload(snapshot) else {
-        return Ok(());
-    };
-    sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(TASK_READY_CHANNEL)
-        .bind(payload)
-        .execute(conn)
-        .await?;
-    Ok(())
 }
 
 pub(crate) struct WakeupListener {
@@ -218,6 +215,7 @@ async fn recv_until_error(
                     // hint silently in either case.
                     Ok(()) | Err(flume::TrySendError::Disconnected(_)) => {}
                     Err(flume::TrySendError::Full(_)) => {
+                        WAKEUP_DROPS.fetch_add(1, Ordering::Relaxed);
                         tracing::warn!(
                             "wakeup channel full, dropping hint; worker falls back to poll",
                         );

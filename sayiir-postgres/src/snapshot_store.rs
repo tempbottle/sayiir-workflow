@@ -71,6 +71,11 @@ where
         // gates (`WHERE $task_id IS NOT NULL`, `WHERE $terminal`,
         // `WHERE $notify IS NOT NULL`) make zero-row branches cheap
         // no-ops without conditional Rust string building.
+        //
+        // The trailing `SELECT history_version FROM snap` is needed for
+        // the CTE chain to be a valid statement, but the value is not
+        // read on the caller side. `.execute()` skips PgRow allocation
+        // on the Rust side while still driving the full CTE on PG.
         let query = "
             WITH snap AS (
                 INSERT INTO sayiir_workflow_snapshots
@@ -142,11 +147,18 @@ where
                 WHERE sayiir_workflow_tasks.output IS NULL
                    OR sayiir_workflow_tasks.output IS DISTINCT FROM EXCLUDED.output
                 RETURNING 1
-            ),
-            notify AS (
-                SELECT pg_notify($16, $17) WHERE $17 IS NOT NULL
             )
-            SELECT history_version FROM snap
+            -- pg_notify lives in the outer SELECT (not a sibling CTE)
+            -- because PG's optimizer prunes unreferenced non-DML CTEs.
+            -- `WITH notify AS (SELECT pg_notify(...) WHERE ...)` without
+            -- a reference from the outer query is silently dropped and
+            -- the wake never fires; the `wait_for_wakeup_*` integration
+            -- tests catch that regression. CASE keeps the conditional
+            -- behaviour — `pg_notify` is only evaluated when the
+            -- payload is non-NULL because CASE short-circuits its arms.
+            SELECT history_version,
+                   CASE WHEN $17 IS NOT NULL THEN pg_notify($16, $17) END
+            FROM snap
         ";
 
         sqlx::query(query)
@@ -169,7 +181,7 @@ where
             .bind(notify_payload.as_deref()) // $17
             .bind(last_completed_slice) // $18
             .bind(last_completed_output_slice) // $19
-            .fetch_one(&self.pool)
+            .execute(&self.pool)
             .await
             .map_err(PgError)?;
         Ok(())
@@ -236,11 +248,12 @@ where
                      status = 'completed', completed_at = now(), error = NULL,
                      output = EXCLUDED.output
                  RETURNING 1
-             ),
-             notify AS (
-                 SELECT pg_notify($10, $11) WHERE $11 IS NOT NULL
              )
-             SELECT 1 AS done",
+             -- Same outer-SELECT pattern as save_snapshot — keeps the
+             -- pg_notify call referenced so PG's optimizer can't prune
+             -- it; CASE gates the call on a non-NULL payload.
+             SELECT 1 AS done,
+                    CASE WHEN $11 IS NOT NULL THEN pg_notify($10, $11) END",
         )
         .bind(status) // $1
         .bind(current) // $2
