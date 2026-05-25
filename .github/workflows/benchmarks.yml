@@ -78,28 +78,36 @@ jobs:
       - name: Build sayiir-bench
         run: cargo build --release --manifest-path benchmarks/Cargo.toml --bin sayiir-bench
 
-      - name: Throughput smoke (500 wf, 4 workers)
+      # Sized so the post-warmup window dominates: at ~400+ wf/s sustained
+      # in CI, 5000 wf takes ~12s — the 5s warmup eats roughly the first
+      # 2k completions, leaving a 3k-completion steady state for the
+      # latency percentiles. Total step time stays under ~30s.
+      - name: Throughput smoke (5000 wf, 8 workers)
         run: |
           ./benchmarks/target/release/sayiir-bench \
             --results-dir benchmarks/results \
             throughput \
-              --workflows 500 \
-              --concurrency 16 \
-              --workers 4 \
+              --workflows 5000 \
+              --concurrency 32 \
+              --workers 8 \
               --poll-ms 5 \
-              --batch-size 32
+              --batch-size 64
 
-      - name: Sleeping-giants smoke (100 wf x 3s sleep, 4 workers)
+      # 1000 sleepers at 3s sleep stress the durable-parking path (all
+      # workflows go AtDelay at once, then wake-storm). Submission +
+      # sleep + drain fits in ~10s; the wake-phase latency percentiles
+      # are the marketing-grade number.
+      - name: Sleeping-giants smoke (1000 wf x 3s sleep, 8 workers)
         run: |
           ./benchmarks/target/release/sayiir-bench \
             --results-dir benchmarks/results \
             sleeping-giants \
-              --workflows 100 \
-              --concurrency 16 \
-              --workers 4 \
+              --workflows 1000 \
+              --concurrency 32 \
+              --workers 8 \
               --sleep-secs 3 \
               --poll-ms 50 \
-              --batch-size 16
+              --batch-size 32
 
       - name: Upload result JSONs
         if: always()
