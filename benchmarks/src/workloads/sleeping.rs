@@ -20,11 +20,13 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use hdrhistogram::Histogram;
 use sayiir_core::context::WorkflowContext;
 use sayiir_core::workflow::WorkflowBuilder;
-use sayiir_postgres::PostgresBackend;
+use sayiir_postgres::{PostgresBackend, wakeup_drops_total};
 use sayiir_runtime::serialization::JsonCodec;
 use sayiir_runtime::{PooledWorker, WorkflowClient};
 use serde::{Deserialize, Serialize};
@@ -33,6 +35,7 @@ use sqlx::postgres::PgPoolOptions;
 use crate::SleepingGiantsArgs;
 use crate::driver::submit_bounded;
 use crate::metrics::{COMPLETION_TX, record_completion};
+use crate::report::LatencyBlock;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct State {
@@ -60,6 +63,7 @@ pub async fn run(ctx: crate::CommonContext, args: SleepingGiantsArgs) -> Result<
         tracing::info!("sayiir tables truncated");
     }
 
+    let wakeup_drops_baseline = wakeup_drops_total();
     let workflow = Arc::new(build_workflow(args.sleep_secs));
     let def_hash = workflow.definition_hash().clone();
     let backend_arc = Arc::new(backend);
@@ -201,6 +205,8 @@ pub async fn run(ctx: crate::CommonContext, args: SleepingGiantsArgs) -> Result<
         let _ = w.join().await;
     }
 
+    let wakeup_drops = wakeup_drops_total().saturating_sub(wakeup_drops_baseline);
+
     let pg_info = crate::report::collect_postgres_info(&pool).await;
     let prom = crate::report::prometheus_snapshot(&ctx.prometheus_url).await;
     let samples_json = samples
@@ -219,6 +225,11 @@ pub async fn run(ctx: crate::CommonContext, args: SleepingGiantsArgs) -> Result<
         "sleep_secs": args.sleep_secs,
         "demo_restart": args.demo_restart,
     });
+    let mut latency = BTreeMap::new();
+    latency.insert(
+        "wake".to_string(),
+        LatencyBlock::from_histogram_ns(&histogram),
+    );
     let report = crate::report::build_report(
         "sleeping-giants",
         params_json,
@@ -228,8 +239,11 @@ pub async fn run(ctx: crate::CommonContext, args: SleepingGiantsArgs) -> Result<
         0,
         total_elapsed,
         wake_sustained,
-        &histogram,
+        // accept_id → delay-wake → wake_task → final_emit = 4
+        4,
+        latency,
         samples_json,
+        Some(wakeup_drops),
         pg_info,
         prom,
     );

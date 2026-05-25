@@ -4,17 +4,25 @@
 //! needed to reproduce the numbers and chart them later. The driver-side
 //! hdrhistogram is the authoritative latency source; Prometheus queries
 //! are best-effort enrichment (DB size, postgres tps).
+//!
+//! Latency blocks are *named*: scenarios surface one or more histograms
+//! (e.g. `e2e`, `pickup`, `wake`) so the report can split scheduler
+//! latency from end-to-end without ambiguity. Competitors publish these
+//! separately — Temporal headlines `StartWorkflow` independently of
+//! `WorkflowEndToEnd`, and DBOS reports per-step latency. We follow that
+//! convention so numbers are directly diffable.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use hdrhistogram::Histogram;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Report {
     pub scenario: String,
     pub timestamp_utc: String,
@@ -28,14 +36,14 @@ pub struct Report {
     pub prometheus: Option<PrometheusSnapshot>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct HardwareInfo {
     pub os: String,
     pub arch: String,
     pub cores: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct PostgresInfo {
     pub version: Option<String>,
     pub synchronous_commit: Option<String>,
@@ -43,7 +51,7 @@ pub struct PostgresInfo {
     pub max_connections: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ResultsBlock {
     pub completed: usize,
     pub expected: usize,
@@ -52,26 +60,62 @@ pub struct ResultsBlock {
     pub elapsed_s: f64,
     pub throughput_wf_per_sec_average: f64,
     pub throughput_wf_per_sec_sustained: f64,
-    pub latency_ms: LatencyBlock,
+    /// `wf_per_sec_sustained × steps_per_workflow`. Competitors (Temporal
+    /// state-transitions/sec, Restate actions/sec) report this number;
+    /// surface it so our charts diff cleanly against theirs.
+    pub state_transitions_per_sec: f64,
+    /// Number of state transitions counted in one workflow execution.
+    /// Set by the scenario — `linear --steps N` uses `N`, fanout uses
+    /// `1 (parent) + K (branches) + 1 (join)`, etc.
+    pub steps_per_workflow: usize,
+    /// Named latency blocks. Keys are scenario-defined (e.g. `"e2e"`,
+    /// `"pickup"`, `"wake"`). A `BTreeMap` for stable JSON ordering.
+    pub latency_ms: BTreeMap<String, LatencyBlock>,
+    /// Number of wakeup hints dropped by sayiir-postgres during the run
+    /// because its in-memory channel was full. Non-zero means the
+    /// fallback poll loop was carrying load — a useful signal that the
+    /// channel cap or worker count needs tuning.
     pub wakeup_drops: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct LatencyBlock {
     pub p50: f64,
     pub p95: f64,
     pub p99: f64,
     pub p99_9: f64,
     pub max: f64,
+    /// Number of samples in the underlying histogram. Useful for
+    /// downstream tools that want to weight averages.
+    pub count: u64,
 }
 
-#[derive(Serialize)]
+impl LatencyBlock {
+    /// Convert an hdrhistogram of nanoseconds into a millisecond-bucketed
+    /// summary. Empty histograms collapse to all-zero blocks rather than
+    /// failing — a clean smoke run with no samples in a given block
+    /// shouldn't make the whole report unparseable.
+    #[must_use]
+    pub fn from_histogram_ns(h: &Histogram<u64>) -> Self {
+        let to_ms = |v: u64| Duration::from_nanos(v).as_secs_f64() * 1000.0;
+        Self {
+            p50: to_ms(h.value_at_quantile(0.50)),
+            p95: to_ms(h.value_at_quantile(0.95)),
+            p99: to_ms(h.value_at_quantile(0.99)),
+            p99_9: to_ms(h.value_at_quantile(0.999)),
+            max: to_ms(h.max()),
+            count: h.len(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Sample {
     pub t_ms: u64,
     pub completed: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct PrometheusSnapshot {
     pub pg_db_size_mb: Option<f64>,
     pub pg_xact_commit_total: Option<f64>,
@@ -90,14 +134,15 @@ pub fn build_report(
     excluded_warmup: usize,
     elapsed: Duration,
     sustained: f64,
-    histogram: &Histogram<u64>,
+    steps_per_workflow: usize,
+    latency_ms: BTreeMap<String, LatencyBlock>,
     samples: Vec<Sample>,
+    wakeup_drops: Option<u64>,
     postgres: PostgresInfo,
     prometheus: Option<PrometheusSnapshot>,
 ) -> Report {
-    let p = |q: f64| Duration::from_nanos(histogram.value_at_quantile(q)).as_secs_f64() * 1000.0;
-    let max_ms = Duration::from_nanos(histogram.max()).as_secs_f64() * 1000.0;
-
+    let throughput_avg = completed as f64 / elapsed.as_secs_f64().max(1e-9);
+    let state_transitions_per_sec = sustained * steps_per_workflow as f64;
     Report {
         scenario: scenario.to_string(),
         timestamp_utc: Utc::now().to_rfc3339(),
@@ -118,16 +163,12 @@ pub fn build_report(
             stale_completions,
             excluded_warmup,
             elapsed_s: elapsed.as_secs_f64(),
-            throughput_wf_per_sec_average: completed as f64 / elapsed.as_secs_f64().max(1e-9),
+            throughput_wf_per_sec_average: throughput_avg,
             throughput_wf_per_sec_sustained: sustained,
-            latency_ms: LatencyBlock {
-                p50: p(0.50),
-                p95: p(0.95),
-                p99: p(0.99),
-                p99_9: p(0.999),
-                max: max_ms,
-            },
-            wakeup_drops: None,
+            state_transitions_per_sec,
+            steps_per_workflow,
+            latency_ms,
+            wakeup_drops,
         },
         samples,
         prometheus,

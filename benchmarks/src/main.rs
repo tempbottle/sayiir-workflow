@@ -1,13 +1,56 @@
 //! Sayiir performance benchmark driver.
 //!
-//! See `docs/plans/2026-05-17-performance-benchmark-design.md` for the full design.
+//! See `docs/plans/2026-05-17-performance-benchmark-design.md` for the
+//! full design. This binary is the public face of the bench suite: a
+//! third party can `git clone && docker compose up && cargo run`
+//! against it without reading any Rust to reproduce our numbers.
+//!
+//! Scenarios:
+//!
+//! * `linear`         — universal N-step throughput sweep.
+//! * `fanout`         — 1 parent → K parallel children → join.
+//! * `signal-driven`  — park-on-signal, signal arrives, resume.
+//! * `sleeping-giants` — long-timer durable parking + wake storm.
+//!
+//! Meta-commands:
+//!
+//! * `sweep`   — invoke a scenario N times varying one axis, write a
+//!               Markdown summary table next to the per-point JSONs.
+//! * `compare` — diff a fresh run against a committed baseline; exit
+//!               non-zero on regression beyond a configurable threshold.
 
 #![deny(clippy::pedantic)]
-#![allow(clippy::module_name_repetitions)]
+#![allow(
+    clippy::module_name_repetitions,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::doc_markdown,
+    // Throughput/latency math is bench math: nanosecond → f64 → ms
+    // chains are expected, and `usize → u32` for connection pool
+    // sizing is hand-validated. Reverting to checked-conversion noise
+    // would obscure the actual measurement logic; bench code is the
+    // wrong place to chase mantissa precision.
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::similar_names,
+    clippy::too_many_lines,
+    clippy::struct_excessive_bools,
+    clippy::format_push_string,
+    clippy::map_unwrap_or,
+    clippy::items_after_statements,
+    clippy::needless_pass_by_value,
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::clone_on_copy,
+)]
 
+mod compare;
 mod driver;
 mod metrics;
 mod report;
+mod sweep;
 mod workloads;
 
 use std::time::Duration;
@@ -47,68 +90,172 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Scenario {
-    /// Short-workflow throughput burst.
-    Throughput(ThroughputArgs),
+    /// Linear N-step throughput burst — the universal benchmark.
+    ///
+    /// `--steps N` defaults to 4 so this is a drop-in replacement for
+    /// the prior `throughput` scenario; the clap `alias` keeps the old
+    /// invocation working too.
+    #[command(alias = "throughput")]
+    Linear(LinearArgs),
+    /// Fan-out / scatter-gather: 1 parent → K parallel branches → join.
+    Fanout(FanoutArgs),
+    /// Signal-driven park-and-resume.
+    #[command(name = "signal-driven", alias = "signal")]
+    SignalDriven(SignalDrivenArgs),
     /// Long-timer durable parking + wake storm.
+    #[command(name = "sleeping-giants", alias = "sleeping")]
     SleepingGiants(SleepingGiantsArgs),
+
+    /// Run a scenario N times sweeping one parameter.
+    Sweep(SweepArgs),
+    /// Compare a fresh run against a committed baseline.
+    Compare(CompareArgs),
 }
 
 #[derive(Parser, Debug)]
-struct ThroughputArgs {
-    /// Total number of workflows to submit.
+pub struct LinearArgs {
+    /// Total number of workflows to submit in the measurement phase.
     #[arg(long, default_value_t = 100_000)]
-    workflows: usize,
+    pub workflows: usize,
+
+    /// Workflows to submit and drain before the measurement phase
+    /// starts. Set to 0 to disable warmup entirely (small smoke runs).
+    /// Default scales with the measured load: at least 200, capped at
+    /// 5% of `workflows`.
+    #[arg(long, default_value_t = 200)]
+    pub warmup_workflows: usize,
+
+    /// Number of tasks per workflow. Linear shape: 1 pickup + (steps-2)
+    /// middle + 1 final_emit. `--steps 1` collapses everything into a
+    /// single task. Restate uses {1,3,9}; DBOS uses 4.
+    #[arg(long, default_value_t = 4)]
+    pub steps: usize,
 
     /// Number of concurrent submission tasks.
     #[arg(long, default_value_t = 256)]
-    concurrency: usize,
+    pub concurrency: usize,
 
     /// Optional submission rate cap (workflows/sec). Default: unbounded.
     #[arg(long)]
-    target_rate: Option<u64>,
+    pub target_rate: Option<u64>,
 
     /// Number of in-process Sayiir worker actors.
     #[arg(long, default_value_t = 8)]
-    workers: usize,
+    pub workers: usize,
 
     /// Worker poll interval (milliseconds).
     #[arg(long, default_value_t = 5)]
-    poll_ms: u64,
+    pub poll_ms: u64,
 
     /// Tasks fetched per worker poll (batch size).
     #[arg(long, default_value_t = 64)]
-    batch_size: usize,
+    pub batch_size: usize,
 }
 
 #[derive(Parser, Debug)]
-struct SleepingGiantsArgs {
-    /// Total number of workflows to submit.
-    #[arg(long, default_value_t = 500_000)]
-    workflows: usize,
-
-    /// Submission concurrency.
-    #[arg(long, default_value_t = 512)]
-    concurrency: usize,
-
-    /// Sleep duration per workflow (seconds).
-    #[arg(long, default_value_t = 60)]
-    sleep_secs: u64,
-
-    /// Number of in-process Sayiir worker actors.
-    #[arg(long, default_value_t = 16)]
-    workers: usize,
-
-    /// Worker poll interval (milliseconds).
-    #[arg(long, default_value_t = 50)]
-    poll_ms: u64,
-
-    /// Tasks fetched per worker poll (batch size).
+pub struct FanoutArgs {
+    #[arg(long, default_value_t = 10_000)]
+    pub workflows: usize,
+    #[arg(long, default_value_t = 100)]
+    pub warmup_workflows: usize,
+    /// Number of parallel children spawned per workflow. Standard
+    /// sweep is {10, 100, 1000}.
+    #[arg(long, default_value_t = 10)]
+    pub children: usize,
     #[arg(long, default_value_t = 128)]
-    batch_size: usize,
+    pub concurrency: usize,
+    #[arg(long, default_value_t = 8)]
+    pub workers: usize,
+    #[arg(long, default_value_t = 5)]
+    pub poll_ms: u64,
+    #[arg(long, default_value_t = 128)]
+    pub batch_size: usize,
+}
 
-    /// SIGKILL the runtime mid-sleep then restart it (durability demo).
+#[derive(Parser, Debug)]
+pub struct SignalDrivenArgs {
+    #[arg(long, default_value_t = 10_000)]
+    pub workflows: usize,
+    #[arg(long, default_value_t = 128)]
+    pub concurrency: usize,
+    #[arg(long, default_value_t = 8)]
+    pub workers: usize,
+    #[arg(long, default_value_t = 5)]
+    pub poll_ms: u64,
+    #[arg(long, default_value_t = 64)]
+    pub batch_size: usize,
+    /// Timeout (seconds) applied to the `wait_for_signal` node. The
+    /// driver sends the signal almost immediately, so this is just a
+    /// safety net; set well above the run length.
+    #[arg(long, default_value_t = 600)]
+    pub signal_timeout_secs: u64,
+}
+
+#[derive(Parser, Debug)]
+pub struct SleepingGiantsArgs {
+    #[arg(long, default_value_t = 500_000)]
+    pub workflows: usize,
+    #[arg(long, default_value_t = 512)]
+    pub concurrency: usize,
+    #[arg(long, default_value_t = 60)]
+    pub sleep_secs: u64,
+    #[arg(long, default_value_t = 16)]
+    pub workers: usize,
+    #[arg(long, default_value_t = 50)]
+    pub poll_ms: u64,
+    #[arg(long, default_value_t = 128)]
+    pub batch_size: usize,
     #[arg(long)]
-    demo_restart: bool,
+    pub demo_restart: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct SweepArgs {
+    /// Scenario subcommand name to run per point (e.g. `linear`).
+    #[arg(long)]
+    pub scenario: String,
+    /// Axis to vary. Supported: `workers`, `concurrency`, `batch_size`,
+    /// `poll_ms`, `steps`, `children`.
+    #[arg(long, default_value = "workers")]
+    pub axis: String,
+    /// Comma-separated values of the axis (e.g. `1,2,4,8,16,32`).
+    #[arg(long, default_value = "1,2,4,8,16,32")]
+    pub values: String,
+    /// Extra arguments passed through to each scenario invocation
+    /// verbatim (use `--` separator on the command line). Useful for
+    /// pinning workflow count or warmup across all sweep points.
+    #[arg(last = true)]
+    pub extra_args: Vec<String>,
+}
+
+#[derive(Parser, Debug)]
+pub struct CompareArgs {
+    /// Scenario name. Used to locate baseline + filter candidate.
+    #[arg(long)]
+    pub scenario: String,
+    /// Path to the baseline JSON. Defaults to
+    /// `benchmarks/baselines/<scenario>.json`.
+    #[arg(long)]
+    pub baseline: Option<String>,
+    /// Path to the candidate JSON. Defaults to the most-recent file
+    /// in `--results-dir` whose name starts with the scenario name.
+    #[arg(long)]
+    pub candidate: Option<String>,
+    /// Allowed throughput drop, expressed as a positive percentage.
+    /// Default 10% — single-run noise on a laptop is ±5–10% so we
+    /// don't gate tighter than that without a sweep.
+    #[arg(long, default_value_t = 10.0)]
+    pub throughput_pct: f64,
+    /// Allowed latency increase, expressed as a positive percentage.
+    #[arg(long, default_value_t = 25.0)]
+    pub latency_pct: f64,
+    /// Print the comparison table but always exit 0. Useful for CI
+    /// where we want diagnostics without blocking the merge.
+    #[arg(long)]
+    pub report_only: bool,
+    /// Override directory the candidate is looked up in.
+    #[arg(long, default_value = "results")]
+    pub results_dir: String,
 }
 
 #[tokio::main]
@@ -119,8 +266,16 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cli.results_dir)
         .with_context(|| format!("creating results directory {}", cli.results_dir))?;
 
-    metrics::install_prometheus_exporter(&cli.metrics_addr)
-        .context("installing prometheus exporter")?;
+    // Only install the exporter for live runs. `compare` and `sweep`
+    // skip it: `compare` is pure local IO, and `sweep` shells out to
+    // bench subprocesses that each install their own exporter on
+    // different ports (or rebind on the same port across runs — we
+    // intentionally serialize sweep points so this Just Works).
+    let install_metrics = !matches!(cli.scenario, Scenario::Compare(_) | Scenario::Sweep(_));
+    if install_metrics {
+        metrics::install_prometheus_exporter(&cli.metrics_addr)
+            .context("installing prometheus exporter")?;
+    }
 
     let common = CommonContext {
         postgres_url: cli.postgres_url,
@@ -130,8 +285,12 @@ async fn main() -> Result<()> {
     };
 
     let result = match cli.scenario {
-        Scenario::Throughput(args) => workloads::throughput::run(common, args).await,
+        Scenario::Linear(args) => workloads::linear::run(common, args).await,
+        Scenario::Fanout(args) => workloads::fanout::run(common, args).await,
+        Scenario::SignalDriven(args) => workloads::signal_driven::run(common, args).await,
         Scenario::SleepingGiants(args) => workloads::sleeping::run(common, args).await,
+        Scenario::Sweep(args) => sweep::run(common, args).await,
+        Scenario::Compare(args) => compare::run(args),
     };
 
     sayiir_runtime::trace_context::shutdown_tracing();
@@ -147,6 +306,7 @@ pub struct CommonContext {
 }
 
 impl CommonContext {
+    #[must_use]
     pub fn poll_interval(ms: u64) -> Duration {
         Duration::from_millis(ms)
     }
