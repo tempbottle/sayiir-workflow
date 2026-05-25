@@ -153,8 +153,8 @@ pub async fn run(ctx: crate::CommonContext, args: FanoutArgs) -> Result<()> {
     let mut stale_completions = 0usize;
     let mut samples: Vec<(Duration, usize)> = Vec::new();
 
-    let collect_deadline = Instant::now()
-        + Duration::from_secs(120 + (args.workflows as u64 * children as u64 / 200));
+    let collect_deadline =
+        Instant::now() + Duration::from_secs(120 + (args.workflows as u64 * children as u64 / 200));
     let mut sample_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_millis(100),
         Duration::from_millis(100),
@@ -229,7 +229,10 @@ pub async fn run(ctx: crate::CommonContext, args: FanoutArgs) -> Result<()> {
 
     let steps_per_workflow = 1 + children + 1; // pickup + branches + join
     let mut latency = BTreeMap::new();
-    latency.insert("e2e".to_string(), LatencyBlock::from_histogram_ns(&e2e_hist));
+    latency.insert(
+        "e2e".to_string(),
+        LatencyBlock::from_histogram_ns(&e2e_hist),
+    );
     latency.insert(
         "pickup".to_string(),
         LatencyBlock::from_histogram_ns(&pickup_hist),
@@ -315,11 +318,7 @@ async fn drain_burst(
                 let workflow = Arc::clone(&workflow);
                 async move {
                     client
-                        .submit(
-                            workflow.as_ref(),
-                            format!("fo-warmup-{i}"),
-                            State { id: i },
-                        )
+                        .submit(workflow.as_ref(), format!("fo-warmup-{i}"), State { id: i })
                         .await
                         .map(|_| ())
                         .map_err(anyhow::Error::from)
@@ -429,7 +428,10 @@ fn best_window(samples: &[(Duration, usize)], target: Duration) -> f64 {
         while samples[right].0.saturating_sub(samples[left].0) > window {
             left += 1;
         }
-        let dt = samples[right].0.saturating_sub(samples[left].0).as_secs_f64();
+        let dt = samples[right]
+            .0
+            .saturating_sub(samples[left].0)
+            .as_secs_f64();
         if dt > 0.0 {
             let dn = (samples[right].1 - samples[left].1) as f64;
             let rate = dn / dt;

@@ -144,7 +144,9 @@ pub async fn run(ctx: crate::CommonContext, args: SleepingGiantsArgs) -> Result<
             tracing::warn!(completed, expected = args.workflows, "storm deadline hit");
             break;
         }
-        let recv_timeout = next_sample.saturating_duration_since(now).max(Duration::from_millis(50));
+        let recv_timeout = next_sample
+            .saturating_duration_since(now)
+            .max(Duration::from_millis(50));
         match tokio::time::timeout(recv_timeout, rx.recv()).await {
             Ok(Some(c)) => {
                 completed += 1;

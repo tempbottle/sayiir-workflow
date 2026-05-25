@@ -190,7 +190,9 @@ pub async fn run(ctx: crate::CommonContext, args: SignalDrivenArgs) -> Result<()
                         .map_or_else(Bytes::new, std::convert::Into::into);
                     let sent_ns = bench_start.elapsed().as_nanos() as u64;
                     signal_sent_times[idx as usize].store(sent_ns, Ordering::Relaxed);
-                    if let Err(e) = client.send_event(&format!("sd-{idx}"), SIGNAL_NAME, bytes).await
+                    if let Err(e) = client
+                        .send_event(&format!("sd-{idx}"), SIGNAL_NAME, bytes)
+                        .await
                     {
                         tracing::warn!(idx, error = %e, "signal send failed");
                     }
@@ -206,8 +208,7 @@ pub async fn run(ctx: crate::CommonContext, args: SignalDrivenArgs) -> Result<()
     let mut signal_resume_hist = Histogram::<u64>::new_with_bounds(1_000, HISTOGRAM_HIGH_NS, 3)?;
     let mut completed = 0usize;
     let mut samples: Vec<(Duration, usize)> = Vec::new();
-    let collect_deadline =
-        Instant::now() + Duration::from_secs(120 + args.workflows as u64 / 100);
+    let collect_deadline = Instant::now() + Duration::from_secs(120 + args.workflows as u64 / 100);
     let mut sample_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_millis(100),
         Duration::from_millis(100),
@@ -264,7 +265,10 @@ pub async fn run(ctx: crate::CommonContext, args: SignalDrivenArgs) -> Result<()
     let wakeup_drops = wakeup_drops_total().saturating_sub(wakeup_drops_baseline);
 
     let mut latency = BTreeMap::new();
-    latency.insert("e2e".to_string(), LatencyBlock::from_histogram_ns(&e2e_hist));
+    latency.insert(
+        "e2e".to_string(),
+        LatencyBlock::from_histogram_ns(&e2e_hist),
+    );
     latency.insert(
         "pickup".to_string(),
         LatencyBlock::from_histogram_ns(&pickup_hist),
@@ -400,7 +404,10 @@ fn best_window(samples: &[(Duration, usize)], target: Duration) -> f64 {
         while samples[right].0.saturating_sub(samples[left].0) > window {
             left += 1;
         }
-        let dt = samples[right].0.saturating_sub(samples[left].0).as_secs_f64();
+        let dt = samples[right]
+            .0
+            .saturating_sub(samples[left].0)
+            .as_secs_f64();
         if dt > 0.0 {
             let dn = (samples[right].1 - samples[left].1) as f64;
             let rate = dn / dt;

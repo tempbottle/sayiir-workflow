@@ -74,7 +74,14 @@ pub fn run(args: CompareArgs) -> Result<()> {
         regressed: Some(throughput_delta_pct < -throughput_thresh_pct),
     });
 
-    for name in ["e2e", "pickup", "execution", "makespan", "signal_resume", "wake"] {
+    for name in [
+        "e2e",
+        "pickup",
+        "execution",
+        "makespan",
+        "signal_resume",
+        "wake",
+    ] {
         let Some(b) = baseline.results.latency_ms.get(name) else {
             continue;
         };
@@ -192,9 +199,12 @@ fn latest_in_dir(dir: &std::path::Path, scenario: &str) -> Result<PathBuf> {
             _ => newest = Some((mtime, path.clone())),
         }
     }
-    newest
-        .map(|(_, p)| p)
-        .ok_or_else(|| anyhow::anyhow!("no candidate found for scenario {scenario} in {}", dir.display()))
+    newest.map(|(_, p)| p).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no candidate found for scenario {scenario} in {}",
+            dir.display()
+        )
+    })
 }
 
 fn render_text(baseline: &Report, candidate: &Report, rows: &[ComparisonRow]) -> String {

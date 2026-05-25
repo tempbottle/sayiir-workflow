@@ -195,9 +195,14 @@ where
         // Statement 2 — blob + outputs in one round-trip.
         //
         // The lock from statement 1 is still held in this same tx, so
-        // both reads observe the version we just locked. We could
-        // expand to fetch via correlated subqueries; using a single
-        // CTE for outputs avoids scanning sayiir_workflow_tasks twice.
+        // both reads observe the version we just locked. The two
+        // `array_agg` calls MUST share the same `ORDER BY task_id` —
+        // without it, PG is free to interleave the aggregates so the
+        // `task_ids[i]` index no longer aligns with `outputs[i]`,
+        // silently mis-associating each output with the wrong task.
+        // Caught by the fanout warmup, where 10 parallel branches
+        // race `save_task_result` and each call hydrates a mis-paired
+        // outputs map.
         let row = sqlx::query(
             "WITH outputs AS (
                  SELECT task_id, output FROM sayiir_workflow_tasks
@@ -208,9 +213,9 @@ where
              SELECT
                  (SELECT data FROM sayiir_workflow_snapshot_history
                   WHERE instance_id = $1 AND version = $2) AS data,
-                 COALESCE((SELECT array_agg(task_id) FROM outputs),
+                 COALESCE((SELECT array_agg(task_id ORDER BY task_id) FROM outputs),
                           ARRAY[]::bytea[]) AS task_ids,
-                 COALESCE((SELECT array_agg(output) FROM outputs),
+                 COALESCE((SELECT array_agg(output  ORDER BY task_id) FROM outputs),
                           ARRAY[]::bytea[]) AS outputs",
         )
         .bind(instance_id)

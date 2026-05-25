@@ -178,8 +178,7 @@ pub async fn run(ctx: crate::CommonContext, args: LinearArgs) -> Result<()> {
     let mut samples: Vec<(Duration, usize)> = Vec::new();
 
     // Deadline scales with workflow count: 60 s base + ~1 s per 100 workflows.
-    let collect_deadline =
-        Instant::now() + Duration::from_secs(60 + (args.workflows as u64 / 100));
+    let collect_deadline = Instant::now() + Duration::from_secs(60 + (args.workflows as u64 / 100));
 
     let mut sample_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_millis(100),
@@ -259,7 +258,10 @@ pub async fn run(ctx: crate::CommonContext, args: LinearArgs) -> Result<()> {
     let wakeup_drops = wakeup_drops_total().saturating_sub(wakeup_drops_baseline);
 
     let mut latency = BTreeMap::new();
-    latency.insert("e2e".to_string(), LatencyBlock::from_histogram_ns(&e2e_hist));
+    latency.insert(
+        "e2e".to_string(),
+        LatencyBlock::from_histogram_ns(&e2e_hist),
+    );
     latency.insert(
         "pickup".to_string(),
         LatencyBlock::from_histogram_ns(&pickup_hist),
@@ -269,7 +271,13 @@ pub async fn run(ctx: crate::CommonContext, args: LinearArgs) -> Result<()> {
         LatencyBlock::from_histogram_ns(&exec_hist),
     );
 
-    print_summary(args.workflows, completed, total_elapsed, sustained, &latency);
+    print_summary(
+        args.workflows,
+        completed,
+        total_elapsed,
+        sustained,
+        &latency,
+    );
 
     let pg_info = crate::report::collect_postgres_info(&pool).await;
     let prom = crate::report::prometheus_snapshot(&ctx.prometheus_url).await;
@@ -542,7 +550,10 @@ fn best_window(samples: &[(Duration, usize)], target: Duration) -> f64 {
         while samples[right].0.saturating_sub(samples[left].0) > window {
             left += 1;
         }
-        let dt = samples[right].0.saturating_sub(samples[left].0).as_secs_f64();
+        let dt = samples[right]
+            .0
+            .saturating_sub(samples[left].0)
+            .as_secs_f64();
         if dt > 0.0 {
             let dn = (samples[right].1 - samples[left].1) as f64;
             let rate = dn / dt;

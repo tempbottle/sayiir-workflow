@@ -73,7 +73,11 @@ struct Cli {
     prometheus_url: String,
 
     /// Bind address for the driver's Prometheus metrics scrape endpoint.
-    #[arg(long, env = "SAYIIR_BENCH_METRICS_ADDR", default_value = "0.0.0.0:9464")]
+    #[arg(
+        long,
+        env = "SAYIIR_BENCH_METRICS_ADDR",
+        default_value = "0.0.0.0:9464"
+    )]
     metrics_addr: String,
 
     /// Directory where JSON result files are written.
