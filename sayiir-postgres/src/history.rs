@@ -224,7 +224,7 @@ where
         let task_ids: Vec<Vec<u8>> = row.get("task_ids");
         let outputs_vec: Vec<Vec<u8>> = row.get("outputs");
         let mut outputs = std::collections::HashMap::with_capacity(task_ids.len());
-        for (tid_bytes, output) in task_ids.into_iter().zip(outputs_vec.into_iter()) {
+        for (tid_bytes, output) in task_ids.into_iter().zip(outputs_vec) {
             let Ok(task_id) = sayiir_core::TaskId::from_slice(&tid_bytes) else {
                 continue;
             };
