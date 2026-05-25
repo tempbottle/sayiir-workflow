@@ -56,7 +56,9 @@ where
     /// Load the most recent `InProgress` snapshot from the history table.
     ///
     /// This is the last snapshot before the workflow transitioned to a terminal
-    /// state, so it still contains `completed_tasks`.
+    /// state, so it still contains `completed_tasks` — but the on-disk blob
+    /// is outputs-stripped, so hydrate per-task outputs from
+    /// `sayiir_workflow_tasks` before returning.
     async fn load_last_in_progress_snapshot(
         &self,
         instance_id: &str,
@@ -74,7 +76,9 @@ where
         match row {
             Some(r) => {
                 let raw: &[u8] = r.get("data");
-                let snapshot = self.decode(raw)?;
+                let mut snapshot = self.decode(raw)?;
+                let outputs = crate::history::fetch_task_outputs(&self.pool, instance_id).await?;
+                snapshot.hydrate_task_outputs(outputs);
                 Ok(Some(snapshot))
             }
             None => Ok(None),

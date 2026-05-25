@@ -39,10 +39,32 @@ DROP INDEX IF EXISTS idx_snapshots_position;
 -- find_available_tasks' tag filter, but the old non-partial GIN
 -- indexed them anyway — pure write amplification for the lifetime of
 -- the workflow's row.
-DROP INDEX IF EXISTS idx_sayiir_task_tags;
-CREATE INDEX idx_sayiir_task_tags
-    ON sayiir_workflow_snapshots USING GIN (task_tags)
-    WHERE status = 'InProgress';
+--
+-- This block is idempotent against the pre-deploy recipe in the
+-- header: if the existing `idx_sayiir_task_tags` is already the
+-- partial shape we want, both arms are skipped and no
+-- AccessExclusiveLock is taken. Otherwise we drop the non-partial
+-- and build the partial inline, which DOES briefly lock the table.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = current_schema()
+          AND tablename  = 'sayiir_workflow_snapshots'
+          AND indexname  = 'idx_sayiir_task_tags'
+          AND indexdef ILIKE '%WHERE (status = ''InProgress''::text)%'
+    ) THEN
+        -- Already the partial shape; no-op.
+        NULL;
+    ELSE
+        EXECUTE 'DROP INDEX IF EXISTS idx_sayiir_task_tags';
+        EXECUTE $ddl$
+            CREATE INDEX idx_sayiir_task_tags
+                ON sayiir_workflow_snapshots USING GIN (task_tags)
+                WHERE status = 'InProgress'
+        $ddl$;
+    END IF;
+END $$;
 
 -- Leave 20% free space on each heap page so future row-version writes
 -- have somewhere to land in-page. Reduces page splits on updates that
