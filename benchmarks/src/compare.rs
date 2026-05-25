@@ -15,13 +15,14 @@
 //! path`. The baseline is `benchmarks/baselines/<scenario>.json` or
 //! `--baseline path`.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::CompareArgs;
 use crate::report::Report;
+use crate::{CompareArgs, CompareFormat};
 
 #[derive(Debug, Serialize)]
 struct ComparisonRow {
@@ -117,9 +118,24 @@ pub fn run(args: CompareArgs) -> Result<()> {
         regressed: None,
     });
 
-    print_table(&baseline, &candidate, &rows);
-
     let any_regressed = rows.iter().any(|r| r.regressed == Some(true));
+
+    let rendered = match args.format {
+        CompareFormat::Text => render_text(&baseline, &candidate, &rows),
+        CompareFormat::Markdown => render_markdown(
+            &baseline,
+            &candidate,
+            &rows,
+            any_regressed,
+            throughput_thresh_pct,
+            latency_thresh_pct,
+        ),
+    };
+    print!("{rendered}");
+    if let Some(path) = args.output.as_ref() {
+        std::fs::write(path, &rendered).with_context(|| format!("writing {path}"))?;
+    }
+
     if any_regressed && !args.report_only {
         anyhow::bail!(
             "regression detected vs baseline {} (threshold: throughput {:.0}%, latency {:.0}%)",
@@ -180,27 +196,110 @@ fn latest_in_dir(dir: &std::path::Path, scenario: &str) -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("no candidate found for scenario {scenario} in {}", dir.display()))
 }
 
-fn print_table(baseline: &Report, candidate: &Report, rows: &[ComparisonRow]) {
-    println!(
+fn render_text(baseline: &Report, candidate: &Report, rows: &[ComparisonRow]) -> String {
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
         "\nscenario: {}    baseline: {}    candidate: {}",
-        baseline.scenario,
-        baseline.timestamp_utc,
-        candidate.timestamp_utc,
+        baseline.scenario, baseline.timestamp_utc, candidate.timestamp_utc,
     );
-    println!(
-        "{:<32}  {:>14}  {:>14}  {:>10}  {}",
-        "metric", "baseline", "candidate", "delta %", "status"
+    let _ = writeln!(
+        s,
+        "{:<32}  {:>14}  {:>14}  {:>10}  status",
+        "metric", "baseline", "candidate", "delta %",
     );
-    println!("{}", "-".repeat(90));
+    let _ = writeln!(s, "{}", "-".repeat(90));
     for r in rows {
         let status = match r.regressed {
             Some(true) => "REGRESSED",
             Some(false) => "ok",
             None => "info",
         };
-        println!(
+        let _ = writeln!(
+            s,
             "{:<32}  {:>14.3}  {:>14.3}  {:>9.2}%  {}",
             r.metric, r.baseline, r.candidate, r.delta_pct, status,
         );
     }
+    s
+}
+
+/// Render a GitHub-flavored-markdown block suitable for posting to a
+/// PR via `marocchino/sticky-pull-request-comment`. The first line is
+/// a status header (`### ✅` / `### ⚠️`) so the comment immediately
+/// reads at-a-glance; the table mirrors the text format with a
+/// signed-delta column. Hidden HTML comment at the top lets the CI
+/// workflow scope this body to one scenario when stitching multi-
+/// scenario comments together.
+fn render_markdown(
+    baseline: &Report,
+    candidate: &Report,
+    rows: &[ComparisonRow],
+    any_regressed: bool,
+    throughput_pct: f64,
+    latency_pct: f64,
+) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "<!-- sayiir-bench-compare:{} -->", candidate.scenario);
+    let header_icon = if any_regressed { "⚠️" } else { "✅" };
+    let header_text = if any_regressed {
+        "regression detected"
+    } else {
+        "within thresholds"
+    };
+    let _ = writeln!(
+        s,
+        "### {} `{}` — {}",
+        header_icon, candidate.scenario, header_text,
+    );
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "Thresholds: throughput drop ≤ {throughput_pct:.0}%, latency rise ≤ {latency_pct:.0}%.",
+    );
+    let _ = writeln!(
+        s,
+        "Baseline: `{}` · Candidate: `{}`",
+        baseline.timestamp_utc, candidate.timestamp_utc,
+    );
+    let _ = writeln!(s);
+    let _ = writeln!(s, "| Metric | Baseline | Candidate | Δ | Status |");
+    let _ = writeln!(s, "|---|---:|---:|---:|:---:|");
+    for r in rows {
+        let status = match r.regressed {
+            Some(true) => "🔴 regressed",
+            Some(false) => "🟢 ok",
+            None => "ℹ️ info",
+        };
+        // Sign-prefix the delta so reviewers can scan for the worst rows.
+        let delta = if r.delta_pct.abs() < 0.005 {
+            "0.00%".to_string()
+        } else if r.delta_pct >= 0.0 {
+            format!("+{:.2}%", r.delta_pct)
+        } else {
+            format!("{:.2}%", r.delta_pct)
+        };
+        let _ = writeln!(
+            s,
+            "| `{}` | {:.3} | {:.3} | {} | {} |",
+            r.metric, r.baseline, r.candidate, delta, status,
+        );
+    }
+    let _ = writeln!(s);
+    // Hardware footer is what makes this comparable across PRs — the
+    // CI runner is the same image, but expressing it inline avoids
+    // "wait, was the baseline on the M2 mac?" confusion.
+    let _ = writeln!(
+        s,
+        "<sub>Hardware: {}/{} · {} cores · pg `{}`</sub>",
+        candidate.hardware.os,
+        candidate.hardware.arch,
+        candidate.hardware.cores,
+        candidate
+            .postgres
+            .version
+            .as_deref()
+            .map_or("unknown", |v| v.split_whitespace().nth(1).unwrap_or(v)),
+    );
+    s
 }

@@ -15,9 +15,9 @@
 //! Meta-commands:
 //!
 //! * `sweep`   — invoke a scenario N times varying one axis, write a
-//!               Markdown summary table next to the per-point JSONs.
+//!   Markdown summary table next to the per-point JSONs.
 //! * `compare` — diff a fresh run against a committed baseline; exit
-//!               non-zero on regression beyond a configurable threshold.
+//!   non-zero on regression beyond a configurable threshold.
 
 #![deny(clippy::pedantic)]
 #![allow(
@@ -256,6 +256,24 @@ pub struct CompareArgs {
     /// Override directory the candidate is looked up in.
     #[arg(long, default_value = "results")]
     pub results_dir: String,
+    /// Output shape. `text` (default) is the plain console table;
+    /// `markdown` emits a PR-comment-ready block with a status header
+    /// and a GFM table the bench-pr-comment CI workflow posts via
+    /// `marocchino/sticky-pull-request-comment`. JSON output is
+    /// available via `--output-json` separately.
+    #[arg(long, value_enum, default_value_t = CompareFormat::Text)]
+    pub format: CompareFormat,
+    /// Optional file path: write the rendered output to this file in
+    /// addition to stdout. CI uses this to capture per-scenario
+    /// markdown without parsing stdout.
+    #[arg(long)]
+    pub output: Option<String>,
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+pub enum CompareFormat {
+    Text,
+    Markdown,
 }
 
 #[tokio::main]
