@@ -19,6 +19,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use comfy_table::{Cell, CellAlignment, ContentArrangement, Table, presets};
 use serde::Serialize;
 
 use crate::report::Report;
@@ -263,8 +264,22 @@ fn render_markdown(
         baseline.timestamp_utc, candidate.timestamp_utc,
     );
     let _ = writeln!(s);
-    let _ = writeln!(s, "| Metric | Baseline | Candidate | Δ | Status |");
-    let _ = writeln!(s, "|---|---:|---:|---:|:---:|");
+
+    // Body table — comfy-table with `ASCII_MARKDOWN` preset renders
+    // GFM-compatible pipe tables, including the separator row. We set
+    // per-column alignment (metric left, numerics right, status
+    // center) — alignment that hand-rolled `writeln!` chains can't
+    // easily encode without manual `:---:` math per row.
+    let mut t = Table::new();
+    t.load_preset(presets::ASCII_MARKDOWN)
+        .set_content_arrangement(ContentArrangement::Disabled);
+    t.set_header(vec![
+        Cell::new("Metric").set_alignment(CellAlignment::Left),
+        Cell::new("Baseline").set_alignment(CellAlignment::Right),
+        Cell::new("Candidate").set_alignment(CellAlignment::Right),
+        Cell::new("Δ").set_alignment(CellAlignment::Right),
+        Cell::new("Status").set_alignment(CellAlignment::Center),
+    ]);
     for r in rows {
         let status = match r.regressed {
             Some(true) => "🔴 regressed",
@@ -279,13 +294,17 @@ fn render_markdown(
         } else {
             format!("{:.2}%", r.delta_pct)
         };
-        let _ = writeln!(
-            s,
-            "| `{}` | {:.3} | {:.3} | {} | {} |",
-            r.metric, r.baseline, r.candidate, delta, status,
-        );
+        t.add_row(vec![
+            Cell::new(format!("`{}`", r.metric)).set_alignment(CellAlignment::Left),
+            Cell::new(format!("{:.3}", r.baseline)).set_alignment(CellAlignment::Right),
+            Cell::new(format!("{:.3}", r.candidate)).set_alignment(CellAlignment::Right),
+            Cell::new(delta).set_alignment(CellAlignment::Right),
+            Cell::new(status).set_alignment(CellAlignment::Center),
+        ]);
     }
+    let _ = writeln!(s, "{t}");
     let _ = writeln!(s);
+
     // Hardware footer is what makes this comparable across PRs — the
     // CI runner is the same image, but expressing it inline avoids
     // "wait, was the baseline on the M2 mac?" confusion.
