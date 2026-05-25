@@ -11,7 +11,7 @@ use sqlx::Row;
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
-use crate::history::{append_history, snapshot_hash};
+use crate::history::append_history;
 use crate::wakeup::emit_task_ready;
 
 impl<C> SignalStore for PostgresBackend<C>
@@ -234,8 +234,7 @@ where
         let requested_by: Option<String> = signal_row.get("requested_by");
         snapshot.mark_cancelled(reason, requested_by, interrupted_at_task);
 
-        let data = self.encode(&snapshot)?;
-        let data_hash = snapshot_hash(&data);
+        let (data, data_hash) = self.encode_blob(&snapshot)?;
         let status = snapshot.state.as_ref();
         let error = snapshot.error_message().map(ToString::to_string);
         let pos_kind = snapshot.position_kind();
@@ -346,8 +345,7 @@ where
         let pause_request = PauseRequest::new(reason, requested_by);
         snapshot.mark_paused(&pause_request);
 
-        let data = self.encode(&snapshot)?;
-        let data_hash = snapshot_hash(&data);
+        let (data, data_hash) = self.encode_blob(&snapshot)?;
         let status = snapshot.state.as_ref();
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
@@ -426,8 +424,7 @@ where
 
         snapshot.mark_unpaused();
 
-        let data = self.encode(&snapshot)?;
-        let data_hash = snapshot_hash(&data);
+        let (data, data_hash) = self.encode_blob(&snapshot)?;
         let status = snapshot.state.as_ref();
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);

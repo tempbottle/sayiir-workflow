@@ -7,7 +7,6 @@ use sqlx::Row;
 
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
-use crate::history::snapshot_hash;
 use crate::wakeup::{TASK_READY_CHANNEL, build_task_ready_payload};
 
 impl<C> SnapshotStore for PostgresBackend<C>
@@ -30,12 +29,7 @@ where
     #[allow(clippy::too_many_lines)]
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         tracing::debug!("saving snapshot");
-        // Outputs live in `sayiir_workflow_tasks.output`; the blob carries
-        // only control state. Hydrate happens on every load path.
-        let mut stripped = snapshot.clone();
-        stripped.strip_task_outputs();
-        let data = self.encode(&stripped)?;
-        let data_hash = snapshot_hash(&data);
+        let (data, data_hash) = self.encode_blob(snapshot)?;
         let status = snapshot.state.as_ref();
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
@@ -207,12 +201,7 @@ where
         let output_bytes = output.clone();
         snapshot.mark_task_completed(*task_id, output);
 
-        // The newly-completed output is written below to
-        // `sayiir_workflow_tasks.output`; strip from the blob.
-        let mut stripped = snapshot.clone();
-        stripped.strip_task_outputs();
-        let data = self.encode(&stripped)?;
-        let data_hash = snapshot_hash(&data);
+        let (data, data_hash) = self.encode_blob(&snapshot)?;
         let status = snapshot.state.as_ref();
         let current_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let current: Option<&[u8]> = current_bytes.as_ref().map(<[u8; 32]>::as_slice);
