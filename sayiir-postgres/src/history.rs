@@ -164,16 +164,33 @@ where
         tx: &mut PgConnection,
         instance_id: &str,
     ) -> Result<Option<(WorkflowSnapshot, i32)>, BackendError> {
-        // Lock + blob fetch in one round-trip via the history JOIN.
-        // `FOR UPDATE OF s` locks only the snapshot row (not the
-        // immutable history row).
-        let row = sqlx::query(&format!(
-            "SELECT s.history_version, h.data
-             FROM sayiir_workflow_snapshots s
-             {HISTORY_JOIN}
-             WHERE s.instance_id = $1
-             FOR UPDATE OF s"
-        ))
+        // IMPORTANT — must be two separate statements, not one JOIN:
+        //
+        // Under READ COMMITTED, `SELECT s.history_version, h.data FROM s
+        // JOIN h ... WHERE s.instance_id = $1 FOR UPDATE OF s` interacts
+        // badly with concurrent writers. PG's EvalPlanQual re-evaluates
+        // the locked s row's WHERE clause when the wait releases, but
+        // does NOT re-run the JOIN against the updated s row — the JOIN
+        // result is fixed at scan time against the *original* snapshot.
+        // If a concurrent transaction bumps `s.history_version` and
+        // inserts the matching `h.version` row while we're waiting on
+        // the FOR UPDATE, our re-checked s row has the new
+        // `history_version` but the JOIN was paired with the OLD
+        // `h.version`, so PG considers the row "no longer matching"
+        // and returns 0 rows. The caller misreads this as
+        // `NotFound` and the workflow goes Failed even though the row
+        // is right there in the DB. Repro:
+        // `multi_stage_scatter_gather` with 4 parallel branches racing
+        // `save_task_result`.
+        //
+        // The fix: take the FOR UPDATE on s alone, THEN read h with
+        // the locked `history_version`. Both reads run under the same
+        // transaction so the lock holds across the second query.
+        let row = sqlx::query(
+            "SELECT history_version FROM sayiir_workflow_snapshots
+             WHERE instance_id = $1
+             FOR UPDATE",
+        )
         .bind(instance_id)
         .fetch_optional(&mut *tx)
         .await
@@ -181,7 +198,7 @@ where
 
         let Some(row) = row else { return Ok(None) };
         let history_version: i32 = row.get("history_version");
-        let data: Vec<u8> = row.get("data");
+        let data = self.fetch_blob(&mut *tx, instance_id, history_version).await?;
         let mut snapshot = self.decode(&data)?;
         let outputs = fetch_task_outputs(&mut *tx, instance_id).await?;
         snapshot.hydrate_task_outputs(outputs);

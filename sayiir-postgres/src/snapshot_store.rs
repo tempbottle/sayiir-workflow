@@ -196,7 +196,7 @@ where
         tracing::debug!("saving task result");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
-        // FOR UPDATE OF s serialises read-modify-write across this path
+        // FOR UPDATE on s serialises read-modify-write across this path
         // and signal_store's mutators — TaskClaim only protects against
         // peer workers, not against concurrent check_and_cancel.
         let (mut snapshot, prev_history_version) = self
