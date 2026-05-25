@@ -114,6 +114,13 @@ where
                 INSERT INTO sayiir_workflow_tasks (instance_id, task_id, status, started_at)
                 SELECT $1, $4, 'active', now()
                 WHERE $4 IS NOT NULL AND NOT $7
+                  -- Skip when the just-completed task IS the current task
+                  -- (final task in a chain has next=None, so position stays
+                  -- on it and current_task_id == last_completed_task_id).
+                  -- The task_output CTE below already UPSERTs that row;
+                  -- this CTE doing it too trips PG`s rule that ON CONFLICT
+                  -- DO UPDATE cannot affect a row twice in one statement.
+                  AND $4 IS DISTINCT FROM $18
                 ON CONFLICT (instance_id, task_id) DO UPDATE SET
                     status = CASE
                         WHEN sayiir_workflow_tasks.status = 'completed' THEN sayiir_workflow_tasks.status
