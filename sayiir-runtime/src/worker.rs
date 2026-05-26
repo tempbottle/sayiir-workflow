@@ -1097,7 +1097,36 @@ where
         let continuation = workflow.continuation();
         let task_index = workflow.task_index();
         let task_id = available_task.task_id;
-        let input = available_task.input.clone();
+        // If this task is the entry of a Fork's join, rebuild the
+        // `NamedBranchResults` envelope the join body deserialises into
+        // `BranchOutputs`. The PooledWorker dispatch path otherwise
+        // hands the join the LAST branch's output (whatever
+        // `get_last_task_output` saw), which fails to deserialise as
+        // soon as any branch result is read by id. The in-process
+        // runner builds this through `resolve_join`; for the worker
+        // path we have to do it explicitly because each task is its
+        // own dispatch and there is no in-memory `branch_results`.
+        let input = match Self::find_fork_branches_for_join(continuation, &task_id) {
+            Some(branches) => {
+                let build = || -> Result<Bytes, crate::error::RuntimeError> {
+                    let mut results = Vec::with_capacity(branches.len());
+                    for branch in branches {
+                        let branch_name = branch.id().to_string();
+                        let branch_tid = sayiir_core::TaskId::from(branch_name.as_str());
+                        let output = snapshot
+                            .get_task_result_bytes(&branch_tid)
+                            .ok_or_else(|| WorkflowError::TaskNotFound(branch_name.clone()))?;
+                        results.push((branch_name, output));
+                    }
+                    crate::execution::serialize_branch_results(&results, workflow.codec().as_ref())
+                };
+                match build() {
+                    Ok(bytes) => bytes,
+                    Err(e) => return ExecutionOutcome::TaskError(e),
+                }
+            }
+            None => available_task.input.clone(),
+        };
         // Resolve human-readable task name from the prebuilt index for the
         // task context exposed to user code (no tree walk, no rehashing).
         let indexed_meta = task_index.get(&task_id);
@@ -1598,6 +1627,74 @@ where
         }
     }
 
+    /// If `task_id` is the entry task of a `Fork`'s join continuation,
+    /// return the slice of branches whose outputs feed the join. The
+    /// `PooledWorker` dispatches each task with `available_task.input`
+    /// set to the previous task's output — for a join, that's just one
+    /// branch's output, not the `NamedBranchResults` the join body
+    /// expects. Callers use this to rebuild the join input from
+    /// `snapshot.completed_tasks` before invoking the join task.
+    fn find_fork_branches_for_join<'a>(
+        continuation: &'a WorkflowContinuation,
+        task_id: &sayiir_core::TaskId,
+    ) -> Option<&'a [Arc<WorkflowContinuation>]> {
+        match continuation {
+            WorkflowContinuation::Task { next, .. }
+            | WorkflowContinuation::Delay { next, .. }
+            | WorkflowContinuation::AwaitSignal { next, .. } => next
+                .as_deref()
+                .and_then(|n| Self::find_fork_branches_for_join(n, task_id)),
+            WorkflowContinuation::Fork { branches, join, .. } => {
+                if let Some(join_cont) = join {
+                    let join_first = sayiir_core::TaskId::from(join_cont.first_task_id());
+                    if join_first == *task_id {
+                        return Some(&branches[..]);
+                    }
+                    if let Some(b) = Self::find_fork_branches_for_join(join_cont, task_id) {
+                        return Some(b);
+                    }
+                }
+                for branch in branches {
+                    if let Some(b) = Self::find_fork_branches_for_join(branch, task_id) {
+                        return Some(b);
+                    }
+                }
+                None
+            }
+            WorkflowContinuation::Branch {
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                for branch_cont in branches.values() {
+                    if let Some(b) = Self::find_fork_branches_for_join(branch_cont, task_id) {
+                        return Some(b);
+                    }
+                }
+                if let Some(def) = default
+                    && let Some(b) = Self::find_fork_branches_for_join(def, task_id)
+                {
+                    return Some(b);
+                }
+                next.as_deref()
+                    .and_then(|n| Self::find_fork_branches_for_join(n, task_id))
+            }
+            WorkflowContinuation::Loop { body, next, .. } => {
+                Self::find_fork_branches_for_join(body, task_id).or_else(|| {
+                    next.as_deref()
+                        .and_then(|n| Self::find_fork_branches_for_join(n, task_id))
+                })
+            }
+            WorkflowContinuation::ChildWorkflow { child, next, .. } => {
+                Self::find_fork_branches_for_join(child, task_id).or_else(|| {
+                    next.as_deref()
+                        .and_then(|n| Self::find_fork_branches_for_join(n, task_id))
+                })
+            }
+        }
+    }
+
     /// Find a task function in the workflow continuation and return a reference.
     ///
     /// Tree-walk predicate: does `task_id` appear anywhere inside `continuation`?
@@ -1867,13 +1964,48 @@ where
                 }
             }
             WorkflowContinuation::Fork { branches, join, .. } => {
-                // Check if any branch task completed
+                // First let recursion advance position WITHIN a branch (for
+                // multi-task branch chains) or within the join continuation.
                 for branch in branches {
                     Self::update_position_after_task(branch, completed_task_id, snapshot)?;
                 }
-                // Check join
                 if let Some(join_cont) = join {
                     Self::update_position_after_task(join_cont, completed_task_id, snapshot)?;
+                }
+
+                // If recursion didn't move the position off the just-completed
+                // task, we finished a branch's terminal node — the inner Task
+                // arm has no `next` to advance to. Drive the fork forward at
+                // this level: pick the next branch that hasn't started, or
+                // step into the join when every branch is done. Without this
+                // step, single-Task branches (the common fan-out shape) leave
+                // the snapshot pinned to `AtTask(branch_n)` forever and the
+                // next dispatch just re-discovers the same already-completed
+                // task — workflow stalls indefinitely.
+                let still_at_completed = snapshot
+                    .current_task_id()
+                    .is_some_and(|c| c == *completed_task_id);
+                if !still_at_completed {
+                    return Ok(());
+                }
+
+                // Sequential branch execution: the first branch whose entry
+                // task has no result yet is where we resume. Matches
+                // `collect_cached_branches`' lookup so the two views of "branch
+                // is done" stay in sync.
+                for branch in branches {
+                    let first_tid = sayiir_core::TaskId::from(branch.first_task_id());
+                    if snapshot.get_task_result(&first_tid).is_none() {
+                        Self::set_position_at(branch, snapshot)?;
+                        return Ok(());
+                    }
+                }
+
+                // Every branch finished — advance to the join. If the fork has
+                // no join, leave the position at the last completed task and
+                // let `is_workflow_complete` mark the workflow done.
+                if let Some(join_cont) = join {
+                    Self::set_position_at(join_cont, snapshot)?;
                 }
             }
             WorkflowContinuation::Branch {
