@@ -2,10 +2,17 @@
 --
 -- BREAKING: workflows running across this migration must be drained
 -- and restarted. Pre-migration history rows have a NULL `data_hash`
--- and cannot be resolved by hash once the KV-offload cutover lands;
--- operators with in-flight task claims should stop workers first
--- (the dedicated `sayiir_task_claims` table is dropped below and
--- replaced by `sayiir_workflow_claims`).
+-- and cannot be resolved by hash once the KV-offload cutover lands.
+--
+-- Operators with in-flight task claims should stop workers first.
+-- `sayiir_task_claims` is RENAMED in place to `sayiir_workflow_claims`
+-- (not dropped) — existing rows, indexes, and statistics carry over.
+-- The PK narrows from `(instance_id, task_id)` to `(instance_id)` so
+-- any instance with more than one pre-migration claim row (multi-task
+-- in-flight workflows from 0.5.x, or unreleased claims from crashed
+-- workers) will trip a unique-key violation at `ADD PRIMARY KEY` time
+-- and abort the migration mid-run. Truncate or dedupe claims before
+-- running this migration if a graceful drain isn't sufficient.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
