@@ -132,7 +132,117 @@ where
         signal_name: &str,
         payload: bytes::Bytes,
     ) -> Result<(), BackendError> {
-        tracing::debug!("buffering external event");
+        // Atomic auto-resume path: if the workflow is parked at
+        // `AtSignal` waiting for `signal_name`, mark the signal task
+        // completed with `payload`, advance position to `AtTask` of the
+        // next_task_id stored on the AtSignal variant, and save —
+        // skipping the buffered-event detour entirely. PooledWorker
+        // dispatch has no AwaitSignal-advance logic, so without this
+        // shortcut a parked workflow would never resume (the analogous
+        // gap to the pre-fix fork-join dispatch). Falls back to the
+        // legacy buffered-event insert when the workflow isn't waiting
+        // (e.g. signal arrives before the workflow reaches the
+        // wait node — buffered events are consumed at the in-process
+        // runner's AwaitSignal handling).
+        let mut tx = self.pool.begin().await.map_err(PgError)?;
+        let locked = self
+            .lock_snapshot_for_mutation(&mut tx, instance_id)
+            .await?;
+
+        if let Some((mut snapshot, prev_history_version)) = locked
+            && let Some((signal_id, next_task_id)) = signal_resume_target(&snapshot, signal_name)
+        {
+            tracing::debug!(%instance_id, %signal_name, "auto-resuming workflow at signal");
+            snapshot.mark_task_completed(signal_id, payload);
+            if let Some(next_id) = next_task_id {
+                snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
+                    task_id: next_id,
+                });
+            } else {
+                // Signal was the terminal node — complete the workflow
+                // with the signal payload as the final output.
+                let output = snapshot
+                    .get_task_result_bytes(&signal_id)
+                    .unwrap_or_default();
+                snapshot.mark_completed(output);
+            }
+            // Encode the snapshot AFTER mark_task_completed so the
+            // signal task's bytes are picked up by `encode_blob`'s
+            // strip step and then re-persisted in sayiir_workflow_tasks
+            // via the `task_output` CTE — without that UPSERT the
+            // outputs-stripped blob loses the signal payload entirely
+            // and the next dispatch hands the join an empty input.
+            let signal_payload = snapshot
+                .get_task_result_bytes(&signal_id)
+                .unwrap_or_default();
+            let (data, data_hash) = self.encode_blob(&snapshot)?;
+            let status = snapshot.state.as_ref();
+            let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
+            let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
+            let task_count = snapshot.completed_task_count();
+            let pos_kind = snapshot.position_kind();
+            let wake_at = snapshot.delay_wake_at();
+            let next_history_version = prev_history_version + 1;
+            let notify_payload = build_task_ready_payload(&snapshot);
+
+            sqlx::query(
+                "WITH upd AS (
+                     UPDATE sayiir_workflow_snapshots
+                     SET status = $1, current_task_id = $2,
+                         completed_task_count = $3, position_kind = $4,
+                         delay_wake_at = $5, history_version = $6,
+                         data_hash = $7, updated_at = now()
+                     WHERE instance_id = $8
+                     RETURNING 1
+                 ),
+                 task_output AS (
+                     INSERT INTO sayiir_workflow_tasks
+                         (instance_id, task_id, status, completed_at, output)
+                     VALUES ($8, $11, 'completed', now(), $12)
+                     ON CONFLICT (instance_id, task_id) DO UPDATE SET
+                         status = 'completed',
+                         completed_at = now(),
+                         error = NULL,
+                         output = EXCLUDED.output
+                     RETURNING 1
+                 )
+                 SELECT pg_notify($9, $10) FROM upd WHERE $10 IS NOT NULL",
+            )
+            .bind(status)
+            .bind(task_id)
+            .bind(task_count)
+            .bind(pos_kind)
+            .bind(wake_at)
+            .bind(next_history_version)
+            .bind(data_hash.as_slice())
+            .bind(instance_id)
+            .bind(TASK_READY_CHANNEL)
+            .bind(notify_payload.as_deref())
+            .bind(signal_id.as_bytes().as_slice())
+            .bind(signal_payload.as_ref())
+            .execute(&mut *tx)
+            .await
+            .map_err(PgError)?;
+
+            append_history(
+                &mut tx,
+                instance_id,
+                next_history_version,
+                status,
+                task_id,
+                &data,
+                &data_hash,
+            )
+            .await?;
+
+            tx.commit().await.map_err(PgError)?;
+            return Ok(());
+        }
+
+        // Not parked on this signal — buffer for later consumption by
+        // the in-process AwaitSignal handling (or a future poll-based
+        // recovery on the PooledWorker side).
+        tracing::debug!(%instance_id, %signal_name, "buffering external event");
         sqlx::query(
             "INSERT INTO sayiir_workflow_events (instance_id, signal_name, payload)
              VALUES ($1, $2, $3)",
@@ -140,9 +250,10 @@ where
         .bind(instance_id)
         .bind(signal_name)
         .bind(payload.as_ref())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(PgError)?;
+        tx.commit().await.map_err(PgError)?;
         Ok(())
     }
 
@@ -240,7 +351,14 @@ where
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
         let next_history_version = prev_history_version + 1;
-        let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
+        // History row's `current_task_id` records the task the workflow
+        // was interrupted at. `snapshot.current_task_id()` returns None
+        // here because `mark_cancelled` already transitioned to the
+        // Cancelled variant (current_task_id only matches InProgress
+        // AtTask), so binding it would lose the interrupted-task
+        // pointer in the indexed history column. Use the caller's
+        // `interrupted_at_task` directly.
+        let task_id_bytes: Option<[u8; 32]> = interrupted_at_task.map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let notify_payload = build_task_ready_payload(&snapshot);
 
@@ -437,6 +555,13 @@ where
 
         if !snapshot.state.is_paused() {
             let state_name = snapshot.state.as_ref();
+            // Explicit rollback releases the FOR UPDATE row lock
+            // immediately rather than waiting for sqlx's async
+            // Transaction Drop to fire — matches the pattern in
+            // check_and_cancel/check_and_pause and matters under
+            // bursty admin scripts that hammer unpause across many
+            // already-running workflows.
+            tx.rollback().await.map_err(PgError)?;
             return Err(BackendError::CannotPause(format!(
                 "Workflow is not paused (current state: {state_name:?})"
             )));
@@ -498,5 +623,29 @@ where
         tx.commit().await.map_err(PgError)?;
         tracing::info!(instance_id, "workflow unpaused");
         Ok(snapshot)
+    }
+}
+
+/// If `snapshot` is parked at `AtSignal` waiting for `signal_name`,
+/// return the (signal_id, next_task_id) pair so `send_event` can
+/// advance the workflow inline. Returns `None` for any other position
+/// or signal-name mismatch.
+fn signal_resume_target(
+    snapshot: &WorkflowSnapshot,
+    signal_name: &str,
+) -> Option<(sayiir_core::TaskId, Option<sayiir_core::TaskId>)> {
+    use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshotState};
+    match &snapshot.state {
+        WorkflowSnapshotState::InProgress {
+            position:
+                ExecutionPosition::AtSignal {
+                    signal_id,
+                    signal_name: parked_name,
+                    next_task_id,
+                    ..
+                },
+            ..
+        } if parked_name == signal_name => Some((*signal_id, *next_task_id)),
+        _ => None,
     }
 }

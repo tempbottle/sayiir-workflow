@@ -224,7 +224,18 @@ where
         .await
         .map_err(PgError)?;
 
-        let data: Vec<u8> = row.get("data");
+        // The scalar subquery returns NULL when no history row matches
+        // the locked `history_version` (orphan snapshot pointer — e.g.
+        // migration 008's `COALESCE((SELECT MAX(version)+1...), 0)`
+        // fallback for instances that existed pre-migration with no
+        // history rows, or any manual cleanup that breaks the
+        // save_snapshot CTE's snapshot↔history atomicity). sqlx's
+        // `Vec<u8>` Decode panics on NULL; surface it as a clean
+        // `NotFound` instead so workers see a structured error.
+        let data: Option<Vec<u8>> = row.get("data");
+        let Some(data) = data else {
+            return Ok(None);
+        };
         let mut snapshot = self.decode(&data)?;
         let task_ids: Vec<Vec<u8>> = row.get("task_ids");
         let outputs_vec: Vec<Vec<u8>> = row.get("outputs");

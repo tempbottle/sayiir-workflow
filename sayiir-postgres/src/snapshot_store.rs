@@ -249,11 +249,17 @@ where
                      output = EXCLUDED.output
                  RETURNING 1
              )
-             -- Same outer-SELECT pattern as save_snapshot — keeps the
-             -- pg_notify call referenced so PG's optimizer can't prune
-             -- it; CASE gates the call on a non-NULL payload.
-             SELECT 1 AS done,
-                    CASE WHEN $11 IS NOT NULL THEN pg_notify($10, $11) END",
+             -- Anchor the outer SELECT to `upd` so the structural
+             -- defence against unreferenced-CTE pruning matches
+             -- save_snapshot. upd/hist/task are all DML so PG executes
+             -- them unconditionally regardless of references, but any
+             -- future refactor that converts one to a non-DML CTE
+             -- would silently drop the write without this anchor.
+             -- pg_notify in the outer projection only fires when the
+             -- payload is non-NULL.
+             SELECT pg_notify($10, $11) FROM upd WHERE $11 IS NOT NULL
+             UNION ALL
+             SELECT NULL::void FROM upd WHERE $11 IS NULL",
         )
         .bind(status) // $1
         .bind(current) // $2
@@ -266,7 +272,7 @@ where
         .bind(output_bytes.as_ref()) // $9
         .bind(TASK_READY_CHANNEL) // $10
         .bind(notify_payload.as_deref()) // $11
-        .fetch_one(&mut *tx)
+        .execute(&mut *tx)
         .await
         .map_err(PgError)?;
 

@@ -41,20 +41,35 @@ DROP INDEX IF EXISTS idx_snapshots_position;
 -- the workflow's row.
 --
 -- This block is idempotent against the pre-deploy recipe in the
--- header: if the existing `idx_sayiir_task_tags` is already the
--- partial shape we want, both arms are skipped and no
--- AccessExclusiveLock is taken. Otherwise we drop the non-partial
--- and build the partial inline, which DOES briefly lock the table.
+-- header: if the existing `idx_sayiir_task_tags` is already partial
+-- (any predicate at all — we don't care about the exact predicate
+-- formatting, only that it's not the full-table index we want to
+-- replace), both arms are skipped and no AccessExclusiveLock is
+-- taken. Otherwise we drop the non-partial and build the partial
+-- inline, which DOES briefly lock the table.
+--
+-- Detection uses `pg_index.indpred IS NOT NULL` which is the
+-- structural "this index is partial" check, rather than substring
+-- matching against `pg_get_indexdef`'s text output — the latter is
+-- not contract-stable across PG versions or column types (the
+-- predicate can render as `WHERE status = 'InProgress'::text`,
+-- `WHERE ((status)::text = 'InProgress'::text)`, etc.), and a miss
+-- would silently force the AccessExclusiveLock rebuild the
+-- pre-deploy recipe was meant to avoid.
 DO $$
 BEGIN
     IF EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = current_schema()
-          AND tablename  = 'sayiir_workflow_snapshots'
-          AND indexname  = 'idx_sayiir_task_tags'
-          AND indexdef ILIKE '%WHERE (status = ''InProgress''::text)%'
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_class t ON t.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema()
+          AND t.relname = 'sayiir_workflow_snapshots'
+          AND c.relname = 'idx_sayiir_task_tags'
+          AND i.indpred IS NOT NULL
     ) THEN
-        -- Already the partial shape; no-op.
+        -- Already partial; no-op.
         NULL;
     ELSE
         EXECUTE 'DROP INDEX IF EXISTS idx_sayiir_task_tags';
