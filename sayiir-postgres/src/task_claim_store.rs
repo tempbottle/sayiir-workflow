@@ -204,12 +204,22 @@ where
         // the UPDATE returns 0 rows, the owner subselect returns our
         // worker_id, and `disambiguate_writeback` treats self-owned-
         // not-done as Ok(()).
+        //
+        // The UPDATE matches on (instance_id, worker_id, task_id) so a
+        // stale caller — e.g. a worker whose claim was already moved on
+        // by an expired-claim takeover, or a worker_id that's been
+        // reused on a different task — can't accidentally extend a
+        // claim that's now for a different task. Without the task_id
+        // guard, the contract of `extend_task_claim(instance, task,
+        // worker)` would silently extend whatever claim is currently
+        // attributed to that worker.
         let row = sqlx::query(
             "WITH upd AS (
                  UPDATE sayiir_workflow_claims
                  SET expires_at = expires_at + $3
                  WHERE instance_id = $1
                    AND worker_id = $2
+                   AND task_id = $4
                    AND expires_at IS NOT NULL
                  RETURNING 1
              )
@@ -221,6 +231,7 @@ where
         .bind(instance_id)
         .bind(worker_id)
         .bind(additional_duration)
+        .bind(task_id.as_bytes().as_slice())
         .fetch_one(&self.pool)
         .await
         .map_err(PgError)?;
@@ -324,7 +335,11 @@ where
 
         let mut available: Vec<(bool, AvailableTask)> = Vec::with_capacity(decoded.len());
         for mut snapshot in decoded {
-            match &snapshot.state {
+            // Examine state, possibly advance position, extract the
+            // task_id we want to dispatch. All field captures from the
+            // match pattern are `Copy` so the borrow on `snapshot.state`
+            // is released before the move into build_available_task.
+            let task_id_to_dispatch: sayiir_core::TaskId = match &snapshot.state {
                 // Delay: if expired, advance past it
                 WorkflowSnapshotState::InProgress {
                     position:
@@ -336,29 +351,22 @@ where
                         },
                     ..
                 } if Utc::now() >= *wake_at => {
-                    if let Some(next_id) = *next_task_id {
+                    let next_id_opt = *next_task_id;
+                    let delay_id_owned = *delay_id;
+                    if let Some(next_id) = next_id_opt {
                         snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
                         self.save_snapshot(&snapshot).await?;
-
-                        if let WorkflowSnapshotState::InProgress {
-                            position: ExecutionPosition::AtTask { task_id },
-                            completed_tasks,
-                            ..
-                        } = &snapshot.state
-                            && let Some(task) =
-                                build_available_task(&snapshot, task_id, completed_tasks)
-                        {
-                            let bias = snapshot.has_failed_on_worker(task_id, worker_id);
-                            available.push((bias, task));
-                        }
+                        next_id
                     } else {
-                        // Delay is the last node — complete the workflow
-                        let output = snapshot.get_task_result_bytes(delay_id).unwrap_or_default();
+                        // Delay is the last node — complete the workflow.
+                        let output = snapshot
+                            .get_task_result_bytes(&delay_id_owned)
+                            .unwrap_or_default();
                         snapshot.mark_completed(output);
                         self.save_snapshot(&snapshot).await?;
+                        continue;
                     }
                 }
-
                 WorkflowSnapshotState::InProgress {
                     position: ExecutionPosition::AtTask { task_id },
                     completed_tasks,
@@ -367,18 +375,20 @@ where
                     if completed_tasks.contains_key(task_id) {
                         continue;
                     }
-                    if let Some(rs) = snapshot.task_retries.get(task_id)
+                    let task_id_copy = *task_id;
+                    if let Some(rs) = snapshot.task_retries.get(&task_id_copy)
                         && Utc::now() < rs.next_retry_at
                     {
                         continue;
                     }
-                    if let Some(task) = build_available_task(&snapshot, task_id, completed_tasks) {
-                        let bias = snapshot.has_failed_on_worker(task_id, worker_id);
-                        available.push((bias, task));
-                    }
+                    task_id_copy
                 }
-
                 _ => continue,
+            };
+
+            let bias = snapshot.has_failed_on_worker(&task_id_to_dispatch, worker_id);
+            if let Some(task) = build_available_task(snapshot, task_id_to_dispatch) {
+                available.push((bias, task));
             }
 
             if available.len() >= limit {
@@ -441,24 +451,20 @@ where
         let outputs = crate::history::fetch_task_outputs(&self.pool, &hint.instance_id).await?;
         snapshot.hydrate_task_outputs(outputs);
 
-        let WorkflowSnapshotState::InProgress {
-            position: ExecutionPosition::AtTask { task_id },
-            completed_tasks,
-            ..
-        } = &snapshot.state
-        else {
-            return Ok(None);
-        };
         let hint_task_id = sayiir_core::TaskId::from_bytes(hint.task_id);
-        if *task_id != hint_task_id || completed_tasks.contains_key(task_id) {
+        let matches = match &snapshot.state {
+            WorkflowSnapshotState::InProgress {
+                position: ExecutionPosition::AtTask { task_id },
+                completed_tasks,
+                ..
+            } => *task_id == hint_task_id && !completed_tasks.contains_key(task_id),
+            _ => false,
+        };
+        if !matches {
             return Ok(None);
         }
 
-        Ok(build_available_task(
-            &snapshot,
-            &hint_task_id,
-            completed_tasks,
-        ))
+        Ok(build_available_task(snapshot, hint_task_id))
     }
 }
 
@@ -487,15 +493,24 @@ fn disambiguate_writeback(
 }
 
 /// Build an [`AvailableTask`] from a snapshot at a task position.
+///
+/// Takes the snapshot by VALUE and wraps it in `Arc` for the
+/// [`AvailableTask::snapshot`] field — no deep clone. Callers must
+/// extract `task_id` and any decision fields (bias, retry timing) from
+/// the snapshot BEFORE handing it off here, since we move on the way
+/// in. Returns `None` when the snapshot isn't `InProgress` at a task
+/// position with a resolvable input.
 fn build_available_task(
-    snapshot: &WorkflowSnapshot,
-    task_id: &sayiir_core::TaskId,
-    completed_tasks: &std::collections::HashMap<
-        sayiir_core::TaskId,
-        sayiir_core::snapshot::TaskResult,
-    >,
+    snapshot: WorkflowSnapshot,
+    task_id: sayiir_core::TaskId,
 ) -> Option<AvailableTask> {
-    let input = if completed_tasks.is_empty() {
+    let completed_empty = match &snapshot.state {
+        sayiir_core::snapshot::WorkflowSnapshotState::InProgress {
+            completed_tasks, ..
+        } => completed_tasks.is_empty(),
+        _ => return None,
+    };
+    let input = if completed_empty {
         snapshot.initial_input_bytes()
     } else {
         snapshot.get_last_task_output()
@@ -503,10 +518,10 @@ fn build_available_task(
 
     input.map(|input_bytes| AvailableTask {
         instance_id: snapshot.instance_id.clone(),
-        task_id: *task_id,
+        task_id,
         input: input_bytes,
         workflow_definition_hash: snapshot.definition_hash,
         trace_parent: snapshot.trace_parent.clone(),
-        snapshot: snapshot.clone(),
+        snapshot: std::sync::Arc::new(snapshot),
     })
 }

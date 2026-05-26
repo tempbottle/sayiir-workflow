@@ -655,7 +655,11 @@ where
             let _ = tracing::Span::current().set_parent(remote_ctx);
         }
 
-        let mut snapshot = available_task.snapshot.clone();
+        // Deep-clone the snapshot from the Arc only on the execute
+        // path. Workers that lose the claim race drop the
+        // `available_task` (and its `Arc`) cheaply, never paying for
+        // a deep clone.
+        let mut snapshot = (*available_task.snapshot).clone();
         let already_completed = Self::validate_task_preconditions(
             definition_hash,
             &ext_wf.task_index,
@@ -1030,8 +1034,10 @@ where
             let _ = tracing::Span::current().set_parent(remote_ctx);
         }
 
-        // 1. Use the snapshot the dispatch SELECT already decoded
-        let mut snapshot = available_task.snapshot.clone();
+        // 1. Use the snapshot the dispatch SELECT already decoded.
+        // Deep-clone from the Arc only on the execute path; lost-race
+        // workers drop the Arc cheaply.
+        let mut snapshot = (*available_task.snapshot).clone();
         let already_completed = Self::validate_task_preconditions(
             workflow.definition_hash(),
             workflow.task_index(),
