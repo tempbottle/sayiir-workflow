@@ -164,10 +164,21 @@ where
         // could otherwise make the error path misreport the owner.
         // The owner subselect is gated on `NOT EXISTS (del)` so the
         // hot success path skips it.
+        //
+        // Match on `task_id` too — the API is task-scoped and the
+        // in-memory backend keys claims by task_id, so a stale caller
+        // (e.g. a worker whose claim was taken over by an expired-
+        // claim steal and replaced with a different (worker, task))
+        // must not be allowed to delete the new owner's claim just
+        // because the worker_id happens to coincide. With the guard,
+        // a stale release with the wrong task_id matches zero rows,
+        // the owner-probe runs, and the caller sees the same error
+        // shape it would have seen if the row had moved on for any
+        // other reason.
         let row = sqlx::query(
             "WITH del AS (
                  DELETE FROM sayiir_workflow_claims
-                 WHERE instance_id = $1 AND worker_id = $2
+                 WHERE instance_id = $1 AND worker_id = $2 AND task_id = $3
                  RETURNING 1
              )
              SELECT
@@ -177,6 +188,7 @@ where
         )
         .bind(instance_id)
         .bind(worker_id)
+        .bind(task_id.as_bytes().as_slice())
         .fetch_one(&self.pool)
         .await
         .map_err(PgError)?;
