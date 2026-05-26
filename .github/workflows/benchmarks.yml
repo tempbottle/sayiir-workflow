@@ -8,9 +8,6 @@ on:
 
 permissions:
   contents: read
-  # bench-pr-comment needs pull-requests:write so it can post / update
-  # the sticky comment on the PR. push-to-main runs never use this.
-  pull-requests: write
 
 concurrency:
   group: benchmarks-${{ github.event.pull_request.number || github.ref }}
@@ -46,6 +43,21 @@ jobs:
     if: needs.changes.outputs.bench == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
+    # Job-scoped permissions, narrower than a workflow-level default:
+    #   * contents:read         — actions/checkout
+    #   * actions:read          — dawidd6/action-download-artifact fetches
+    #                             the `bench-baseline-main` artifact via the
+    #                             Actions API; missing this scope 403s.
+    #   * pull-requests:write   — only used by the PR-only sticky-comment
+    #                             step; push-to-main runs skip that step,
+    #                             so the elevated scope is dead weight on
+    #                             those runs but is still scoped to this
+    #                             single job rather than the whole workflow.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
 
     services:
       postgres:
