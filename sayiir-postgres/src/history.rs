@@ -55,9 +55,22 @@ where
     let mut outputs = HashMap::with_capacity(rows.len());
     for row in rows {
         let task_id_bytes: &[u8] = row.get("task_id");
-        let Ok(task_id) = sayiir_core::TaskId::from_slice(task_id_bytes) else {
-            continue;
-        };
+        let task_id = sayiir_core::TaskId::from_slice(task_id_bytes).map_err(|_| {
+            // sayiir_workflow_tasks.task_id is BYTEA after migration 008
+            // and is always written as a 32-byte SHA-256 (`digest(...,
+            // 'sha256')` in the migration's USING clause, raw bytes
+            // from `TaskId::as_bytes()` in every save path). A
+            // wrong-sized value here means the column was written by
+            // something outside this codebase or the migration left a
+            // row in a half-converted state — silently dropping it
+            // hides a real schema-integrity bug and surfaces later as
+            // unexplained `TaskNotFound` errors in
+            // `build_join_input` / load_task_result. Fail loudly.
+            BackendError::Backend(format!(
+                "sayiir_workflow_tasks.task_id for instance {instance_id} is {} bytes (expected 32)",
+                task_id_bytes.len()
+            ))
+        })?;
         let output: Vec<u8> = row.get("output");
         outputs.insert(task_id, Bytes::from(output));
     }
@@ -90,9 +103,17 @@ where
     for row in rows {
         let instance_id: String = row.get("instance_id");
         let task_id_bytes: &[u8] = row.get("task_id");
-        let Ok(task_id) = sayiir_core::TaskId::from_slice(task_id_bytes) else {
-            continue;
-        };
+        // See note in `fetch_task_outputs` — task_id is always a
+        // 32-byte SHA-256 in this schema. A wrong size means schema
+        // corruption; surface it as a backend error rather than
+        // silently dropping the output and producing TaskNotFound in
+        // build_join_input / load_task_result downstream.
+        let task_id = sayiir_core::TaskId::from_slice(task_id_bytes).map_err(|_| {
+            BackendError::Backend(format!(
+                "sayiir_workflow_tasks.task_id for instance {instance_id} is {} bytes (expected 32)",
+                task_id_bytes.len()
+            ))
+        })?;
         let output: Vec<u8> = row.get("output");
         grouped
             .entry(instance_id)
@@ -241,9 +262,17 @@ where
         let outputs_vec: Vec<Vec<u8>> = row.get("outputs");
         let mut outputs = std::collections::HashMap::with_capacity(task_ids.len());
         for (tid_bytes, output) in task_ids.into_iter().zip(outputs_vec) {
-            let Ok(task_id) = sayiir_core::TaskId::from_slice(&tid_bytes) else {
-                continue;
-            };
+            // task_id is always a 32-byte SHA-256 (see migration 008
+            // and every save_task_result write path). A wrong-sized
+            // value here is schema corruption; surface it rather than
+            // silently dropping the row and producing TaskNotFound
+            // downstream in build_join_input / load_task_result.
+            let task_id = sayiir_core::TaskId::from_slice(&tid_bytes).map_err(|_| {
+                BackendError::Backend(format!(
+                    "sayiir_workflow_tasks.task_id for instance {instance_id} is {} bytes (expected 32)",
+                    tid_bytes.len()
+                ))
+            })?;
             outputs.insert(task_id, Bytes::from(output));
         }
         snapshot.hydrate_task_outputs(outputs);
