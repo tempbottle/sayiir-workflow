@@ -88,11 +88,26 @@ where
                       WHERE c.instance_id = probe.instance_id
                         AND (c.expires_at IS NULL OR c.expires_at > now())
                   )
+                -- Gate ON CONFLICT DO UPDATE on the existing claim
+                -- being expired. Without this, two transactions that
+                -- both pass the SELECT-side NOT EXISTS check (e.g.
+                -- because the prior claim's row just got deleted by
+                -- release, or because both see the same expired row)
+                -- can both INSERT, and ON CONFLICT silently picks the
+                -- last writer — leaving the earlier worker thinking
+                -- it owns a claim that the row actually attributes
+                -- to a different worker. The WHERE here turns the
+                -- upsert into 'steal expired only'; concurrent
+                -- inserts on a still-live claim now produce zero
+                -- upsert rows for the loser (caller sees Ok(None)
+                -- and retries), instead of misreporting success.
                 ON CONFLICT (instance_id) DO UPDATE
                     SET task_id    = EXCLUDED.task_id,
                         worker_id  = EXCLUDED.worker_id,
                         claimed_at = now(),
                         expires_at = EXCLUDED.expires_at
+                    WHERE sayiir_workflow_claims.expires_at IS NOT NULL
+                      AND sayiir_workflow_claims.expires_at <= now()
                 RETURNING
                     FLOOR(EXTRACT(EPOCH FROM claimed_at))::BIGINT AS claimed_epoch,
                     FLOOR(EXTRACT(EPOCH FROM expires_at))::BIGINT AS expires_epoch
