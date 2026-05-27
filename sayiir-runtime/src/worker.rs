@@ -285,8 +285,20 @@ where
     }
 
     /// Set the TTL for task claims.
+    ///
+    /// `None` means "never expires" — a crashed worker holding such a
+    /// claim pins the workflow undispatchable until the claim row is
+    /// manually released. Prefer a finite TTL (default 5 minutes) so
+    /// crashed-worker recovery happens via the eligibility predicate's
+    /// `expires_at > now()` check.
     #[must_use]
     pub fn with_claim_ttl(mut self, ttl: Option<Duration>) -> Self {
+        if ttl.is_none() {
+            tracing::warn!(
+                "PooledWorker::with_claim_ttl(None) disables claim expiry; \
+                 a crashed worker will pin its workflow until manual release"
+            );
+        }
         self.claim_ttl = ttl;
         self
     }
@@ -655,16 +667,14 @@ where
             let _ = tracing::Span::current().set_parent(remote_ctx);
         }
 
-        // Deep-clone the snapshot from the Arc only on the execute
-        // path. Workers that lose the claim race drop the
-        // `available_task` (and its `Arc`) cheaply, never paying for
-        // a deep clone.
-        let mut snapshot = (*available_task.snapshot).clone();
+        // Workers that lose the claim race drop the `available_task`
+        // (and its `Arc<WorkflowSnapshot>`) cheaply — keep the deep
+        // clone strictly past the claim_task gate.
         let already_completed = Self::validate_task_preconditions(
             definition_hash,
             &ext_wf.task_index,
             available_task,
-            &snapshot,
+            &available_task.snapshot,
         )?;
         if already_completed {
             return Ok(WorkflowStatus::InProgress);
@@ -678,6 +688,9 @@ where
             claim.release_quietly().await;
             return Ok(status);
         }
+
+        // Past the claim gate — now pay for the deep clone exactly once.
+        let mut snapshot = (*available_task.snapshot).clone();
 
         tracing::debug!(
             instance_id = %available_task.instance_id,
@@ -721,8 +734,14 @@ where
         let deadline =
             if let Some(timeout) = indexed_meta.and_then(sayiir_core::TaskNodeMetadata::timeout) {
                 snapshot.set_task_deadline(task_id, timeout);
-                let _ = self.backend.save_snapshot(snapshot).await;
                 snapshot.refresh_task_deadline();
+                // Deadline lives in-process for `run_with_heartbeat`; it
+                // is persisted on the next save_task_result (which holds
+                // a FOR UPDATE lock and so can't race with check_and_*).
+                // A bare save_snapshot here would clobber a
+                // check_and_cancel that landed between
+                // check_post_claim_guards and now, silently resurrecting
+                // a cancelled workflow into InProgress.
                 snapshot.task_deadline.clone()
             } else {
                 None
@@ -1035,14 +1054,13 @@ where
         }
 
         // 1. Use the snapshot the dispatch SELECT already decoded.
-        // Deep-clone from the Arc only on the execute path; lost-race
-        // workers drop the Arc cheaply.
-        let mut snapshot = (*available_task.snapshot).clone();
+        // Lost-race workers drop the `Arc<WorkflowSnapshot>` cheaply —
+        // keep the deep clone strictly past the claim_task gate.
         let already_completed = Self::validate_task_preconditions(
             workflow.definition_hash(),
             workflow.task_index(),
             &available_task,
-            &snapshot,
+            &available_task.snapshot,
         )?;
         if already_completed {
             return Ok(WorkflowStatus::InProgress);
@@ -1057,6 +1075,9 @@ where
             claim.release_quietly().await;
             return Ok(status);
         }
+
+        // Past the claim gate — now pay for the deep clone exactly once.
+        let mut snapshot = (*available_task.snapshot).clone();
 
         tracing::debug!(
             instance_id = %available_task.instance_id,
@@ -1143,10 +1164,14 @@ where
         let deadline =
             if let Some(timeout) = indexed_meta.and_then(sayiir_core::TaskNodeMetadata::timeout) {
                 snapshot.set_task_deadline(task_id, timeout);
-                let _ = self.backend.save_snapshot(snapshot).await;
-                // Refresh deadline to now + timeout so it measures actual execution
-                // time, not time spent on the snapshot save above.
                 snapshot.refresh_task_deadline();
+                // Deadline lives in-process for `run_with_heartbeat`; it
+                // is persisted on the next save_task_result (which holds
+                // a FOR UPDATE lock and so can't race with check_and_*).
+                // A bare save_snapshot here would clobber a
+                // check_and_cancel that landed between
+                // check_post_claim_guards and now, silently resurrecting
+                // a cancelled workflow into InProgress.
                 snapshot.task_deadline.clone()
             } else {
                 None

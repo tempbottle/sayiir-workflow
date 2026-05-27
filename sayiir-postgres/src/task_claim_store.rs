@@ -22,6 +22,14 @@ use crate::error::PgError;
 /// between `find_available_tasks` (polling scan) and `find_hinted_task`
 /// (single-row lookup) so a future change to the eligibility rules
 /// can't silently desynchronise the two paths.
+///
+/// `c.expires_at IS NULL` is treated as "live forever" — matches the
+/// in-memory backend's never-expires semantic. Operationally this means
+/// a crashed worker that held a no-TTL claim pins the workflow
+/// undispatchable until the row is released manually. Runtime callers
+/// (PooledWorker) always set a TTL; only out-of-band ad-hoc callers
+/// should pass `ttl=None`, and only when they're certain a manual
+/// release path exists.
 const ELIGIBILITY_PREDICATE: &str = "NOT EXISTS (
             SELECT 1 FROM sayiir_workflow_claims c
             WHERE c.instance_id = s.instance_id
@@ -87,6 +95,18 @@ where
                       SELECT 1 FROM sayiir_workflow_claims c
                       WHERE c.instance_id = probe.instance_id
                         AND (c.expires_at IS NULL OR c.expires_at > now())
+                  )
+                  -- Reject if the task is already completed via another
+                  -- path (e.g. save_task_result from a parallel runner)
+                  -- between dispatch SELECT and this claim. Without this
+                  -- guard the worker re-executes a finished task —
+                  -- save_task_result doesn't advance current_task_id, so
+                  -- the position check above can't catch this race.
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sayiir_workflow_tasks t
+                      WHERE t.instance_id = probe.instance_id
+                        AND t.task_id = $2
+                        AND t.status = 'completed'
                   )
                 -- Gate ON CONFLICT DO UPDATE on the existing claim
                 -- being expired. Without this, two transactions that
@@ -175,6 +195,13 @@ where
         // the owner-probe runs, and the caller sees the same error
         // shape it would have seen if the row had moved on for any
         // other reason.
+        //
+        // The owner subselect ALSO filters on task_id so a wrong-task
+        // release returns owner=NULL → NotFound from
+        // `disambiguate_writeback`. Without this filter, a row that
+        // happens to share our worker_id but for a different task
+        // would surface as `Some(other) if other == worker_id => Ok`,
+        // silently masking the stale-caller bug.
         let row = sqlx::query(
             "WITH del AS (
                  DELETE FROM sayiir_workflow_claims
@@ -184,7 +211,9 @@ where
              SELECT
                  EXISTS (SELECT 1 FROM del) AS done,
                  (SELECT worker_id FROM sayiir_workflow_claims
-                  WHERE instance_id = $1 AND NOT EXISTS (SELECT 1 FROM del)) AS owner",
+                  WHERE instance_id = $1
+                    AND task_id = $3
+                    AND NOT EXISTS (SELECT 1 FROM del)) AS owner",
         )
         .bind(instance_id)
         .bind(worker_id)
@@ -238,7 +267,9 @@ where
              SELECT
                  EXISTS (SELECT 1 FROM upd) AS done,
                  (SELECT worker_id FROM sayiir_workflow_claims
-                  WHERE instance_id = $1 AND NOT EXISTS (SELECT 1 FROM upd)) AS owner",
+                  WHERE instance_id = $1
+                    AND task_id = $4
+                    AND NOT EXISTS (SELECT 1 FROM upd)) AS owner",
         )
         .bind(instance_id)
         .bind(worker_id)
@@ -434,12 +465,35 @@ where
         &self,
         hint: &sayiir_persistence::TaskWakeupHint,
     ) -> Result<Option<AvailableTask>, BackendError> {
-        // Single-row eligibility check. Same predicate shape as
-        // find_available_tasks, but the matching task_id (here from the
-        // hint payload) lets us read just the named row.
+        // Single round-trip on the NOTIFY hot path: eligibility check,
+        // history-blob fetch, and per-task outputs all land in one
+        // statement. Pre-collapse this was three sequential RTTs
+        // (eligibility probe + fetch_blob + fetch_task_outputs); at
+        // 1000-fanout signal-driven workloads that's thousands of
+        // sequential round-trips on the headline path this branch is
+        // built to optimise.
+        //
+        // No FOR UPDATE: the snapshot row needs no row-lock — concurrent
+        // mutators (save_task_result, check_and_*) serialise on the
+        // claim slot and the `lock_snapshot_for_mutation` FOR UPDATE in
+        // their own paths.
         let query = format!(
-            "SELECT s.history_version, s.trace_parent
+            "SELECT
+                 s.trace_parent,
+                 h.data,
+                 (SELECT array_agg(t.task_id ORDER BY t.task_id)
+                  FROM sayiir_workflow_tasks t
+                  WHERE t.instance_id = s.instance_id
+                    AND t.status = 'completed'
+                    AND t.output IS NOT NULL) AS task_ids,
+                 (SELECT array_agg(t.output ORDER BY t.task_id)
+                  FROM sayiir_workflow_tasks t
+                  WHERE t.instance_id = s.instance_id
+                    AND t.status = 'completed'
+                    AND t.output IS NOT NULL) AS task_outputs
              FROM sayiir_workflow_snapshots s
+             JOIN sayiir_workflow_snapshot_history h
+               ON h.instance_id = s.instance_id AND h.version = s.history_version
              WHERE s.instance_id = $1
                AND s.current_task_id = $2
                AND s.status = 'InProgress'
@@ -454,14 +508,30 @@ where
 
         let Some(row) = row else { return Ok(None) };
 
-        let history_version: i32 = row.get("history_version");
-        let data = self
-            .fetch_blob(&self.pool, &hint.instance_id, history_version)
-            .await?;
+        let data: Vec<u8> = row.get("data");
         let mut snapshot = self.decode(&data)?;
         snapshot.trace_parent = row.get("trace_parent");
-        let outputs = crate::history::fetch_task_outputs(&self.pool, &hint.instance_id).await?;
-        snapshot.hydrate_task_outputs(outputs);
+
+        // Hydrate outputs from the paired arrays. Both arrays come from
+        // the same subquery with the same ORDER BY, so positional
+        // pairing is safe.
+        let task_ids: Option<Vec<Vec<u8>>> = row.get("task_ids");
+        let task_outputs: Option<Vec<Vec<u8>>> = row.get("task_outputs");
+        if let (Some(ids), Some(outs)) = (task_ids, task_outputs) {
+            let mut outputs =
+                std::collections::HashMap::with_capacity(ids.len());
+            for (id_bytes, out_bytes) in ids.into_iter().zip(outs.into_iter()) {
+                let tid = sayiir_core::TaskId::from_slice(&id_bytes).map_err(|_| {
+                    BackendError::Backend(format!(
+                        "sayiir_workflow_tasks.task_id for instance {} is {} bytes (expected 32)",
+                        hint.instance_id,
+                        id_bytes.len()
+                    ))
+                })?;
+                outputs.insert(tid, bytes::Bytes::from(out_bytes));
+            }
+            snapshot.hydrate_task_outputs(outputs);
+        }
 
         let hint_task_id = sayiir_core::TaskId::from_bytes(hint.task_id);
         let matches = match &snapshot.state {
@@ -483,9 +553,20 @@ where
 /// Decode the `(done, owner)` shape returned by the release/extend
 /// writable-CTE queries. `done` carries the success signal; `owner` is
 /// the current worker_id when the write didn't match, used to map the
-/// failure to the correct error variant. Self-owned-not-done is the
-/// extend heartbeat's no-TTL no-op (release never reaches that arm
-/// because `WHERE worker_id = $2` already excludes the case).
+/// failure to the correct error variant.
+///
+/// Both call sites filter the owner subselect on the same `(instance_id,
+/// task_id)` tuple as the writable CTE, so:
+/// - owner=None: no row for this (instance, task) → NotFound.
+/// - owner=Some(me): row exists with our worker but UPDATE/DELETE
+///   matched zero rows (extend's no-TTL no-op; unreachable for release
+///   because the DELETE filters on the same three columns) → Ok.
+/// - owner=Some(x): row exists but a different worker holds it →
+///   Backend error.
+///
+/// In particular, a stale caller passing a wrong task_id surfaces as
+/// NotFound rather than silently succeeding through the `Some(me)` arm
+/// — the in-memory backend's behaviour.
 fn disambiguate_writeback(
     row: &sqlx::postgres::PgRow,
     instance_id: &str,

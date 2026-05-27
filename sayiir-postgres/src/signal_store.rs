@@ -126,6 +126,7 @@ where
         fields(db.system = "postgresql"),
         err(level = tracing::Level::ERROR),
     )]
+    #[allow(clippy::too_many_lines)]
     async fn send_event(
         &self,
         instance_id: &str,
@@ -144,6 +145,41 @@ where
         // (e.g. signal arrives before the workflow reaches the
         // wait node — buffered events are consumed at the in-process
         // runner's AwaitSignal handling).
+        //
+        // Cheap probe first: position_kind lives on the snapshot row
+        // (no blob decode, no FOR UPDATE), so the common "signal
+        // arrives before the workflow reaches the wait node" case
+        // skips opening a tx + FOR UPDATE + outputs hydration just to
+        // INSERT a single event row.
+        let probe = sqlx::query(
+            "SELECT position_kind FROM sayiir_workflow_snapshots
+             WHERE instance_id = $1",
+        )
+        .bind(instance_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(PgError)?;
+
+        let is_at_signal = probe.as_ref().is_some_and(|r| {
+            let kind: Option<String> = r.get("position_kind");
+            kind.as_deref() == Some("AtSignal")
+        });
+
+        if !is_at_signal {
+            tracing::debug!(%instance_id, %signal_name, "buffering external event (probe: not at signal)");
+            sqlx::query(
+                "INSERT INTO sayiir_workflow_events (instance_id, signal_name, payload)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(instance_id)
+            .bind(signal_name)
+            .bind(payload.as_ref())
+            .execute(&self.pool)
+            .await
+            .map_err(PgError)?;
+            return Ok(());
+        }
+
         let mut tx = self.pool.begin().await.map_err(PgError)?;
         let locked = self
             .lock_snapshot_for_mutation(&mut tx, instance_id)
@@ -182,16 +218,27 @@ where
             let task_count = snapshot.completed_task_count();
             let pos_kind = snapshot.position_kind();
             let wake_at = snapshot.delay_wake_at();
+            let terminal = snapshot.state.is_terminal();
             let next_history_version = prev_history_version + 1;
             let notify_payload = build_task_ready_payload(&snapshot);
 
+            // When the signal IS the terminal node, `mark_completed` has
+            // flipped state to Completed and the snapshot row must carry
+            // a `completed_at` timestamp — otherwise retention sweeps,
+            // dashboards, and `WHERE completed_at IS NOT NULL` filters
+            // silently miss signal-driven completions.
             sqlx::query(
                 "WITH upd AS (
                      UPDATE sayiir_workflow_snapshots
                      SET status = $1, current_task_id = $2,
                          completed_task_count = $3, position_kind = $4,
                          delay_wake_at = $5, history_version = $6,
-                         data_hash = $7, updated_at = now()
+                         data_hash = $7,
+                         completed_at = CASE
+                             WHEN $13 THEN now()
+                             ELSE completed_at
+                         END,
+                         updated_at = now()
                      WHERE instance_id = $8
                      RETURNING 1
                  ),
@@ -220,6 +267,7 @@ where
             .bind(notify_payload.as_deref())
             .bind(signal_id.as_bytes().as_slice())
             .bind(signal_payload.as_ref())
+            .bind(terminal)
             .execute(&mut *tx)
             .await
             .map_err(PgError)?;

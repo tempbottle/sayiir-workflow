@@ -55,6 +55,16 @@ where
         // (not `save_task_result`); persist the just-completed task's
         // output into the sidecar table here too, so dispatch can
         // hydrate `completed_tasks[*].output` from `workflow_tasks`.
+        //
+        // `task_output` CTE's `WHERE … IS DISTINCT FROM EXCLUDED.output`
+        // gate suppresses the row write when bytes match, but the bytes
+        // still travel the wire. PERF TODO: thread an unflushed-output
+        // marker through the snapshot (requires `save_snapshot(&mut
+        // WorkflowSnapshot)` and SnapshotStore trait change) so
+        // position-only saves bind NULL here instead of re-shipping the
+        // last completed task's payload on every dispatch tick. The
+        // major position-only offender (worker.rs deadline save) is
+        // gone post review-fix #6.
         let last_completed_bytes: Option<[u8; 32]> =
             snapshot.last_completed_task_id().map(|t| *t.as_bytes());
         let last_completed_slice: Option<&[u8]> =
