@@ -1150,8 +1150,7 @@ where
                         // or surfaces a TaskNotFound that hides the real
                         // problem.
                         let branch_name = branch.id().to_string();
-                        let terminal_tid =
-                            sayiir_core::TaskId::from(branch.terminal_task_id());
+                        let terminal_tid = sayiir_core::TaskId::from(branch.terminal_task_id());
                         let output = snapshot
                             .get_task_result_bytes(&terminal_tid)
                             .ok_or_else(|| WorkflowError::TaskNotFound(branch_name.clone()))?;

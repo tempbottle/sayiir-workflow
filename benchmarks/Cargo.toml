@@ -49,6 +49,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"
 bytes = "1"
 futures = "0.3"
+flume = "0.12"
 
 [profile.release]
 opt-level = 3
