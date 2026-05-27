@@ -1422,13 +1422,43 @@ async fn send_event_terminal_signal_sets_completed_at() {
         .unwrap();
 
     let snap = backend.load_snapshot("wf-term").await.unwrap();
-    assert!(
-        matches!(
-            snap.state,
-            sayiir_core::snapshot::WorkflowSnapshotState::Completed { .. }
-        ),
-        "expected Completed after terminal-signal auto-resume, got {:?}",
-        snap.state
+    match &snap.state {
+        sayiir_core::snapshot::WorkflowSnapshotState::Completed { final_output } => {
+            // The signal payload must survive mark_completed — the
+            // pre-fix code re-read it from completed_tasks AFTER
+            // mark_completed (which drops the InProgress variant and
+            // with it the completed_tasks map), persisting empty bytes.
+            assert_eq!(
+                final_output.as_ref(),
+                b"final",
+                "terminal-signal auto-resume must use the signal payload as the final output"
+            );
+        }
+        other => panic!("expected Completed after terminal-signal auto-resume, got {other:?}"),
+    }
+
+    // workflow_tasks must also carry the signal payload — `mark_completed`
+    // clears completed_tasks so a fresh `get_task_result_bytes` after the
+    // transition would return None and the task_output CTE would persist
+    // an empty payload (the bug fixed alongside this test). Read the row
+    // directly because `load_task_result`'s terminal-state fallback
+    // hydrates from the LAST `InProgress` history snapshot whose
+    // `completed_tasks` here is empty (the seed was at AtSignal); the
+    // sidecar row is the authoritative source for that case.
+    let stored: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT output FROM sayiir_workflow_tasks
+         WHERE instance_id = $1 AND task_id = $2 AND status = 'completed'",
+    )
+    .bind("wf-term")
+    .bind(signal_id.as_bytes().as_slice())
+    .fetch_optional(&pool)
+    .await
+    .unwrap()
+    .flatten();
+    assert_eq!(
+        stored.as_deref(),
+        Some(b"final".as_ref()),
+        "signal payload must reach sayiir_workflow_tasks even on the terminal path"
     );
 
     // completed_at must be populated on the snapshot row.

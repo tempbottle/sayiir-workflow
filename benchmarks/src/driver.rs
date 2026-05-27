@@ -12,11 +12,18 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 /// Run `total` submissions with at most `concurrency` in flight at once.
 ///
 /// `submit` is called once per index `i` in `0..total`. Errors from individual
 /// submissions are logged and counted but do not abort the burst.
+///
+/// Tasks are tracked in a [`JoinSet`] and drained as they finish so the
+/// retained handle set stays bounded by `concurrency` rather than growing
+/// linearly with `total` — a Vec<JoinHandle> sized to `total` adds material
+/// memory overhead unrelated to the system under test at 100k+ workflow
+/// scenarios (sleeping-giants defaults to 500k).
 pub async fn submit_bounded<F, Fut>(
     total: usize,
     concurrency: usize,
@@ -31,8 +38,8 @@ where
     let submit = Arc::new(submit);
 
     let drip = target_rate.map(|r| Duration::from_secs_f64(1.0 / r as f64));
-    let mut handles = Vec::with_capacity(total);
     let mut next_release = tokio::time::Instant::now();
+    let mut joins: JoinSet<()> = JoinSet::new();
 
     for i in 0..total {
         if let Some(d) = drip {
@@ -43,17 +50,22 @@ where
             .acquire_owned()
             .await
             .expect("semaphore closed");
+
+        // Best-effort drain of any tasks that already finished so the
+        // JoinSet doesn't accumulate completed-but-unjoined handles
+        // between semaphore acquisitions. `try_join_next` is non-
+        // blocking; once empty the loop exits.
+        while joins.try_join_next().is_some() {}
+
         let submit = Arc::clone(&submit);
-        handles.push(tokio::spawn(async move {
+        joins.spawn(async move {
             let _permit = permit;
             if let Err(e) = submit(i as u64).await {
                 tracing::warn!(index = i, error = %e, "workflow submission failed");
             }
-        }));
+        });
     }
 
-    for h in handles {
-        let _ = h.await;
-    }
+    while joins.join_next().await.is_some() {}
     Ok(())
 }

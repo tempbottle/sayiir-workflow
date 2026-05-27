@@ -146,13 +146,23 @@ where
         // wait node — buffered events are consumed at the in-process
         // runner's AwaitSignal handling).
         //
-        // Cheap probe first: position_kind lives on the snapshot row
-        // (no blob decode, no FOR UPDATE), so the common "signal
-        // arrives before the workflow reaches the wait node" case
-        // skips opening a tx + FOR UPDATE + outputs hydration just to
-        // INSERT a single event row.
+        // Cheap probe first: a workflow that is missing or in a
+        // terminal state (Completed/Failed/Cancelled) cannot transition
+        // to AtSignal, so the event can be buffered without taking the
+        // lock — saves a tx + FOR UPDATE + outputs hydration for
+        // ad-hoc signals to absent/terminal instances.
+        //
+        // CRITICAL: any InProgress status falls through to the lock
+        // path. The probe is TOCTOU against the worker advancing
+        // position into AtSignal — e.g. driver sends `kick` right after
+        // `record_pickup` fires but BEFORE save_snapshot has committed
+        // the AtTask→AtSignal transition. Without the lock, the probe
+        // sees position_kind='AtTask', buffers the event, and the
+        // PooledWorker dispatch path (which has no AwaitSignal-advance
+        // logic) never drains it — the workflow stalls forever. The
+        // signal-driven bench exercises exactly this race.
         let probe = sqlx::query(
-            "SELECT position_kind FROM sayiir_workflow_snapshots
+            "SELECT status FROM sayiir_workflow_snapshots
              WHERE instance_id = $1",
         )
         .bind(instance_id)
@@ -160,13 +170,13 @@ where
         .await
         .map_err(PgError)?;
 
-        let is_at_signal = probe.as_ref().is_some_and(|r| {
-            let kind: Option<String> = r.get("position_kind");
-            kind.as_deref() == Some("AtSignal")
+        let in_progress = probe.as_ref().is_some_and(|r| {
+            let status: Option<String> = r.get("status");
+            status.as_deref() == Some("InProgress")
         });
 
-        if !is_at_signal {
-            tracing::debug!(%instance_id, %signal_name, "buffering external event (probe: not at signal)");
+        if !in_progress {
+            tracing::debug!(%instance_id, %signal_name, "buffering external event (probe: not in progress)");
             sqlx::query(
                 "INSERT INTO sayiir_workflow_events (instance_id, signal_name, payload)
                  VALUES ($1, $2, $3)",
@@ -189,6 +199,15 @@ where
             && let Some((signal_id, next_task_id)) = signal_resume_target(&snapshot, signal_name)
         {
             tracing::debug!(%instance_id, %signal_name, "auto-resuming workflow at signal");
+            // Capture the payload up front. We can't rely on
+            // `get_task_result_bytes(&signal_id)` after the transition:
+            // on the terminal branch `mark_completed` replaces the
+            // InProgress variant (and with it `completed_tasks`) with
+            // Completed, so the lookup returns None and the
+            // task_output CTE below would persist an empty payload —
+            // a downstream loader hydrating the signal task's output
+            // from `workflow_tasks` would then see empty bytes.
+            let signal_payload = payload.clone();
             snapshot.mark_task_completed(signal_id, payload);
             if let Some(next_id) = next_task_id {
                 snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
@@ -197,10 +216,7 @@ where
             } else {
                 // Signal was the terminal node — complete the workflow
                 // with the signal payload as the final output.
-                let output = snapshot
-                    .get_task_result_bytes(&signal_id)
-                    .unwrap_or_default();
-                snapshot.mark_completed(output);
+                snapshot.mark_completed(signal_payload.clone());
             }
             // Encode the snapshot AFTER mark_task_completed so the
             // signal task's bytes are picked up by `encode_blob`'s
@@ -208,9 +224,6 @@ where
             // via the `task_output` CTE — without that UPSERT the
             // outputs-stripped blob loses the signal payload entirely
             // and the next dispatch hands the join an empty input.
-            let signal_payload = snapshot
-                .get_task_result_bytes(&signal_id)
-                .unwrap_or_default();
             let (data, data_hash) = self.encode_blob(&snapshot)?;
             let status = snapshot.state.as_ref();
             let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());

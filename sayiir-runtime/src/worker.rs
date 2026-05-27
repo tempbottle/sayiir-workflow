@@ -1138,10 +1138,22 @@ where
                 let build = || -> Result<Bytes, crate::error::RuntimeError> {
                     let mut results = Vec::with_capacity(branches.len());
                     for branch in branches {
+                        // The join envelope keys results by `branch.id()`
+                        // (the branch entry node) so user code can look
+                        // up `results["branch-a"]`, but the actual output
+                        // is stored under the branch's TERMINAL task —
+                        // for multi-step branches the entry task's
+                        // output is an intermediate value, not the
+                        // branch's "result". TaskId::from(branch.id())
+                        // works only for single-Task branches and either
+                        // returns the wrong bytes (entry task's output)
+                        // or surfaces a TaskNotFound that hides the real
+                        // problem.
                         let branch_name = branch.id().to_string();
-                        let branch_tid = sayiir_core::TaskId::from(branch_name.as_str());
+                        let terminal_tid =
+                            sayiir_core::TaskId::from(branch.terminal_task_id());
                         let output = snapshot
-                            .get_task_result_bytes(&branch_tid)
+                            .get_task_result_bytes(&terminal_tid)
                             .ok_or_else(|| WorkflowError::TaskNotFound(branch_name.clone()))?;
                         results.push((branch_name, output));
                     }
@@ -1595,8 +1607,73 @@ where
             snapshot.trace_parent = crate::trace_context::current_trace_parent();
         }
         self.backend.save_snapshot(snapshot).await?;
+
+        // If we just entered AtSignal, drain any event that was
+        // buffered while the snapshot was still at AtTask. The
+        // race: send_event takes the lock during this worker's task
+        // body (status='InProgress', position=AtTask), sees no
+        // AtSignal to resume, INSERTs into sayiir_workflow_events,
+        // and commits. Then this save_snapshot advances to AtSignal,
+        // but PooledWorker has no AwaitSignal poll loop, so the
+        // workflow would sit forever with a matching event sitting
+        // unconsumed in the buffer. Closing the race here keeps the
+        // signal-driven dispatch path single-source (send_event is
+        // still primary; this is the worker's belt-and-suspenders).
+        self.drain_pending_signal(&available_task.instance_id, snapshot)
+            .await?;
+
         claim.release().await?;
         Ok(())
+    }
+
+    /// If `snapshot` is parked at `AtSignal { signal_name }` and a
+    /// matching event sits buffered in `sayiir_workflow_events`,
+    /// consume it and advance the snapshot to its next position. Loops
+    /// in case advancement lands on another `AtSignal` whose buffered
+    /// event is also already waiting.
+    async fn drain_pending_signal(
+        &self,
+        instance_id: &Arc<str>,
+        snapshot: &mut WorkflowSnapshot,
+    ) -> Result<(), crate::error::RuntimeError> {
+        loop {
+            let (signal_id, signal_name, next_task_id) = match &snapshot.state {
+                sayiir_core::snapshot::WorkflowSnapshotState::InProgress {
+                    position:
+                        sayiir_core::snapshot::ExecutionPosition::AtSignal {
+                            signal_id,
+                            signal_name,
+                            next_task_id,
+                            ..
+                        },
+                    ..
+                } => (*signal_id, signal_name.clone(), *next_task_id),
+                _ => return Ok(()),
+            };
+
+            let Some(payload) = self
+                .backend
+                .consume_event(instance_id, &signal_name)
+                .await?
+            else {
+                return Ok(());
+            };
+
+            tracing::debug!(
+                instance_id = %instance_id,
+                %signal_name,
+                "draining buffered signal that landed during the AtTask→AtSignal transition"
+            );
+            snapshot.mark_task_completed(signal_id, payload.clone());
+            if let Some(next_id) = next_task_id {
+                snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
+                    task_id: next_id,
+                });
+            } else {
+                snapshot.mark_completed(payload);
+            }
+            self.backend.save_snapshot(snapshot).await?;
+        }
     }
 
     /// Determine workflow status after a task completes.
