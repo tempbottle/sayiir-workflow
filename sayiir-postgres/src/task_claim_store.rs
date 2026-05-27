@@ -96,18 +96,17 @@ where
                       WHERE c.instance_id = probe.instance_id
                         AND (c.expires_at IS NULL OR c.expires_at > now())
                   )
-                  -- Reject if the task is already completed via another
-                  -- path (e.g. save_task_result from a parallel runner)
-                  -- between dispatch SELECT and this claim. Without this
-                  -- guard the worker re-executes a finished task —
-                  -- save_task_result doesn't advance current_task_id, so
-                  -- the position check above can't catch this race.
-                  AND NOT EXISTS (
-                      SELECT 1 FROM sayiir_workflow_tasks t
-                      WHERE t.instance_id = probe.instance_id
-                        AND t.task_id = $2
-                        AND t.status = 'completed'
-                  )
+                  -- Re-execution race protection lives in the
+                  -- worker''s validate_task_preconditions path, not
+                  -- here: gating claim_task on a completed row in
+                  -- workflow_tasks would permanently lock out
+                  -- recovery when a worker dies BETWEEN
+                  -- save_task_result (which writes the workflow_tasks
+                  -- row) and save_snapshot (which advances
+                  -- current_task_id). After that partial-completion,
+                  -- every subsequent claim_task would reject and the
+                  -- workflow would stall forever. The sleeping-giants
+                  -- storm hits exactly this pattern under load.
                 -- Gate ON CONFLICT DO UPDATE on the existing claim
                 -- being expired. Without this, two transactions that
                 -- both pass the SELECT-side NOT EXISTS check (e.g.
