@@ -190,30 +190,28 @@ where
         // (e.g. a worker whose claim was taken over by an expired-
         // claim steal and replaced with a different (worker, task))
         // must not be allowed to delete the new owner's claim just
-        // because the worker_id happens to coincide. With the guard,
-        // a stale release with the wrong task_id matches zero rows,
-        // the owner-probe runs, and the caller sees the same error
-        // shape it would have seen if the row had moved on for any
-        // other reason.
+        // because the worker_id happens to coincide.
         //
-        // The owner subselect ALSO filters on task_id so a wrong-task
-        // release returns owner=NULL → NotFound from
-        // `disambiguate_writeback`. Without this filter, a row that
-        // happens to share our worker_id but for a different task
-        // would surface as `Some(other) if other == worker_id => Ok`,
-        // silently masking the stale-caller bug.
+        // The probe returns the live row's worker_id AND task_id (no
+        // filtering on either column). `disambiguate_writeback` then
+        // verifies BOTH match in Rust before treating self-ownership as
+        // success — keeping the contract check out of the SQL where a
+        // future query refactor could silently drop it.
         let row = sqlx::query(
             "WITH del AS (
                  DELETE FROM sayiir_workflow_claims
                  WHERE instance_id = $1 AND worker_id = $2 AND task_id = $3
                  RETURNING 1
+             ),
+             probe AS (
+                 SELECT worker_id, task_id
+                 FROM sayiir_workflow_claims
+                 WHERE instance_id = $1 AND NOT EXISTS (SELECT 1 FROM del)
              )
              SELECT
                  EXISTS (SELECT 1 FROM del) AS done,
-                 (SELECT worker_id FROM sayiir_workflow_claims
-                  WHERE instance_id = $1
-                    AND task_id = $3
-                    AND NOT EXISTS (SELECT 1 FROM del)) AS owner",
+                 (SELECT worker_id FROM probe) AS owner,
+                 (SELECT task_id   FROM probe) AS current_task_id",
         )
         .bind(instance_id)
         .bind(worker_id)
@@ -241,19 +239,18 @@ where
         // Heartbeat. A no-TTL claim is eternal-until-released; mirror
         // the in-memory backend by silently no-op'ing the extension in
         // that case (no `COALESCE` — that would *introduce* a TTL).
-        // When the row exists with our worker but `expires_at IS NULL`
-        // the UPDATE returns 0 rows, the owner subselect returns our
-        // worker_id, and `disambiguate_writeback` treats self-owned-
-        // not-done as Ok(()).
+        // When the row exists with our worker AND our task_id but
+        // `expires_at IS NULL`, the UPDATE returns 0 rows and the
+        // probe returns (worker=self, task=task_id) — recognised by
+        // `disambiguate_writeback` as the legitimate no-TTL no-op.
         //
         // The UPDATE matches on (instance_id, worker_id, task_id) so a
-        // stale caller — e.g. a worker whose claim was already moved on
-        // by an expired-claim takeover, or a worker_id that's been
-        // reused on a different task — can't accidentally extend a
-        // claim that's now for a different task. Without the task_id
-        // guard, the contract of `extend_task_claim(instance, task,
-        // worker)` would silently extend whatever claim is currently
-        // attributed to that worker.
+        // stale heartbeat for a different task is a structural miss.
+        // The probe returns the LIVE row's worker_id AND task_id (no
+        // column-side filtering); `disambiguate_writeback` verifies
+        // BOTH match in Rust before treating self-ownership as success,
+        // keeping the task-scoped contract out of the SQL where a
+        // future refactor could silently drop it.
         let row = sqlx::query(
             "WITH upd AS (
                  UPDATE sayiir_workflow_claims
@@ -263,13 +260,16 @@ where
                    AND task_id = $4
                    AND expires_at IS NOT NULL
                  RETURNING 1
+             ),
+             probe AS (
+                 SELECT worker_id, task_id
+                 FROM sayiir_workflow_claims
+                 WHERE instance_id = $1 AND NOT EXISTS (SELECT 1 FROM upd)
              )
              SELECT
                  EXISTS (SELECT 1 FROM upd) AS done,
-                 (SELECT worker_id FROM sayiir_workflow_claims
-                  WHERE instance_id = $1
-                    AND task_id = $4
-                    AND NOT EXISTS (SELECT 1 FROM upd)) AS owner",
+                 (SELECT worker_id FROM probe) AS owner,
+                 (SELECT task_id   FROM probe) AS current_task_id",
         )
         .bind(instance_id)
         .bind(worker_id)
@@ -518,8 +518,7 @@ where
         let task_ids: Option<Vec<Vec<u8>>> = row.get("task_ids");
         let task_outputs: Option<Vec<Vec<u8>>> = row.get("task_outputs");
         if let (Some(ids), Some(outs)) = (task_ids, task_outputs) {
-            let mut outputs =
-                std::collections::HashMap::with_capacity(ids.len());
+            let mut outputs = std::collections::HashMap::with_capacity(ids.len());
             for (id_bytes, out_bytes) in ids.into_iter().zip(outs.into_iter()) {
                 let tid = sayiir_core::TaskId::from_slice(&id_bytes).map_err(|_| {
                     BackendError::Backend(format!(
@@ -550,23 +549,24 @@ where
     }
 }
 
-/// Decode the `(done, owner)` shape returned by the release/extend
-/// writable-CTE queries. `done` carries the success signal; `owner` is
-/// the current worker_id when the write didn't match, used to map the
-/// failure to the correct error variant.
+/// Decode the `(done, owner, current_task_id)` shape returned by the
+/// release/extend writable-CTE queries.
 ///
-/// Both call sites filter the owner subselect on the same `(instance_id,
-/// task_id)` tuple as the writable CTE, so:
-/// - owner=None: no row for this (instance, task) → NotFound.
-/// - owner=Some(me): row exists with our worker but UPDATE/DELETE
-///   matched zero rows (extend's no-TTL no-op; unreachable for release
-///   because the DELETE filters on the same three columns) → Ok.
-/// - owner=Some(x): row exists but a different worker holds it →
-///   Backend error.
+/// `done` is the hot-path success signal. When false, the probe returns
+/// the LIVE row's `(worker_id, task_id)` — the SQL applies no column-
+/// side filter, so the disambiguation is performed here in Rust where
+/// the task-scoped contract is explicit and testable:
 ///
-/// In particular, a stale caller passing a wrong task_id surfaces as
-/// NotFound rather than silently succeeding through the `Some(me)` arm
-/// — the in-memory backend's behaviour.
+/// - row absent (`owner=NULL`) → `NotFound`.
+/// - row's worker_id differs from ours → owner-mismatch `Backend` error.
+/// - row's worker_id matches but task_id differs → `NotFound` (the API
+///   is task-scoped; a worker that owns a DIFFERENT task on the same
+///   instance is not the owner of OUR task). The in-memory backend
+///   keys claims by (instance_id, task_id) and returns the same shape.
+/// - row's worker_id AND task_id both match → `Ok`. For extend this is
+///   the no-TTL no-op (UPDATE's `expires_at IS NOT NULL` gate filtered
+///   out the row); for release it is unreachable because the DELETE
+///   has already matched on all three columns when this state holds.
 fn disambiguate_writeback(
     row: &sqlx::postgres::PgRow,
     instance_id: &str,
@@ -576,12 +576,20 @@ fn disambiguate_writeback(
     if row.get::<bool, _>("done") {
         return Ok(());
     }
-    match row.get::<Option<String>, _>("owner") {
-        None => Err(BackendError::NotFound(format!("{instance_id}:{task_id}"))),
-        Some(other) if other == worker_id => Ok(()),
-        Some(other) => Err(BackendError::Backend(format!(
-            "Claim owned by different worker: {other}"
-        ))),
+    let owner: Option<String> = row.get("owner");
+    let Some(owner) = owner else {
+        return Err(BackendError::NotFound(format!("{instance_id}:{task_id}")));
+    };
+    if owner != worker_id {
+        return Err(BackendError::Backend(format!(
+            "Claim owned by different worker: {owner}"
+        )));
+    }
+    // owner == self: verify the row's task_id matches the request.
+    let current: Option<Vec<u8>> = row.get("current_task_id");
+    match current {
+        Some(bytes) if bytes.as_slice() == task_id.as_bytes().as_slice() => Ok(()),
+        _ => Err(BackendError::NotFound(format!("{instance_id}:{task_id}"))),
     }
 }
 
