@@ -8,7 +8,7 @@ use sayiir_persistence::{
 };
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use testcontainers::ImageExt;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -682,8 +682,8 @@ async fn extend_task_claim() {
     // ~the additional duration.
     let (claim_owner, claim_expires_at): (Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
         sqlx::query_as(
-            "SELECT claim_owner, claim_expires_at
-         FROM sayiir_workflow_snapshots WHERE instance_id = $1",
+            "SELECT worker_id, expires_at
+         FROM sayiir_workflow_claims WHERE instance_id = $1",
         )
         .bind("wf-1")
         .fetch_one(&pool)
@@ -695,7 +695,7 @@ async fn extend_task_claim() {
     assert_eq!(
         new_expiry_secs,
         original_expiry_secs + 300,
-        "extend should move claim_expires_at forward by exactly 300s"
+        "extend should move expires_at forward by exactly 300s"
     );
 }
 
@@ -1340,6 +1340,230 @@ async fn find_hinted_task_returns_none_when_claimed() {
         tags: vec![],
     };
     assert!(backend.find_hinted_task(&hint).await.unwrap().is_none());
+}
+
+// ─── send_event auto-resume ──────────────────────────────────────────────────
+
+/// Build an `InProgress` snapshot parked at `AtSignal { signal_name }`
+/// and save it.
+async fn seed_snapshot_at_signal(
+    backend: &PostgresBackend<JsonCodec>,
+    instance_id: &str,
+    signal_id: sayiir_core::TaskId,
+    signal_name: &str,
+    next_task_id: Option<sayiir_core::TaskId>,
+) {
+    let mut snapshot = WorkflowSnapshot::new(instance_id, "test-hash".into());
+    snapshot.update_position(ExecutionPosition::AtSignal {
+        signal_id,
+        signal_name: signal_name.to_string(),
+        wake_at: None,
+        next_task_id,
+    });
+    backend.save_snapshot(&snapshot).await.unwrap();
+}
+
+/// Park at AtSignal, send the matching signal, assert the workflow
+/// auto-resumes at the next task — the headline path PooledWorker
+/// dispatch depends on (no AwaitSignal advance logic in PooledWorker).
+#[tokio::test]
+async fn send_event_auto_resumes_at_signal() {
+    let (_c, backend) = setup().await;
+    let signal_id = sayiir_core::TaskId::from("sig-1");
+    let next_task = sayiir_core::TaskId::from("after-signal");
+
+    seed_snapshot_at_signal(&backend, "wf-resume", signal_id, "go", Some(next_task)).await;
+
+    backend
+        .send_event("wf-resume", "go", Bytes::from("payload"))
+        .await
+        .unwrap();
+
+    let snap = backend.load_snapshot("wf-resume").await.unwrap();
+    match &snap.state {
+        sayiir_core::snapshot::WorkflowSnapshotState::InProgress {
+            position: ExecutionPosition::AtTask { task_id },
+            completed_tasks,
+            ..
+        } => {
+            assert_eq!(*task_id, next_task, "position must advance to next_task_id");
+            assert!(
+                completed_tasks.contains_key(&signal_id),
+                "signal_id must appear in completed_tasks"
+            );
+        }
+        other => panic!("expected InProgress AtTask after auto-resume, got {other:?}"),
+    }
+
+    // workflow_tasks must carry the signal payload so dispatch can hand
+    // it to the next task as input (without this row a later
+    // build_join_input / load_task_result returns TaskNotFound).
+    let stored = backend
+        .load_task_result("wf-resume", &signal_id)
+        .await
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some(b"payload".as_ref()));
+}
+
+/// Park at AtSignal whose `next_task_id = None` — the signal IS the
+/// terminal node. send_event must flip the workflow to Completed AND
+/// stamp `completed_at` on the snapshot row, otherwise retention sweeps
+/// / dashboards filtering on completed_at silently miss this instance.
+#[tokio::test]
+async fn send_event_terminal_signal_sets_completed_at() {
+    let (_c, backend, pool) = setup_with_pool(DEFAULT_PG_VERSION).await;
+    let signal_id = sayiir_core::TaskId::from("sig-terminal");
+
+    seed_snapshot_at_signal(&backend, "wf-term", signal_id, "done", None).await;
+
+    backend
+        .send_event("wf-term", "done", Bytes::from("final"))
+        .await
+        .unwrap();
+
+    let snap = backend.load_snapshot("wf-term").await.unwrap();
+    match &snap.state {
+        sayiir_core::snapshot::WorkflowSnapshotState::Completed { final_output } => {
+            // The signal payload must survive mark_completed — the
+            // pre-fix code re-read it from completed_tasks AFTER
+            // mark_completed (which drops the InProgress variant and
+            // with it the completed_tasks map), persisting empty bytes.
+            assert_eq!(
+                final_output.as_ref(),
+                b"final",
+                "terminal-signal auto-resume must use the signal payload as the final output"
+            );
+        }
+        other => panic!("expected Completed after terminal-signal auto-resume, got {other:?}"),
+    }
+
+    // workflow_tasks must also carry the signal payload — `mark_completed`
+    // clears completed_tasks so a fresh `get_task_result_bytes` after the
+    // transition would return None and the task_output CTE would persist
+    // an empty payload (the bug fixed alongside this test). Read the row
+    // directly because `load_task_result`'s terminal-state fallback
+    // hydrates from the LAST `InProgress` history snapshot whose
+    // `completed_tasks` here is empty (the seed was at AtSignal); the
+    // sidecar row is the authoritative source for that case.
+    let stored: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT output FROM sayiir_workflow_tasks
+         WHERE instance_id = $1 AND task_id = $2 AND status = 'completed'",
+    )
+    .bind("wf-term")
+    .bind(signal_id.as_bytes().as_slice())
+    .fetch_optional(&pool)
+    .await
+    .unwrap()
+    .flatten();
+    assert_eq!(
+        stored.as_deref(),
+        Some(b"final".as_ref()),
+        "signal payload must reach sayiir_workflow_tasks even on the terminal path"
+    );
+
+    // completed_at must be populated on the snapshot row.
+    let row =
+        sqlx::query("SELECT completed_at FROM sayiir_workflow_snapshots WHERE instance_id = $1")
+            .bind("wf-term")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let completed_at: Option<chrono::DateTime<chrono::Utc>> = row.get("completed_at");
+    assert!(
+        completed_at.is_some(),
+        "terminal-signal auto-resume must set completed_at; got NULL"
+    );
+}
+
+/// Signal arrives BEFORE the workflow reaches AtSignal (or with a name
+/// that doesn't match the current AtSignal). The probe-first path must
+/// buffer the event and leave the snapshot untouched.
+#[tokio::test]
+async fn send_event_buffers_when_not_parked_at_signal() {
+    let (_c, backend) = setup().await;
+
+    // (a) Snapshot parked at AtTask — signal arrives early, must buffer.
+    let task_id = sayiir_core::TaskId::from("t1");
+    seed_snapshot_at_task(&backend, "wf-buffer", &task_id).await;
+    let before = backend.load_snapshot("wf-buffer").await.unwrap();
+
+    backend
+        .send_event("wf-buffer", "go", Bytes::from("early"))
+        .await
+        .unwrap();
+
+    let after = backend.load_snapshot("wf-buffer").await.unwrap();
+    // Snapshot must be unchanged on the probe-first short-circuit path.
+    match (&before.state, &after.state) {
+        (
+            sayiir_core::snapshot::WorkflowSnapshotState::InProgress {
+                position: ExecutionPosition::AtTask { task_id: a },
+                ..
+            },
+            sayiir_core::snapshot::WorkflowSnapshotState::InProgress {
+                position: ExecutionPosition::AtTask { task_id: b },
+                ..
+            },
+        ) => assert_eq!(a, b),
+        _ => panic!("snapshot state must not change when event is buffered"),
+    }
+
+    // Event must be retrievable via consume_event (FIFO buffered store).
+    let consumed = backend.consume_event("wf-buffer", "go").await.unwrap();
+    assert_eq!(consumed.as_deref(), Some(b"early".as_ref()));
+
+    // (b) Snapshot parked at AtSignal but for a DIFFERENT signal_name —
+    // must also buffer (signal_resume_target returns None).
+    let signal_id = sayiir_core::TaskId::from("sig-x");
+    seed_snapshot_at_signal(&backend, "wf-mismatch", signal_id, "expected", None).await;
+    backend
+        .send_event("wf-mismatch", "other", Bytes::from("payload"))
+        .await
+        .unwrap();
+    let snap = backend.load_snapshot("wf-mismatch").await.unwrap();
+    match &snap.state {
+        sayiir_core::snapshot::WorkflowSnapshotState::InProgress {
+            position: ExecutionPosition::AtSignal { signal_name, .. },
+            ..
+        } => assert_eq!(signal_name, "expected"),
+        _ => panic!("snapshot must remain parked at AtSignal on signal_name mismatch"),
+    }
+    let consumed = backend.consume_event("wf-mismatch", "other").await.unwrap();
+    assert_eq!(consumed.as_deref(), Some(b"payload".as_ref()));
+}
+
+/// After auto-resume, the snapshot must be runnable by `find_hinted_task`
+/// (the NOTIFY hot path) — the end-to-end guarantee the auto-resume
+/// CTE exists to provide.
+#[tokio::test]
+async fn send_event_resumed_workflow_is_dispatchable() {
+    use sayiir_persistence::TaskWakeupHint;
+
+    let (_c, backend) = setup().await;
+    let signal_id = sayiir_core::TaskId::from("sig-dispatch");
+    let next_task = sayiir_core::TaskId::from("downstream");
+
+    seed_snapshot_at_signal(&backend, "wf-dispatch", signal_id, "go", Some(next_task)).await;
+
+    backend
+        .send_event("wf-dispatch", "go", Bytes::from("payload"))
+        .await
+        .unwrap();
+
+    let hint = TaskWakeupHint {
+        instance_id: "wf-dispatch".into(),
+        task_id: *next_task.as_bytes(),
+        definition_hash: *sayiir_core::DefinitionHash::from("test-hash").as_bytes(),
+        tags: vec![],
+    };
+    let available = backend
+        .find_hinted_task(&hint)
+        .await
+        .unwrap()
+        .expect("resumed workflow must be dispatchable via find_hinted_task");
+    assert_eq!(available.task_id, next_task);
+    // The signal payload must hydrate as the input to the downstream task.
+    assert_eq!(available.input.as_ref(), b"payload");
 }
 
 /// `connect_with` must reject PostgreSQL versions below the minimum (13).

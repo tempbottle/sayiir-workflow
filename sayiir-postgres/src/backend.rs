@@ -213,6 +213,19 @@ where
             .map(|b| b.to_vec())
             .map_err(|e| BackendError::Serialization(e.to_string()))
     }
+
+    /// Encode the snapshot blob in the canonical "outputs stripped"
+    /// shape and return it alongside its SHA-256 hash.
+    pub(crate) fn encode_blob(
+        &self,
+        snapshot: &WorkflowSnapshot,
+    ) -> Result<(Vec<u8>, [u8; 32]), BackendError> {
+        let mut stripped = snapshot.clone();
+        stripped.strip_task_outputs();
+        let data = self.encode(&stripped)?;
+        let hash = crate::history::snapshot_hash(&data);
+        Ok((data, hash))
+    }
 }
 
 impl<C> PostgresBackend<C>

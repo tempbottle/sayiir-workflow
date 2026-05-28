@@ -1,0 +1,4 @@
+/target/
+# Run artefacts — only curated baselines should be committed (none yet).
+/results/*.json
+!/results/.gitkeep

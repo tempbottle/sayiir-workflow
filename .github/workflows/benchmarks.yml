@@ -1,0 +1,276 @@
+name: Benchmarks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmarks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      bench: ${{ steps.filter.outputs.bench }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          token: ''
+          filters: |
+            bench:
+              - 'sayiir-core/**'
+              - 'sayiir-persistence/**'
+              - 'sayiir-postgres/**'
+              - 'sayiir-runtime/**'
+              - 'sayiir-macros/**'
+              - 'benchmarks/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+
+  bench-smoke:
+    name: Benchmark smoke
+    needs: changes
+    if: needs.changes.outputs.bench == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Job-scoped permissions, narrower than a workflow-level default:
+    #   * contents:read         — actions/checkout
+    #   * actions:read          — dawidd6/action-download-artifact fetches
+    #                             the `bench-baseline-main` artifact via the
+    #                             Actions API; missing this scope 403s.
+    #   * pull-requests:write   — only used by the PR-only sticky-comment
+    #                             step; push-to-main runs skip that step,
+    #                             so the elevated scope is dead weight on
+    #                             those runs but is still scoped to this
+    #                             single job rather than the whole workflow.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sayiir_bench
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sayiir_bench"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+          --shm-size=512m
+
+    env:
+      SAYIIR_BENCH_POSTGRES_URL: postgresql://postgres:postgres@127.0.0.1:5432/sayiir_bench
+      RUST_LOG: warn,sayiir_bench=info
+      # Bench parity across PR-vs-main: every scenario invocation in
+      # this workflow uses the same numbers regardless of trigger, so
+      # the comparison apples-to-apples. Keep these here, not duplicated
+      # per step, so a future tweak only edits one place.
+      LINEAR_WORKFLOWS: "5000"
+      LINEAR_WARMUP: "200"
+      LINEAR_STEPS: "4"
+      FANOUT_WORKFLOWS: "500"
+      FANOUT_CHILDREN: "10"
+      SIGNAL_WORKFLOWS: "1000"
+      SLEEPING_WORKFLOWS: "1000"
+      SLEEPING_SLEEP_SECS: "3"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "benchmarks -> target"
+          key: bench-smoke
+
+      - name: Build sayiir-bench
+        run: cargo build --release --manifest-path benchmarks/Cargo.toml --bin sayiir-bench
+
+      # ── Run scenarios ───────────────────────────────────────────────
+      # Each scenario writes one JSON to benchmarks/results/. Order:
+      # cheapest first so a misconfigured run fails fast on `linear`.
+      - name: Linear (steps=${{ env.LINEAR_STEPS }})
+        run: |
+          ./benchmarks/target/release/sayiir-bench \
+            --results-dir benchmarks/results \
+            linear \
+              --workflows "$LINEAR_WORKFLOWS" \
+              --warmup-workflows "$LINEAR_WARMUP" \
+              --steps "$LINEAR_STEPS" \
+              --concurrency 32 \
+              --workers 8 \
+              --poll-ms 5 \
+              --batch-size 64
+
+      - name: Fanout (children=${{ env.FANOUT_CHILDREN }})
+        run: |
+          ./benchmarks/target/release/sayiir-bench \
+            --results-dir benchmarks/results \
+            fanout \
+              --workflows "$FANOUT_WORKFLOWS" \
+              --warmup-workflows 50 \
+              --children "$FANOUT_CHILDREN" \
+              --concurrency 32 \
+              --workers 8 \
+              --poll-ms 5 \
+              --batch-size 64
+
+      - name: Signal-driven
+        run: |
+          ./benchmarks/target/release/sayiir-bench \
+            --results-dir benchmarks/results \
+            signal-driven \
+              --workflows "$SIGNAL_WORKFLOWS" \
+              --concurrency 32 \
+              --workers 8 \
+              --poll-ms 5 \
+              --batch-size 64
+
+      - name: Sleeping-giants (${{ env.SLEEPING_WORKFLOWS }} wf x ${{ env.SLEEPING_SLEEP_SECS }}s)
+        run: |
+          ./benchmarks/target/release/sayiir-bench \
+            --results-dir benchmarks/results \
+            sleeping-giants \
+              --workflows "$SLEEPING_WORKFLOWS" \
+              --concurrency 32 \
+              --workers 8 \
+              --sleep-secs "$SLEEPING_SLEEP_SECS" \
+              --poll-ms 50 \
+              --batch-size 32
+
+      # ── Per-run artifact (always uploaded) ─────────────────────────
+      - name: Upload result JSONs (per-run)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.run_id }}
+          path: benchmarks/results/*.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ── Main-only: refresh the stable "baseline" artifact ──────────
+      # `overwrite: true` makes the artifact name stable across main
+      # pushes — PR jobs always fetch the latest. 90-day retention so
+      # a slow-moving PR can still find a baseline if main hasn't
+      # changed in months.
+      - name: Upload main baseline artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-baseline-main
+          path: benchmarks/results/*.json
+          retention-days: 90
+          overwrite: true
+
+      # ── PR-only: compare against the latest main baseline ──────────
+      # Skips silently if no main baseline exists yet (first run on a
+      # fresh repo, or before this workflow lands). Downloads via
+      # dawidd6/action-download-artifact because the stock
+      # actions/download-artifact only fetches from the current run.
+      - name: Fetch main baseline (PR only)
+        id: fetch_baseline
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: bench-baseline-main
+          workflow: benchmarks.yml
+          branch: main
+          event: push
+          path: benchmarks/baseline-main
+          if_no_artifact_found: warn
+
+      # Render one markdown block per scenario, concatenate, post as
+      # a single sticky comment. `--report-only` so a regression
+      # doesn't fail the workflow (the marketing-grade gate is the
+      # commented diff itself; merge protection is a separate
+      # concern). The `header` argument to the sticky-comment action
+      # is what makes updates replace the previous body instead of
+      # stacking.
+      #
+      # PR_SHA goes through `env:` not inline ${{ }} interpolation:
+      # head.sha is sanitized by GitHub but the workflow-injection
+      # guidance is to never interpolate `github.event.*` into a
+      # `run:` body — env-var the value once, reference $PR_SHA below.
+      - name: Build PR comment body
+        id: render
+        if: github.event_name == 'pull_request' && steps.fetch_baseline.outcome == 'success'
+        env:
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          OUT=benchmarks/results/pr-comment.md
+          : > "$OUT"
+          BASE_SHA="$(jq -r '.git_sha // "unknown"' benchmarks/baseline-main/linear-*.json 2>/dev/null | head -1)"
+          {
+            echo "## Benchmark vs \`main\`"
+            echo
+            echo "Candidate: \`${PR_SHA:0:12}\` · Baseline: \`${BASE_SHA:0:12}\`"
+            echo
+          } >> "$OUT"
+
+          # Pick the most-recent JSON per scenario (sweep / repeat runs
+          # would produce more than one). The bench writes filenames
+          # of shape "<scenario>-<UTC timestamp>.json" — sort lex,
+          # take the last; that's the newest.
+          for scenario in linear fanout signal-driven sleeping-giants; do
+            baseline_file="$(ls -1 benchmarks/baseline-main/${scenario}-*.json 2>/dev/null | tail -1 || true)"
+            candidate_file="$(ls -1 benchmarks/results/${scenario}-*.json 2>/dev/null | tail -1 || true)"
+            if [[ -z "$baseline_file" || -z "$candidate_file" ]]; then
+              echo "(no baseline or candidate for ${scenario}; skipping)" >> "$OUT"
+              echo >> "$OUT"
+              continue
+            fi
+            ./benchmarks/target/release/sayiir-bench compare \
+              --scenario "$scenario" \
+              --baseline "$baseline_file" \
+              --candidate "$candidate_file" \
+              --format markdown \
+              --report-only \
+              --output /tmp/cmp-"$scenario".md > /dev/null
+            cat /tmp/cmp-"$scenario".md >> "$OUT"
+            echo >> "$OUT"
+          done
+
+          {
+            echo "<sub>Bench: \`linear --steps ${LINEAR_STEPS}\` (${LINEAR_WORKFLOWS} wf), "
+            echo "\`fanout --children ${FANOUT_CHILDREN}\` (${FANOUT_WORKFLOWS} wf), "
+            echo "\`signal-driven\` (${SIGNAL_WORKFLOWS} wf), "
+            echo "\`sleeping-giants ${SLEEPING_WORKFLOWS} wf × ${SLEEPING_SLEEP_SECS}s\`. "
+            echo "Hardware: GitHub-hosted \`ubuntu-latest\` (2-core / 7 GB / Postgres 17 service container). "
+            echo "Single-run noise on this hardware is ±10%; treat individual rows as directional, "
+            echo "and watch the trend across multiple PR pushes.</sub>"
+          } >> "$OUT"
+
+          # Sticky-comment expects body via input. Stage it for the
+          # next step rather than inlining a heredoc into the action.
+          echo "body_path=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Post sticky PR comment
+        if: github.event_name == 'pull_request' && steps.render.outcome == 'success'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          # The header anchors the comment so subsequent runs *replace*
+          # this one instead of stacking. Keep it unique to this
+          # workflow — if we ever add a second sticky comment (e.g.
+          # coverage), it needs a different header.
+          header: sayiir-bench-vs-main
+          path: ${{ steps.render.outputs.body_path }}

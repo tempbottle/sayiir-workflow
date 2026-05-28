@@ -1,0 +1,85 @@
+{
+  "title": "Sayiir Benchmark",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {"refresh_intervals": ["1s", "5s", "10s", "30s"]},
+  "tags": ["sayiir", "benchmark"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Workflows completed (last 1m)",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "sum(rate(sayiir_bench_workflows_completed_total[1m])) * 60",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Submission vs completion rate (wf/s)",
+      "gridPos": {"x": 6, "y": 0, "w": 18, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(sayiir_bench_workflows_submitted_total[10s]))",
+          "legendFormat": "submitted",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(sayiir_bench_workflows_completed_total[10s]))",
+          "legendFormat": "completed",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "End-to-end latency p50/p95/p99 (ms)",
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le) (rate(sayiir_bench_workflow_latency_ms_bucket[1m])))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(sayiir_bench_workflow_latency_ms_bucket[1m])))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(sayiir_bench_workflow_latency_ms_bucket[1m])))", "legendFormat": "p99", "refId": "C"}
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Postgres TPS",
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "rate(pg_stat_database_xact_commit{datname=\"sayiir_bench\"}[10s])", "legendFormat": "commits", "refId": "A"},
+        {"expr": "rate(pg_stat_database_xact_rollback{datname=\"sayiir_bench\"}[10s])", "legendFormat": "rollbacks", "refId": "B"}
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Driver RSS (MB)",
+      "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "container_memory_working_set_bytes{name=~\"sayiir-bench-driver|sayiir-bench-postgres\"} / (1024*1024)",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Postgres active connections",
+      "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "pg_stat_database_numbackends{datname=\"sayiir_bench\"}", "refId": "A"}
+      ]
+    }
+  ]
+}

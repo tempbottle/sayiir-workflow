@@ -1,10 +1,18 @@
 -- Performance/schema rework consolidated on top of the 0.5.0 release.
 --
 -- BREAKING: workflows running across this migration must be drained
--- and restarted; pre-migration history rows have a NULL `data_hash`
+-- and restarted. Pre-migration history rows have a NULL `data_hash`
 -- and cannot be resolved by hash once the KV-offload cutover lands.
--- Operators with in-flight task claims should stop workers first
--- (the dedicated claim table is dropped below).
+--
+-- Operators with in-flight task claims should stop workers first.
+-- `sayiir_task_claims` is RENAMED in place to `sayiir_workflow_claims`
+-- (not dropped) — existing rows, indexes, and statistics carry over.
+-- The PK narrows from `(instance_id, task_id)` to `(instance_id)` so
+-- any instance with more than one pre-migration claim row (multi-task
+-- in-flight workflows from 0.5.x, or unreleased claims from crashed
+-- workers) will trip a unique-key violation at `ADD PRIMARY KEY` time
+-- and abort the migration mid-run. Truncate or dedupe claims before
+-- running this migration if a graceful drain isn't sufficient.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -18,9 +26,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 --   - data_hash: mirrors history.data_hash at history_version so the
 --     future KV cutover can resolve the current blob without the
 --     history JOIN.
---   - claim_owner / claim_expires_at: fold the old sayiir_task_claims
---     table into the snapshot row. Deliberately left un-indexed so
---     claim/release/heartbeat UPDATEs stay HOT-eligible.
 ALTER TABLE sayiir_workflow_snapshots
     ALTER COLUMN definition_hash TYPE BYTEA
         USING CASE WHEN definition_hash IS NULL THEN NULL
@@ -30,9 +35,7 @@ ALTER TABLE sayiir_workflow_snapshots
                    ELSE digest(current_task_id, 'sha256') END,
     ALTER COLUMN data DROP NOT NULL,
     ADD COLUMN IF NOT EXISTS history_version  INT NOT NULL DEFAULT 1,
-    ADD COLUMN IF NOT EXISTS data_hash        BYTEA,
-    ADD COLUMN IF NOT EXISTS claim_owner      TEXT,
-    ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS data_hash        BYTEA;
 
 UPDATE sayiir_workflow_snapshots s
 SET history_version = COALESCE(
@@ -78,7 +81,19 @@ SELECT
     updated_at
 FROM sayiir_workflow_snapshots;
 
-DROP TABLE IF EXISTS sayiir_task_claims;
+-- sayiir_task_claims → sayiir_workflow_claims --------------------------------
+-- Keep the same physical table (preserve its indexes, statistics, and
+-- any rows already drained by an operator stopping workers before the
+-- migration); just rename, narrow the PK, and convert task_id to BYTEA.
+-- One row per in-flight workflow now (only one task in flight per
+-- instance, so the PK is just instance_id). Eligibility is a NOT
+-- EXISTS join on this table; it stays small and hot in shared_buffers.
+ALTER TABLE sayiir_task_claims RENAME TO sayiir_workflow_claims;
+ALTER TABLE sayiir_workflow_claims
+    ALTER COLUMN task_id TYPE BYTEA
+        USING digest(task_id, 'sha256');
+ALTER TABLE sayiir_workflow_claims DROP CONSTRAINT sayiir_task_claims_pkey;
+ALTER TABLE sayiir_workflow_claims ADD PRIMARY KEY (instance_id);
 
 COMMENT ON COLUMN sayiir_workflow_snapshots.data_hash IS
     'WIP: SHA-256 of the current snapshot blob. Mirrors history.data_hash at s.history_version.';

@@ -285,8 +285,20 @@ where
     }
 
     /// Set the TTL for task claims.
+    ///
+    /// `None` means "never expires" — a crashed worker holding such a
+    /// claim pins the workflow undispatchable until the claim row is
+    /// manually released. Prefer a finite TTL (default 5 minutes) so
+    /// crashed-worker recovery happens via the eligibility predicate's
+    /// `expires_at > now()` check.
     #[must_use]
     pub fn with_claim_ttl(mut self, ttl: Option<Duration>) -> Self {
+        if ttl.is_none() {
+            tracing::warn!(
+                "PooledWorker::with_claim_ttl(None) disables claim expiry; \
+                 a crashed worker will pin its workflow until manual release"
+            );
+        }
         self.claim_ttl = ttl;
         self
     }
@@ -655,15 +667,14 @@ where
             let _ = tracing::Span::current().set_parent(remote_ctx);
         }
 
-        let mut snapshot = self
-            .backend
-            .load_snapshot(&available_task.instance_id)
-            .await?;
+        // Workers that lose the claim race drop the `available_task`
+        // (and its `Arc<WorkflowSnapshot>`) cheaply — keep the deep
+        // clone strictly past the claim_task gate.
         let already_completed = Self::validate_task_preconditions(
             definition_hash,
             &ext_wf.task_index,
             available_task,
-            &snapshot,
+            &available_task.snapshot,
         )?;
         if already_completed {
             return Ok(WorkflowStatus::InProgress);
@@ -677,6 +688,9 @@ where
             claim.release_quietly().await;
             return Ok(status);
         }
+
+        // Past the claim gate — now pay for the deep clone exactly once.
+        let mut snapshot = (*available_task.snapshot).clone();
 
         tracing::debug!(
             instance_id = %available_task.instance_id,
@@ -720,8 +734,14 @@ where
         let deadline =
             if let Some(timeout) = indexed_meta.and_then(sayiir_core::TaskNodeMetadata::timeout) {
                 snapshot.set_task_deadline(task_id, timeout);
-                let _ = self.backend.save_snapshot(snapshot).await;
                 snapshot.refresh_task_deadline();
+                // Deadline lives in-process for `run_with_heartbeat`; it
+                // is persisted on the next save_task_result (which holds
+                // a FOR UPDATE lock and so can't race with check_and_*).
+                // A bare save_snapshot here would clobber a
+                // check_and_cancel that landed between
+                // check_post_claim_guards and now, silently resurrecting
+                // a cancelled workflow into InProgress.
                 snapshot.task_deadline.clone()
             } else {
                 None
@@ -1033,16 +1053,14 @@ where
             let _ = tracing::Span::current().set_parent(remote_ctx);
         }
 
-        // 1. Load snapshot + pure validation
-        let mut snapshot = self
-            .backend
-            .load_snapshot(&available_task.instance_id)
-            .await?;
+        // 1. Use the snapshot the dispatch SELECT already decoded.
+        // Lost-race workers drop the `Arc<WorkflowSnapshot>` cheaply —
+        // keep the deep clone strictly past the claim_task gate.
         let already_completed = Self::validate_task_preconditions(
             workflow.definition_hash(),
             workflow.task_index(),
             &available_task,
-            &snapshot,
+            &available_task.snapshot,
         )?;
         if already_completed {
             return Ok(WorkflowStatus::InProgress);
@@ -1057,6 +1075,9 @@ where
             claim.release_quietly().await;
             return Ok(status);
         }
+
+        // Past the claim gate — now pay for the deep clone exactly once.
+        let mut snapshot = (*available_task.snapshot).clone();
 
         tracing::debug!(
             instance_id = %available_task.instance_id,
@@ -1103,7 +1124,47 @@ where
         let continuation = workflow.continuation();
         let task_index = workflow.task_index();
         let task_id = available_task.task_id;
-        let input = available_task.input.clone();
+        // If this task is the entry of a Fork's join, rebuild the
+        // `NamedBranchResults` envelope the join body deserialises into
+        // `BranchOutputs`. The PooledWorker dispatch path otherwise
+        // hands the join the LAST branch's output (whatever
+        // `get_last_task_output` saw), which fails to deserialise as
+        // soon as any branch result is read by id. The in-process
+        // runner builds this through `resolve_join`; for the worker
+        // path we have to do it explicitly because each task is its
+        // own dispatch and there is no in-memory `branch_results`.
+        let input = match Self::find_fork_branches_for_join(continuation, &task_id) {
+            Some(branches) => {
+                let build = || -> Result<Bytes, crate::error::RuntimeError> {
+                    let mut results = Vec::with_capacity(branches.len());
+                    for branch in branches {
+                        // The join envelope keys results by `branch.id()`
+                        // (the branch entry node) so user code can look
+                        // up `results["branch-a"]`, but the actual output
+                        // is stored under the branch's TERMINAL task —
+                        // for multi-step branches the entry task's
+                        // output is an intermediate value, not the
+                        // branch's "result". TaskId::from(branch.id())
+                        // works only for single-Task branches and either
+                        // returns the wrong bytes (entry task's output)
+                        // or surfaces a TaskNotFound that hides the real
+                        // problem.
+                        let branch_name = branch.id().to_string();
+                        let terminal_tid = sayiir_core::TaskId::from(branch.terminal_task_id());
+                        let output = snapshot
+                            .get_task_result_bytes(&terminal_tid)
+                            .ok_or_else(|| WorkflowError::TaskNotFound(branch_name.clone()))?;
+                        results.push((branch_name, output));
+                    }
+                    crate::execution::serialize_branch_results(&results, workflow.codec().as_ref())
+                };
+                match build() {
+                    Ok(bytes) => bytes,
+                    Err(e) => return ExecutionOutcome::TaskError(e),
+                }
+            }
+            None => available_task.input.clone(),
+        };
         // Resolve human-readable task name from the prebuilt index for the
         // task context exposed to user code (no tree walk, no rehashing).
         let indexed_meta = task_index.get(&task_id);
@@ -1114,10 +1175,14 @@ where
         let deadline =
             if let Some(timeout) = indexed_meta.and_then(sayiir_core::TaskNodeMetadata::timeout) {
                 snapshot.set_task_deadline(task_id, timeout);
-                let _ = self.backend.save_snapshot(snapshot).await;
-                // Refresh deadline to now + timeout so it measures actual execution
-                // time, not time spent on the snapshot save above.
                 snapshot.refresh_task_deadline();
+                // Deadline lives in-process for `run_with_heartbeat`; it
+                // is persisted on the next save_task_result (which holds
+                // a FOR UPDATE lock and so can't race with check_and_*).
+                // A bare save_snapshot here would clobber a
+                // check_and_cancel that landed between
+                // check_post_claim_guards and now, silently resurrecting
+                // a cancelled workflow into InProgress.
                 snapshot.task_deadline.clone()
             } else {
                 None
@@ -1541,8 +1606,73 @@ where
             snapshot.trace_parent = crate::trace_context::current_trace_parent();
         }
         self.backend.save_snapshot(snapshot).await?;
+
+        // If we just entered AtSignal, drain any event that was
+        // buffered while the snapshot was still at AtTask. The
+        // race: send_event takes the lock during this worker's task
+        // body (status='InProgress', position=AtTask), sees no
+        // AtSignal to resume, INSERTs into sayiir_workflow_events,
+        // and commits. Then this save_snapshot advances to AtSignal,
+        // but PooledWorker has no AwaitSignal poll loop, so the
+        // workflow would sit forever with a matching event sitting
+        // unconsumed in the buffer. Closing the race here keeps the
+        // signal-driven dispatch path single-source (send_event is
+        // still primary; this is the worker's belt-and-suspenders).
+        self.drain_pending_signal(&available_task.instance_id, snapshot)
+            .await?;
+
         claim.release().await?;
         Ok(())
+    }
+
+    /// If `snapshot` is parked at `AtSignal { signal_name }` and a
+    /// matching event sits buffered in `sayiir_workflow_events`,
+    /// consume it and advance the snapshot to its next position. Loops
+    /// in case advancement lands on another `AtSignal` whose buffered
+    /// event is also already waiting.
+    async fn drain_pending_signal(
+        &self,
+        instance_id: &Arc<str>,
+        snapshot: &mut WorkflowSnapshot,
+    ) -> Result<(), crate::error::RuntimeError> {
+        loop {
+            let (signal_id, signal_name, next_task_id) = match &snapshot.state {
+                sayiir_core::snapshot::WorkflowSnapshotState::InProgress {
+                    position:
+                        sayiir_core::snapshot::ExecutionPosition::AtSignal {
+                            signal_id,
+                            signal_name,
+                            next_task_id,
+                            ..
+                        },
+                    ..
+                } => (*signal_id, signal_name.clone(), *next_task_id),
+                _ => return Ok(()),
+            };
+
+            let Some(payload) = self
+                .backend
+                .consume_event(instance_id, &signal_name)
+                .await?
+            else {
+                return Ok(());
+            };
+
+            tracing::debug!(
+                instance_id = %instance_id,
+                %signal_name,
+                "draining buffered signal that landed during the AtTask→AtSignal transition"
+            );
+            snapshot.mark_task_completed(signal_id, payload.clone());
+            if let Some(next_id) = next_task_id {
+                snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
+                    task_id: next_id,
+                });
+            } else {
+                snapshot.mark_completed(payload);
+            }
+            self.backend.save_snapshot(snapshot).await?;
+        }
     }
 
     /// Determine workflow status after a task completes.
@@ -1601,6 +1731,74 @@ where
                 "Task completed, workflow continues"
             );
             Ok(WorkflowStatus::InProgress)
+        }
+    }
+
+    /// If `task_id` is the entry task of a `Fork`'s join continuation,
+    /// return the slice of branches whose outputs feed the join. The
+    /// `PooledWorker` dispatches each task with `available_task.input`
+    /// set to the previous task's output — for a join, that's just one
+    /// branch's output, not the `NamedBranchResults` the join body
+    /// expects. Callers use this to rebuild the join input from
+    /// `snapshot.completed_tasks` before invoking the join task.
+    fn find_fork_branches_for_join<'a>(
+        continuation: &'a WorkflowContinuation,
+        task_id: &sayiir_core::TaskId,
+    ) -> Option<&'a [Arc<WorkflowContinuation>]> {
+        match continuation {
+            WorkflowContinuation::Task { next, .. }
+            | WorkflowContinuation::Delay { next, .. }
+            | WorkflowContinuation::AwaitSignal { next, .. } => next
+                .as_deref()
+                .and_then(|n| Self::find_fork_branches_for_join(n, task_id)),
+            WorkflowContinuation::Fork { branches, join, .. } => {
+                if let Some(join_cont) = join {
+                    let join_first = sayiir_core::TaskId::from(join_cont.first_task_id());
+                    if join_first == *task_id {
+                        return Some(&branches[..]);
+                    }
+                    if let Some(b) = Self::find_fork_branches_for_join(join_cont, task_id) {
+                        return Some(b);
+                    }
+                }
+                for branch in branches {
+                    if let Some(b) = Self::find_fork_branches_for_join(branch, task_id) {
+                        return Some(b);
+                    }
+                }
+                None
+            }
+            WorkflowContinuation::Branch {
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                for branch_cont in branches.values() {
+                    if let Some(b) = Self::find_fork_branches_for_join(branch_cont, task_id) {
+                        return Some(b);
+                    }
+                }
+                if let Some(def) = default
+                    && let Some(b) = Self::find_fork_branches_for_join(def, task_id)
+                {
+                    return Some(b);
+                }
+                next.as_deref()
+                    .and_then(|n| Self::find_fork_branches_for_join(n, task_id))
+            }
+            WorkflowContinuation::Loop { body, next, .. } => {
+                Self::find_fork_branches_for_join(body, task_id).or_else(|| {
+                    next.as_deref()
+                        .and_then(|n| Self::find_fork_branches_for_join(n, task_id))
+                })
+            }
+            WorkflowContinuation::ChildWorkflow { child, next, .. } => {
+                Self::find_fork_branches_for_join(child, task_id).or_else(|| {
+                    next.as_deref()
+                        .and_then(|n| Self::find_fork_branches_for_join(n, task_id))
+                })
+            }
         }
     }
 
@@ -1873,13 +2071,48 @@ where
                 }
             }
             WorkflowContinuation::Fork { branches, join, .. } => {
-                // Check if any branch task completed
+                // First let recursion advance position WITHIN a branch (for
+                // multi-task branch chains) or within the join continuation.
                 for branch in branches {
                     Self::update_position_after_task(branch, completed_task_id, snapshot)?;
                 }
-                // Check join
                 if let Some(join_cont) = join {
                     Self::update_position_after_task(join_cont, completed_task_id, snapshot)?;
+                }
+
+                // If recursion didn't move the position off the just-completed
+                // task, we finished a branch's terminal node — the inner Task
+                // arm has no `next` to advance to. Drive the fork forward at
+                // this level: pick the next branch that hasn't started, or
+                // step into the join when every branch is done. Without this
+                // step, single-Task branches (the common fan-out shape) leave
+                // the snapshot pinned to `AtTask(branch_n)` forever and the
+                // next dispatch just re-discovers the same already-completed
+                // task — workflow stalls indefinitely.
+                let still_at_completed = snapshot
+                    .current_task_id()
+                    .is_some_and(|c| c == *completed_task_id);
+                if !still_at_completed {
+                    return Ok(());
+                }
+
+                // Sequential branch execution: the first branch whose entry
+                // task has no result yet is where we resume. Matches
+                // `collect_cached_branches`' lookup so the two views of "branch
+                // is done" stay in sync.
+                for branch in branches {
+                    let first_tid = sayiir_core::TaskId::from(branch.first_task_id());
+                    if snapshot.get_task_result(&first_tid).is_none() {
+                        Self::set_position_at(branch, snapshot)?;
+                        return Ok(());
+                    }
+                }
+
+                // Every branch finished — advance to the join. If the fork has
+                // no join, leave the position at the last completed task and
+                // let `is_workflow_complete` mark the workflow done.
+                if let Some(join_cont) = join {
+                    Self::set_position_at(join_cont, snapshot)?;
                 }
             }
             WorkflowContinuation::Branch {

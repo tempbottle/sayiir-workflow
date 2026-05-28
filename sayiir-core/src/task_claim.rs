@@ -157,4 +157,18 @@ pub struct AvailableTask {
     pub workflow_definition_hash: crate::DefinitionHash,
     /// W3C `traceparent` header for distributed trace context propagation.
     pub trace_parent: Option<String>,
+    /// Workflow state at dispatch time. Backends decode this from the
+    /// history JOIN they already issue for the dispatch SELECT, so
+    /// passing it through lets the worker skip a separate `load_snapshot`
+    /// round-trip. Safe to use post-claim: nothing mutates the snapshot
+    /// blob between dispatch and execution other than the worker
+    /// itself, and signals (which don't touch the blob) are re-checked
+    /// in the post-claim guard.
+    ///
+    /// Wrapped in `Arc` so the dispatch loop can move the owned
+    /// snapshot in once, and so workers that lose the claim race drop
+    /// their copy cheaply (refcount decrement). Only the worker that
+    /// actually executes the task pays a deep `clone()` — and only
+    /// when it needs a mutable working copy.
+    pub snapshot: Arc<crate::snapshot::WorkflowSnapshot>,
 }

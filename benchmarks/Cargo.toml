@@ -1,0 +1,58 @@
+[package]
+name = "sayiir-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Representative performance benchmark for Sayiir on Postgres"
+
+[[bin]]
+name = "sayiir-bench"
+path = "src/main.rs"
+
+[dependencies]
+# Sayiir — path deps while iterating on the chore/benchmarks branch.
+# Swap to crates.io versions once the benchmark stabilises.
+sayiir-core = { path = "../sayiir-core" }
+sayiir-runtime = { path = "../sayiir-runtime", features = ["json", "macros", "otel"] }
+sayiir-persistence = { path = "../sayiir-persistence" }
+sayiir-postgres = { path = "../sayiir-postgres" }
+
+# Async runtime + Postgres pool
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Measurement
+hdrhistogram = "7"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false, features = ["http-listener"] }
+
+# Reporting + HTTP client for Prometheus snapshot
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+# Markdown table rendering for `compare --format markdown` (the PR
+# comment body). `ASCII_MARKDOWN` preset emits GFM-compatible pipe
+# tables with right-alignment for numerics — better than hand-rolling
+# the `writeln!` chains, which silently break alignment when a
+# scenario introduces a longer metric name.
+comfy-table = { version = "7", default-features = false }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Error handling for the binary
+anyhow = "1"
+bytes = "1"
+futures = "0.3"
+flume = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

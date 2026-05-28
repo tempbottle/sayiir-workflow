@@ -73,3 +73,16 @@ mod task_result_store;
 mod wakeup;
 
 pub use backend::{PoolOptions, PostgresBackend};
+pub use wakeup::wakeup_drops_total;
+
+/// Per-instance child tables — i.e. everything that holds rows keyed by
+/// `instance_id` other than `sayiir_workflow_snapshots` itself. Source
+/// of truth for both `delete_snapshot`'s cleanup loop and the
+/// benchmark's `reset_sayiir_tables` truncate.
+pub const WORKFLOW_CHILD_TABLES: &[&str] = &[
+    "sayiir_workflow_snapshot_history",
+    "sayiir_workflow_tasks",
+    "sayiir_workflow_events",
+    "sayiir_workflow_signals",
+    "sayiir_workflow_claims",
+];

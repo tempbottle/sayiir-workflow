@@ -1,0 +1,43 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 200ms
+    send_batch_size: 1024
+  # Promote select span attributes into Prometheus labels.
+  attributes/promote:
+    actions:
+      - key: instance_id
+        action: upsert
+        from_attribute: instance_id
+
+exporters:
+  # Convert spans to span-duration histograms for Prometheus.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: sayiir
+    send_timestamps: true
+    metric_expiration: 5m
+    enable_open_metrics: true
+    resource_to_telemetry_conversion:
+      enabled: true
+  # Mirror to stdout while iterating; comment out for production runs.
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus, debug]

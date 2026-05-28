@@ -661,6 +661,50 @@ impl WorkflowSnapshot {
         }
     }
 
+    /// Replace every completed task's `output` with empty `Bytes`. Used by
+    /// backends that stage outputs in a sidecar table and don't want to
+    /// duplicate them in the encoded snapshot blob.
+    pub fn strip_task_outputs(&mut self) {
+        if let Some(completed) = self.completed_tasks_mut() {
+            for result in completed.values_mut() {
+                result.output = Bytes::new();
+            }
+        }
+    }
+
+    /// Patch outputs back onto completed-task results from an external
+    /// source (e.g. the `workflow_tasks` sidecar table). Outputs for
+    /// task IDs not currently in `completed_tasks` are silently
+    /// dropped — the snapshot owns the canonical set of completed tasks.
+    pub fn hydrate_task_outputs<I>(&mut self, outputs: I)
+    where
+        I: IntoIterator<Item = (crate::TaskId, Bytes)>,
+    {
+        let Some(completed) = self.completed_tasks_mut() else {
+            return;
+        };
+        for (task_id, output) in outputs {
+            if let Some(result) = completed.get_mut(&task_id) {
+                result.output = output;
+            }
+        }
+    }
+
+    fn completed_tasks_mut(&mut self) -> Option<&mut HashMap<crate::TaskId, TaskResult>> {
+        match &mut self.state {
+            WorkflowSnapshotState::InProgress {
+                completed_tasks, ..
+            }
+            | WorkflowSnapshotState::Cancelled {
+                completed_tasks, ..
+            }
+            | WorkflowSnapshotState::Paused {
+                completed_tasks, ..
+            } => Some(completed_tasks),
+            WorkflowSnapshotState::Completed { .. } | WorkflowSnapshotState::Failed { .. } => None,
+        }
+    }
+
     /// Mark a task as completed and store its result.
     pub fn mark_task_completed(&mut self, task_id: crate::TaskId, output: Bytes) {
         if let WorkflowSnapshotState::InProgress {
@@ -672,6 +716,25 @@ impl WorkflowSnapshot {
             completed_tasks.insert(task_id, TaskResult { task_id, output });
             *last_completed_task_id = Some(task_id);
             self.updated_at = Self::current_timestamp();
+        }
+    }
+
+    /// ID of the most recently completed task, if any. Set by
+    /// [`mark_task_completed`] and surfaced here so persistence
+    /// backends can write the just-completed output without scanning
+    /// the entire `completed_tasks` map.
+    #[must_use]
+    pub fn last_completed_task_id(&self) -> Option<crate::TaskId> {
+        match &self.state {
+            WorkflowSnapshotState::InProgress {
+                last_completed_task_id,
+                ..
+            }
+            | WorkflowSnapshotState::Paused {
+                last_completed_task_id,
+                ..
+            } => *last_completed_task_id,
+            _ => None,
         }
     }
 

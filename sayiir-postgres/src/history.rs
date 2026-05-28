@@ -19,6 +19,9 @@
 //! history shape, including the `data_hash` (SHA-256 of the encoded
 //! blob) that paves the way for a future KV/object-store offload.
 
+use std::collections::HashMap;
+
+use bytes::Bytes;
 use sayiir_core::codec::{self, Decoder};
 use sayiir_core::snapshot::WorkflowSnapshot;
 use sayiir_persistence::BackendError;
@@ -28,11 +31,97 @@ use sqlx::{PgConnection, Row};
 use crate::backend::PostgresBackend;
 use crate::error::PgError;
 
-/// SQL fragment joining `sayiir_workflow_snapshots s` to its canonical
-/// history row. Inlined into every read path that needs the blob —
-/// kept in one place so the join shape can't drift across sites.
-pub(crate) const HISTORY_JOIN: &str = "JOIN sayiir_workflow_snapshot_history h
-                 ON h.instance_id = s.instance_id AND h.version = s.history_version";
+/// Fetch the per-task `output` blobs from `sayiir_workflow_tasks` for one
+/// instance and return them keyed by `TaskId`. Snapshot blobs no longer
+/// carry the outputs (see [`WorkflowSnapshot::strip_task_outputs`]), so
+/// every load path that hands a snapshot to the runtime calls this and
+/// then [`WorkflowSnapshot::hydrate_task_outputs`].
+pub(crate) async fn fetch_task_outputs<'e, E>(
+    executor: E,
+    instance_id: &str,
+) -> Result<HashMap<sayiir_core::TaskId, Bytes>, BackendError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let rows = sqlx::query(
+        "SELECT task_id, output FROM sayiir_workflow_tasks
+         WHERE instance_id = $1 AND status = 'completed' AND output IS NOT NULL",
+    )
+    .bind(instance_id)
+    .fetch_all(executor)
+    .await
+    .map_err(PgError)?;
+
+    let mut outputs = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let task_id_bytes: &[u8] = row.get("task_id");
+        let task_id = sayiir_core::TaskId::from_slice(task_id_bytes).map_err(|_| {
+            // sayiir_workflow_tasks.task_id is BYTEA after migration 008
+            // and is always written as a 32-byte SHA-256 (`digest(...,
+            // 'sha256')` in the migration's USING clause, raw bytes
+            // from `TaskId::as_bytes()` in every save path). A
+            // wrong-sized value here means the column was written by
+            // something outside this codebase or the migration left a
+            // row in a half-converted state — silently dropping it
+            // hides a real schema-integrity bug and surfaces later as
+            // unexplained `TaskNotFound` errors in
+            // `build_join_input` / load_task_result. Fail loudly.
+            BackendError::Backend(format!(
+                "sayiir_workflow_tasks.task_id for instance {instance_id} is {} bytes (expected 32)",
+                task_id_bytes.len()
+            ))
+        })?;
+        let output: Vec<u8> = row.get("output");
+        outputs.insert(task_id, Bytes::from(output));
+    }
+    Ok(outputs)
+}
+
+/// Batched variant of [`fetch_task_outputs`] for dispatch SELECTs that
+/// load multiple snapshots at once. Returns rows grouped by
+/// `instance_id` so each snapshot can be hydrated independently.
+pub(crate) async fn fetch_task_outputs_batched<'e, E>(
+    executor: E,
+    instance_ids: &[&str],
+) -> Result<HashMap<String, HashMap<sayiir_core::TaskId, Bytes>>, BackendError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    if instance_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        "SELECT instance_id, task_id, output FROM sayiir_workflow_tasks
+         WHERE instance_id = ANY($1) AND status = 'completed' AND output IS NOT NULL",
+    )
+    .bind(instance_ids)
+    .fetch_all(executor)
+    .await
+    .map_err(PgError)?;
+
+    let mut grouped: HashMap<String, HashMap<sayiir_core::TaskId, Bytes>> = HashMap::new();
+    for row in rows {
+        let instance_id: String = row.get("instance_id");
+        let task_id_bytes: &[u8] = row.get("task_id");
+        // See note in `fetch_task_outputs` — task_id is always a
+        // 32-byte SHA-256 in this schema. A wrong size means schema
+        // corruption; surface it as a backend error rather than
+        // silently dropping the output and producing TaskNotFound in
+        // build_join_input / load_task_result downstream.
+        let task_id = sayiir_core::TaskId::from_slice(task_id_bytes).map_err(|_| {
+            BackendError::Backend(format!(
+                "sayiir_workflow_tasks.task_id for instance {instance_id} is {} bytes (expected 32)",
+                task_id_bytes.len()
+            ))
+        })?;
+        let output: Vec<u8> = row.get("output");
+        grouped
+            .entry(instance_id)
+            .or_default()
+            .insert(task_id, Bytes::from(output));
+    }
+    Ok(grouped)
+}
 
 /// SHA-256 of the encoded snapshot bytes. Persisted on every history
 /// row so a future migration can move blob storage to a KV/object
@@ -90,9 +179,27 @@ where
         tx: &mut PgConnection,
         instance_id: &str,
     ) -> Result<Option<(WorkflowSnapshot, i32)>, BackendError> {
-        // Lock the metadata row first; the blob is then fetched through
-        // `fetch_blob` so the read-side abstraction stays uniform with
-        // the rest of the codebase.
+        // Statement 1 — take FOR UPDATE on s alone.
+        //
+        // IMPORTANT: this MUST be its own statement, not folded into a
+        // CTE with the blob+outputs read below.
+        //
+        // Under READ COMMITTED, `SELECT s.history_version, h.data FROM s
+        // JOIN h ... WHERE s.instance_id = $1 FOR UPDATE OF s` interacts
+        // badly with concurrent writers. PG's EvalPlanQual re-evaluates
+        // the locked s row's WHERE clause when the wait releases, but
+        // does NOT re-run the JOIN against the updated s row — the JOIN
+        // result is fixed at scan time against the *original* snapshot.
+        // If a concurrent transaction bumps `s.history_version` and
+        // inserts the matching `h.version` row while we're waiting on
+        // the FOR UPDATE, our re-checked s row has the new
+        // `history_version` but the JOIN was paired with the OLD
+        // `h.version`, so PG considers the row "no longer matching"
+        // and returns 0 rows. The caller misreads this as
+        // `NotFound` and the workflow goes Failed even though the row
+        // is right there in the DB. Repro:
+        // `multi_stage_scatter_gather` with 4 parallel branches racing
+        // `save_task_result`.
         let row = sqlx::query(
             "SELECT history_version FROM sayiir_workflow_snapshots
              WHERE instance_id = $1
@@ -105,10 +212,70 @@ where
 
         let Some(row) = row else { return Ok(None) };
         let history_version: i32 = row.get("history_version");
-        let data = self
-            .fetch_blob(&mut *tx, instance_id, history_version)
-            .await?;
-        let snapshot = self.decode(&data)?;
+
+        // Statement 2 — blob + outputs in one round-trip.
+        //
+        // The lock from statement 1 is still held in this same tx, so
+        // both reads observe the version we just locked. The two
+        // `array_agg` calls MUST share the same `ORDER BY task_id` —
+        // without it, PG is free to interleave the aggregates so the
+        // `task_ids[i]` index no longer aligns with `outputs[i]`,
+        // silently mis-associating each output with the wrong task.
+        // Caught by the fanout warmup, where 10 parallel branches
+        // race `save_task_result` and each call hydrates a mis-paired
+        // outputs map.
+        let row = sqlx::query(
+            "WITH outputs AS (
+                 SELECT task_id, output FROM sayiir_workflow_tasks
+                 WHERE instance_id = $1
+                   AND status = 'completed'
+                   AND output IS NOT NULL
+             )
+             SELECT
+                 (SELECT data FROM sayiir_workflow_snapshot_history
+                  WHERE instance_id = $1 AND version = $2) AS data,
+                 COALESCE((SELECT array_agg(task_id ORDER BY task_id) FROM outputs),
+                          ARRAY[]::bytea[]) AS task_ids,
+                 COALESCE((SELECT array_agg(output  ORDER BY task_id) FROM outputs),
+                          ARRAY[]::bytea[]) AS outputs",
+        )
+        .bind(instance_id)
+        .bind(history_version)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(PgError)?;
+
+        // The scalar subquery returns NULL when no history row matches
+        // the locked `history_version` (orphan snapshot pointer — e.g.
+        // migration 008's `COALESCE((SELECT MAX(version)+1...), 0)`
+        // fallback for instances that existed pre-migration with no
+        // history rows, or any manual cleanup that breaks the
+        // save_snapshot CTE's snapshot↔history atomicity). sqlx's
+        // `Vec<u8>` Decode panics on NULL; surface it as a clean
+        // `NotFound` instead so workers see a structured error.
+        let data: Option<Vec<u8>> = row.get("data");
+        let Some(data) = data else {
+            return Ok(None);
+        };
+        let mut snapshot = self.decode(&data)?;
+        let task_ids: Vec<Vec<u8>> = row.get("task_ids");
+        let outputs_vec: Vec<Vec<u8>> = row.get("outputs");
+        let mut outputs = std::collections::HashMap::with_capacity(task_ids.len());
+        for (tid_bytes, output) in task_ids.into_iter().zip(outputs_vec) {
+            // task_id is always a 32-byte SHA-256 (see migration 008
+            // and every save_task_result write path). A wrong-sized
+            // value here is schema corruption; surface it rather than
+            // silently dropping the row and producing TaskNotFound
+            // downstream in build_join_input / load_task_result.
+            let task_id = sayiir_core::TaskId::from_slice(&tid_bytes).map_err(|_| {
+                BackendError::Backend(format!(
+                    "sayiir_workflow_tasks.task_id for instance {instance_id} is {} bytes (expected 32)",
+                    tid_bytes.len()
+                ))
+            })?;
+            outputs.insert(task_id, Bytes::from(output));
+        }
+        snapshot.hydrate_task_outputs(outputs);
         Ok(Some((snapshot, history_version)))
     }
 }

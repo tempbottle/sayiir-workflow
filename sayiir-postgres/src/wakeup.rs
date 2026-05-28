@@ -1,12 +1,13 @@
 //! LISTEN/NOTIFY plumbing for the polling wakeup path.
 //!
-//! Producers ([`emit_task_ready`]) fire `pg_notify` inside whatever
-//! transaction wrote the snapshot — PG defers delivery to commit time, so
-//! readers never see a wakeup without an underlying row change. The
-//! payload is a nanoserde-encoded [`TaskWakeupHint`] wrapped in base64
-//! (PG `NOTIFY` payloads must be valid text). The hint lets the worker
-//! filter at receive time and target the named task with a one-row
-//! eligibility check, skipping the full `find_available_tasks` scan.
+//! Producers pipeline `pg_notify` into the same statement that writes
+//! the snapshot via [`build_task_ready_payload`] — PG defers delivery
+//! to commit time, so readers never see a wakeup without an underlying
+//! row change. The payload is a nanoserde-encoded [`TaskWakeupHint`]
+//! wrapped in base64 (PG `NOTIFY` payloads must be valid text). The
+//! hint lets the worker filter at receive time and target the named
+//! task with a one-row eligibility check, skipping the full
+//! `find_available_tasks` scan.
 //!
 //! The consumer is one long-lived tokio task spawned in `init`. It runs
 //! `LISTEN sayiir_task_ready` over a `PgListener` (sqlx auto-reconnects
@@ -15,6 +16,7 @@
 //! mpmc channel.
 
 use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
@@ -23,12 +25,28 @@ use sqlx::PgPool;
 use sqlx::postgres::PgListener;
 use tokio_util::sync::CancellationToken;
 
+/// Process-global counter of wakeup hints dropped because the in-memory
+/// mpmc channel was full. Surfaced to the runtime via
+/// [`wakeup_drops_total`] so the benchmark harness can include "fell back
+/// to poll" rate in its report without taking a metrics-crate dep.
+static WAKEUP_DROPS: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of the wakeup-drop counter. Monotonic; a benchmark records
+/// the value at scenario start and again at scenario end and reports
+/// the delta.
+#[must_use]
+pub fn wakeup_drops_total() -> u64 {
+    WAKEUP_DROPS.load(Ordering::Relaxed)
+}
+
 /// PG channel name for "a task is ready" wakeups. Listener and producers
 /// share this single source of truth.
 pub(crate) const TASK_READY_CHANNEL: &str = "sayiir_task_ready";
 
-/// When full, the listener drops the incoming wake messages (fallback to poll)
-const WAKEUP_CHANNEL_CAPACITY: usize = 1024;
+/// When full, the listener drops the incoming wake messages (fallback to poll).
+/// Local-only tuning above main's 1024 to absorb submission bursts on this
+/// hardware (PG NOTIFY payload cap is 8 KB → worst-case buffer ~128 MB).
+const WAKEUP_CHANNEL_CAPACITY: usize = 16384;
 
 /// First reconnect delay after a listener failure. The exponential policy
 /// grows from here so a flapping PG doesn't get hammered, and the jitter
@@ -40,45 +58,29 @@ const RECONNECT_MIN_DELAY: Duration = Duration::from_secs(5);
 /// retries at least this often, so a recovered PG is picked up promptly.
 const RECONNECT_MAX_DELAY: Duration = Duration::from_mins(1);
 
-/// Fire `pg_notify(sayiir_task_ready, <hint bytes>)` on the given connection.
-///
-/// Call unconditionally from any save site — the eligibility predicate is
-/// evaluated here. Only `InProgress AtTask` produces a wake; everything
-/// else (terminal, paused, AtDelay, AtJoin, …) returns without touching
-/// the connection.
-///
-/// Call from inside the transaction that wrote the snapshot (pass
-/// `&mut *tx`) — NOTIFY is deferred to commit, so a rollback correctly
-/// drops the wake. Uses the function form of NOTIFY because it accepts
-/// bind parameters, keeping the channel name and payload out of SQL
-/// string interpolation.
-pub(crate) async fn emit_task_ready(
-    conn: &mut sqlx::PgConnection,
-    snapshot: &sayiir_core::snapshot::WorkflowSnapshot,
-) -> Result<(), sqlx::Error> {
-    let Some(hint) = build_hint(snapshot) else {
-        return Ok(());
-    };
-    sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(TASK_READY_CHANNEL)
-        .bind(hint.encode())
-        .execute(conn)
-        .await?;
-    Ok(())
-}
-
-/// Build a wakeup hint from a snapshot if a save should wake workers.
+/// Build the wakeup-hint payload for a snapshot, if it warrants a wake.
 /// Only `InProgress AtTask` qualifies — `find_hinted_task` targets a
 /// concrete task, and every other in-progress position relies on the
-/// timer-tick fallback poll.
-fn build_hint(snapshot: &sayiir_core::snapshot::WorkflowSnapshot) -> Option<TaskWakeupHint> {
+/// timer-tick fallback poll. Returns the base64-encoded hint bytes
+/// ready for `pg_notify($channel, $payload)`.
+///
+/// Pipelined save paths bind the payload into the same statement that
+/// writes the snapshot and gate `pg_notify` on `payload IS NOT NULL`,
+/// so NOTIFY is deferred to the transaction's commit (a rollback
+/// correctly drops the wake) without a separate round-trip.
+pub(crate) fn build_task_ready_payload(
+    snapshot: &sayiir_core::snapshot::WorkflowSnapshot,
+) -> Option<String> {
     let task_id = snapshot.current_task_id()?;
-    Some(TaskWakeupHint {
-        instance_id: snapshot.instance_id.to_string(),
-        task_id: *task_id.as_bytes(),
-        definition_hash: *snapshot.definition_hash.as_bytes(),
-        tags: snapshot.current_task_tags().to_vec(),
-    })
+    Some(
+        TaskWakeupHint {
+            instance_id: snapshot.instance_id.to_string(),
+            task_id: *task_id.as_bytes(),
+            definition_hash: *snapshot.definition_hash.as_bytes(),
+            tags: snapshot.current_task_tags().to_vec(),
+        }
+        .encode(),
+    )
 }
 
 pub(crate) struct WakeupListener {
@@ -213,6 +215,7 @@ async fn recv_until_error(
                     // hint silently in either case.
                     Ok(()) | Err(flume::TrySendError::Disconnected(_)) => {}
                     Err(flume::TrySendError::Full(_)) => {
+                        WAKEUP_DROPS.fetch_add(1, Ordering::Relaxed);
                         tracing::warn!(
                             "wakeup channel full, dropping hint; worker falls back to poll",
                         );
