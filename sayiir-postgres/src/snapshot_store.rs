@@ -229,12 +229,23 @@ where
         let current: Option<&[u8]> = current_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
         let next_history_version = prev_history_version + 1;
-        let notify_payload = build_task_ready_payload(&snapshot);
 
-        // UPDATE snapshots + INSERT history + UPSERT workflow_tasks +
-        // pg_notify in one CTE — the lock acquired above by
+        // UPDATE snapshots + INSERT history + UPSERT workflow_tasks in
+        // one CTE — the lock acquired above by
         // lock_snapshot_for_mutation is still held in this same tx, so
-        // all four writes commit together.
+        // all three writes commit together.
+        //
+        // NOTIFY is deliberately NOT emitted here: `current_task_id`
+        // has just been marked completed in `completed_tasks` but the
+        // snapshot row's `current_task_id` still points at it (the
+        // position advance happens in the immediately-following
+        // `save_snapshot` from `commit_task_result`). A NOTIFY here
+        // would carry a stale hint — recipients would call
+        // `find_hinted_task`, hydrate workflow_tasks, see the task
+        // already completed in `completed_tasks`, and bail. On the
+        // linear bench this stale half doubled NOTIFY pressure and
+        // blew through the 16 384-slot mpmc channel (~9 600 drops on
+        // CI), forcing workers onto the slower polling fallback.
         sqlx::query(
             "WITH upd AS (
                  UPDATE sayiir_workflow_snapshots
@@ -265,11 +276,7 @@ where
              -- them unconditionally regardless of references, but any
              -- future refactor that converts one to a non-DML CTE
              -- would silently drop the write without this anchor.
-             -- pg_notify in the outer projection only fires when the
-             -- payload is non-NULL.
-             SELECT pg_notify($10, $11) FROM upd WHERE $11 IS NOT NULL
-             UNION ALL
-             SELECT NULL::void FROM upd WHERE $11 IS NULL",
+             SELECT 1 FROM upd",
         )
         .bind(status) // $1
         .bind(current) // $2
@@ -280,8 +287,6 @@ where
         .bind(&data) // $7
         .bind(task_id.as_bytes().as_slice()) // $8
         .bind(output_bytes.as_ref()) // $9
-        .bind(TASK_READY_CHANNEL) // $10
-        .bind(notify_payload.as_deref()) // $11
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;
