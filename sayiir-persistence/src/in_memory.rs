@@ -73,7 +73,12 @@ impl SnapshotStore for InMemoryBackend {
             && !tasks.is_empty()
         {
             let mut cache = self.task_results_cache.write().map_err(Self::lock_error)?;
-            cache.insert(snapshot.instance_id.clone(), tasks.clone());
+            // `get_all_task_results` returns an `FxHashMap`; the cache keeps a
+            // std `HashMap`, so collect into the cache's type.
+            cache.insert(
+                snapshot.instance_id.clone(),
+                tasks.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            );
         }
 
         snapshots.insert(snapshot.instance_id.clone(), snapshot.clone());

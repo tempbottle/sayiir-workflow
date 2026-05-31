@@ -29,7 +29,7 @@ where
     #[allow(clippy::too_many_lines)]
     async fn save_snapshot(&self, snapshot: &mut WorkflowSnapshot) -> Result<(), BackendError> {
         tracing::debug!("saving snapshot");
-        let (data, data_hash) = self.encode_blob(snapshot)?;
+        let (data, data_hash) = self.encode_blob_preserving(snapshot)?;
         let status = snapshot.state.as_ref();
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
@@ -39,11 +39,10 @@ where
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
         let task_priority = i16::from(snapshot.current_task_priority());
-        let task_tags: Vec<&str> = snapshot
-            .current_task_tags()
-            .iter()
-            .map(String::as_str)
-            .collect();
+        // Bind the `&[String]` slice directly — sqlx encodes it as `text[]`,
+        // so the intermediate `Vec<&str>` collect (one alloc per save) is
+        // unnecessary.
+        let task_tags = snapshot.current_task_tags();
         let terminal_status = match SnapshotStatus::from(&snapshot.state) {
             SnapshotStatus::Failed => "failed",
             SnapshotStatus::Cancelled => "cancelled",
@@ -65,7 +64,7 @@ where
         // `WHERE $18 IS NOT NULL` instead of re-shipping the last completed
         // task's bytes on every dispatch tick. Skipping is always safe: an
         // unflagged output is, by construction, already in `workflow_tasks`.
-        let output_unflushed = snapshot.output_unflushed();
+        let output_unflushed = snapshot.output_unflushed;
         let last_completed_task_id: Option<[u8; 32]> = output_unflushed
             .then(|| snapshot.last_completed_task_id().map(|t| *t.as_bytes()))
             .flatten();
@@ -189,7 +188,7 @@ where
             .bind(wake_at) // $9
             .bind(snapshot.trace_parent.as_deref()) // $10
             .bind(task_priority) // $11
-            .bind(&task_tags) // $12
+            .bind(task_tags) // $12
             .bind(data_hash.as_slice()) // $13
             .bind(&data) // $14
             .bind(terminal_status) // $15
@@ -203,7 +202,7 @@ where
         // The last completed output (if any) is now durable in
         // `workflow_tasks`; clear the marker so a later save of this same
         // in-memory snapshot binds NULL instead of re-shipping the bytes.
-        snapshot.mark_output_flushed();
+        snapshot.output_unflushed = false;
         Ok(())
     }
 

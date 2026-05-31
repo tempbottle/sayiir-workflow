@@ -21,7 +21,7 @@ use testcontainers_modules::postgres::Postgres;
 const MIN_PG_VERSION: &str = "13-alpine";
 
 /// Default PostgreSQL version used by most tests.
-const DEFAULT_PG_VERSION: &str = "17-alpine";
+const DEFAULT_PG_VERSION: &str = "18-alpine";
 
 async fn setup_with(
     tag: &str,
