@@ -397,7 +397,7 @@ where
                     let delay_id_owned = *delay_id;
                     if let Some(next_id) = next_id_opt {
                         snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
-                        self.save_snapshot(&snapshot).await?;
+                        self.save_snapshot(&mut snapshot).await?;
                         next_id
                     } else {
                         // Delay is the last node — complete the workflow.
@@ -405,7 +405,7 @@ where
                             .get_task_result_bytes(&delay_id_owned)
                             .unwrap_or_default();
                         snapshot.mark_completed(output);
-                        self.save_snapshot(&snapshot).await?;
+                        self.save_snapshot(&mut snapshot).await?;
                         continue;
                     }
                 }

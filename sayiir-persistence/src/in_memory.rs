@@ -62,7 +62,7 @@ impl InMemoryBackend {
 // ---------------------------------------------------------------------------
 
 impl SnapshotStore for InMemoryBackend {
-    async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
+    async fn save_snapshot(&self, snapshot: &mut WorkflowSnapshot) -> Result<(), BackendError> {
         let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
 
         // When transitioning to Completed/Failed, cache the previous snapshot's
@@ -752,9 +752,9 @@ mod tests {
     #[tokio::test]
     async fn test_save_and_load() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
 
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
         let loaded = backend.load_snapshot("test-123").await.unwrap();
 
         assert_eq!(snapshot.instance_id, loaded.instance_id);
@@ -771,9 +771,9 @@ mod tests {
     #[tokio::test]
     async fn test_delete() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
 
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
         backend.delete_snapshot("test-123").await.unwrap();
 
         let result = backend.load_snapshot("test-123").await;
@@ -785,11 +785,11 @@ mod tests {
         let backend = InMemoryBackend::new();
 
         backend
-            .save_snapshot(&WorkflowSnapshot::new("test-1", "hash-1".into()))
+            .save_snapshot(&mut WorkflowSnapshot::new("test-1", "hash-1".into()))
             .await
             .unwrap();
         backend
-            .save_snapshot(&WorkflowSnapshot::new("test-2", "hash-2".into()))
+            .save_snapshot(&mut WorkflowSnapshot::new("test-2", "hash-2".into()))
             .await
             .unwrap();
 
@@ -1093,8 +1093,8 @@ mod tests {
     #[tokio::test]
     async fn test_store_signal_cancel_success() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend
             .store_signal(
@@ -1140,7 +1140,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
         snapshot.mark_completed(bytes::Bytes::from("result"));
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend
             .store_signal(
@@ -1160,7 +1160,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
         snapshot.mark_failed("Some error".to_string());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend
             .store_signal(
@@ -1180,7 +1180,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
         snapshot.mark_cancelled(Some("First cancel".to_string()), None, None);
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend
             .store_signal(
@@ -1212,8 +1212,8 @@ mod tests {
     #[tokio::test]
     async fn test_clear_signal_cancel() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         backend
             .store_signal(
@@ -1253,7 +1253,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
         snapshot.mark_completed(bytes::Bytes::from("result"));
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend
             .store_signal(
@@ -1273,7 +1273,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
         snapshot.mark_failed("Some error".to_string());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend
             .store_signal(
@@ -1293,7 +1293,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
         snapshot.mark_cancelled(Some("done".to_string()), None, None);
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend
             .store_signal(
@@ -1313,7 +1313,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
         snapshot.mark_paused(&PauseRequest::new(Some("first".to_string()), None));
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend
             .store_signal(
@@ -1347,8 +1347,8 @@ mod tests {
     #[tokio::test]
     async fn test_check_and_cancel_success() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         backend
             .store_signal(
@@ -1403,8 +1403,8 @@ mod tests {
     #[tokio::test]
     async fn test_check_and_cancel_no_request() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend.check_and_cancel("test-123", None).await.unwrap();
         assert!(
@@ -1424,7 +1424,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
         snapshot.mark_completed(bytes::Bytes::from("done"));
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         // Add a cancel signal directly (bypassing state check)
         {
@@ -1456,13 +1456,13 @@ mod tests {
         snapshot1.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("task-1"),
         });
-        backend.save_snapshot(&snapshot1).await.unwrap();
+        backend.save_snapshot(&mut snapshot1).await.unwrap();
 
         let mut snapshot2 = WorkflowSnapshot::new("workflow-2", "hash-abc".into());
         snapshot2.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("task-2"),
         });
-        backend.save_snapshot(&snapshot2).await.unwrap();
+        backend.save_snapshot(&mut snapshot2).await.unwrap();
 
         backend
             .store_signal(
@@ -1491,8 +1491,8 @@ mod tests {
     #[tokio::test]
     async fn test_check_and_pause_success() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         backend
             .store_signal(
@@ -1534,8 +1534,8 @@ mod tests {
     #[tokio::test]
     async fn test_check_and_pause_no_request() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend.check_and_pause("test-123").await.unwrap();
         assert!(
@@ -1555,7 +1555,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
         snapshot.mark_completed(bytes::Bytes::from("done"));
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         // Add a pause signal directly (bypassing state check)
         {
@@ -1594,7 +1594,7 @@ mod tests {
             sayiir_core::TaskId::from("task-2"),
             bytes::Bytes::from("out2"),
         );
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         backend
             .store_signal(
@@ -1650,7 +1650,7 @@ mod tests {
             Some("maintenance".to_string()),
             Some("ops".to_string()),
         ));
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend.unpause("test-123").await.unwrap();
 
@@ -1686,8 +1686,8 @@ mod tests {
     #[tokio::test]
     async fn test_unpause_not_paused_errors() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend.unpause("test-123").await;
         assert!(
@@ -1701,7 +1701,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
         snapshot.mark_completed(bytes::Bytes::from("done"));
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend.unpause("test-123").await;
         assert!(
@@ -1724,8 +1724,8 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_and_pause_simultaneously_cancel_wins() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         // Store both signals
         backend
@@ -1766,8 +1766,8 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_signal_independent_of_pause_signal() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         // Store both signals
         backend
@@ -1826,7 +1826,7 @@ mod tests {
         snapshot1.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("task-1"),
         });
-        backend.save_snapshot(&snapshot1).await.unwrap();
+        backend.save_snapshot(&mut snapshot1).await.unwrap();
 
         let mut snapshot2 = WorkflowSnapshot::with_initial_input(
             "workflow-2",
@@ -1836,7 +1836,7 @@ mod tests {
         snapshot2.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("task-2"),
         });
-        backend.save_snapshot(&snapshot2).await.unwrap();
+        backend.save_snapshot(&mut snapshot2).await.unwrap();
 
         // Pause workflow-1
         backend
@@ -1870,8 +1870,8 @@ mod tests {
     #[tokio::test]
     async fn test_delete_snapshot_leaves_orphaned_signals() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         backend
             .store_signal(
@@ -1899,8 +1899,8 @@ mod tests {
     #[tokio::test]
     async fn test_store_signal_overwrites_previous() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("test-123", "hash-abc".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         backend
             .store_signal(
@@ -1956,7 +1956,7 @@ mod tests {
             sayiir_core::TaskId::from("wait_1h"),
             bytes::Bytes::from(vec![42]),
         );
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let tasks = backend
             .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
@@ -1989,7 +1989,7 @@ mod tests {
             sayiir_core::TaskId::from("wait_done"),
             bytes::Bytes::from(vec![42]),
         );
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let tasks = backend
             .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
@@ -2035,7 +2035,7 @@ mod tests {
             sayiir_core::TaskId::from("final_wait"),
             bytes::Bytes::from(vec![42]),
         );
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let tasks = backend
             .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
@@ -2072,7 +2072,7 @@ mod tests {
             snapshot.update_position(ExecutionPosition::AtTask {
                 task_id: sayiir_core::TaskId::from("task-a"),
             });
-            backend.save_snapshot(&snapshot).await.unwrap();
+            backend.save_snapshot(&mut snapshot).await.unwrap();
         }
 
         let tasks = backend
@@ -2099,7 +2099,7 @@ mod tests {
             task_id: sayiir_core::TaskId::from("task-a"),
         });
         // updated_at stays at "now"
-        backend.save_snapshot(&high).await.unwrap();
+        backend.save_snapshot(&mut high).await.unwrap();
 
         // Low-priority workflow (priority 5) that has been waiting a long time.
         let mut low = WorkflowSnapshot::with_initial_input("wf-low", "hash".into(), input.clone());
@@ -2109,7 +2109,7 @@ mod tests {
         });
         // Simulate long wait: push updated_at 10 minutes into the past.
         low.updated_at = (chrono::Utc::now().timestamp() - 600) as u64;
-        backend.save_snapshot(&low).await.unwrap();
+        backend.save_snapshot(&mut low).await.unwrap();
 
         // With a 60s aging interval, the low-priority task's effective priority:
         //   5 - (600 / 60) = 5 - 10 = -5
@@ -2139,7 +2139,7 @@ mod tests {
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("task-a"),
         });
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         // Zero aging interval should not panic or divide by zero.
         let tasks = backend
@@ -2163,7 +2163,7 @@ mod tests {
             task_id: sayiir_core::TaskId::from("t1"),
         });
         snap1.task_tags = vec!["gpu".into()];
-        backend.save_snapshot(&snap1).await.unwrap();
+        backend.save_snapshot(&mut snap1).await.unwrap();
 
         // Task tagged ["cpu"]
         let mut snap2 =
@@ -2172,7 +2172,7 @@ mod tests {
             task_id: sayiir_core::TaskId::from("t2"),
         });
         snap2.task_tags = vec!["cpu".into()];
-        backend.save_snapshot(&snap2).await.unwrap();
+        backend.save_snapshot(&mut snap2).await.unwrap();
 
         // Worker with ["gpu"] should only see the gpu task
         let tasks = backend
@@ -2193,14 +2193,14 @@ mod tests {
             task_id: sayiir_core::TaskId::from("t1"),
         });
         snap1.task_tags = vec!["gpu".into()];
-        backend.save_snapshot(&snap1).await.unwrap();
+        backend.save_snapshot(&mut snap1).await.unwrap();
 
         let mut snap2 =
             WorkflowSnapshot::with_initial_input("wf-plain", "h1".into(), bytes::Bytes::from("2"));
         snap2.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("t2"),
         });
-        backend.save_snapshot(&snap2).await.unwrap();
+        backend.save_snapshot(&mut snap2).await.unwrap();
 
         // Untagged worker should see both
         let tasks = backend
@@ -2220,7 +2220,7 @@ mod tests {
         snap.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("t1"),
         });
-        backend.save_snapshot(&snap).await.unwrap();
+        backend.save_snapshot(&mut snap).await.unwrap();
 
         // Tagged worker should still pick up untagged tasks
         let tasks = backend
@@ -2297,7 +2297,7 @@ mod tests {
             sayiir_core::TaskId::from("task-1"),
             bytes::Bytes::from("out1"),
         );
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend
             .load_task_result("wf-1", &sayiir_core::TaskId::from("task-1"))
@@ -2309,8 +2309,8 @@ mod tests {
     #[tokio::test]
     async fn test_load_task_result_not_found() {
         let backend = InMemoryBackend::new();
-        let snapshot = WorkflowSnapshot::new("wf-1", "hash".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        let mut snapshot = WorkflowSnapshot::new("wf-1", "hash".into());
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend
             .load_task_result("wf-1", &sayiir_core::TaskId::from("no-such-task"))
@@ -2338,11 +2338,11 @@ mod tests {
             sayiir_core::TaskId::from("task-1"),
             bytes::Bytes::from("out1"),
         );
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         // Complete the workflow — save_snapshot caches the task results
         snapshot.mark_completed(bytes::Bytes::from("final"));
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         // Task result should still be accessible from cache
         let result = backend
@@ -2361,10 +2361,10 @@ mod tests {
             sayiir_core::TaskId::from("task-1"),
             bytes::Bytes::from("out1"),
         );
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         snapshot.mark_failed("boom".into());
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         let result = backend
             .load_task_result("wf-1", &sayiir_core::TaskId::from("task-1"))
@@ -2382,10 +2382,10 @@ mod tests {
             sayiir_core::TaskId::from("task-1"),
             bytes::Bytes::from("out1"),
         );
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         snapshot.mark_completed(bytes::Bytes::from("final"));
-        backend.save_snapshot(&snapshot).await.unwrap();
+        backend.save_snapshot(&mut snapshot).await.unwrap();
 
         // Delete should clean both snapshot and cache
         backend.delete_snapshot("wf-1").await.unwrap();

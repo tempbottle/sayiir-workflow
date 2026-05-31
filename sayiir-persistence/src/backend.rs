@@ -179,9 +179,14 @@ pub trait SnapshotStore: Send + Sync {
     /// Save a workflow snapshot.
     ///
     /// If a snapshot with the same instance_id already exists, it should be overwritten.
+    ///
+    /// Takes `&mut` so backends can encode the blob without cloning the
+    /// snapshot (strip task outputs in place, encode, restore) and clear
+    /// any in-memory "output unflushed" marker once the write lands. The
+    /// snapshot is logically unchanged on return.
     fn save_snapshot(
         &self,
-        snapshot: &WorkflowSnapshot,
+        snapshot: &mut WorkflowSnapshot,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Save a single task result atomically.
@@ -286,7 +291,7 @@ pub trait SignalStore: SnapshotStore {
                 return Ok(false);
             }
             snapshot.mark_cancelled(request.reason, request.requested_by, interrupted_at_task);
-            self.save_snapshot(&snapshot).await?;
+            self.save_snapshot(&mut snapshot).await?;
             self.clear_signal(instance_id, SignalKind::Cancel).await?;
             Ok(true)
         }
@@ -309,7 +314,7 @@ pub trait SignalStore: SnapshotStore {
             }
             let pause_request: PauseRequest = request.into();
             snapshot.mark_paused(&pause_request);
-            self.save_snapshot(&snapshot).await?;
+            self.save_snapshot(&mut snapshot).await?;
             self.clear_signal(instance_id, SignalKind::Pause).await?;
             Ok(true)
         }
@@ -335,7 +340,7 @@ pub trait SignalStore: SnapshotStore {
                 )));
             }
             snapshot.mark_unpaused();
-            self.save_snapshot(&snapshot).await?;
+            self.save_snapshot(&mut snapshot).await?;
             Ok(snapshot)
         }
     }

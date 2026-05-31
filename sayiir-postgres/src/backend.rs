@@ -215,14 +215,23 @@ where
     }
 
     /// Encode the snapshot blob in the canonical "outputs stripped"
-    /// shape and return it alongside its SHA-256 hash.
+    /// shape and return it alongside its SHA-256 hash, without cloning.
+    ///
+    /// Moves the task outputs out, encodes the stripped blob, then
+    /// hydrates them back — the snapshot is logically unchanged on return
+    /// (including on the encode-error path), so callers may keep reading
+    /// outputs afterwards (e.g. to bind the `task_output` CTE). Takes
+    /// `&mut` to avoid cloning the whole `completed_tasks` map on every
+    /// write; every blob-mutating path (`save_snapshot`, `save_task_result`,
+    /// the signal-store check_and_* paths) owns its snapshot.
     pub(crate) fn encode_blob(
         &self,
-        snapshot: &WorkflowSnapshot,
+        snapshot: &mut WorkflowSnapshot,
     ) -> Result<(Vec<u8>, [u8; 32]), BackendError> {
-        let mut stripped = snapshot.clone();
-        stripped.strip_task_outputs();
-        let data = self.encode(&stripped)?;
+        let outputs = snapshot.take_task_outputs();
+        let encoded = self.encode(snapshot);
+        snapshot.hydrate_task_outputs(outputs);
+        let data = encoded?;
         let hash = crate::history::snapshot_hash(&data);
         Ok((data, hash))
     }

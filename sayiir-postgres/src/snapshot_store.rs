@@ -27,7 +27,7 @@ where
         err(level = tracing::Level::ERROR),
     )]
     #[allow(clippy::too_many_lines)]
-    async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
+    async fn save_snapshot(&self, snapshot: &mut WorkflowSnapshot) -> Result<(), BackendError> {
         tracing::debug!("saving snapshot");
         let (data, data_hash) = self.encode_blob(snapshot)?;
         let status = snapshot.state.as_ref();
@@ -200,6 +200,10 @@ where
             .execute(&self.pool)
             .await
             .map_err(PgError)?;
+        // The last completed output (if any) is now durable in
+        // `workflow_tasks`; clear the marker so a later save of this same
+        // in-memory snapshot binds NULL instead of re-shipping the bytes.
+        snapshot.mark_output_flushed();
         Ok(())
     }
 
@@ -229,7 +233,7 @@ where
         let output_bytes = output.clone();
         snapshot.mark_task_completed(*task_id, output);
 
-        let (data, data_hash) = self.encode_blob(&snapshot)?;
+        let (data, data_hash) = self.encode_blob(&mut snapshot)?;
         let status = snapshot.state.as_ref();
         let current_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let current: Option<&[u8]> = current_bytes.as_ref().map(<[u8; 32]>::as_slice);

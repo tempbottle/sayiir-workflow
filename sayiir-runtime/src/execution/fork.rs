@@ -101,7 +101,7 @@ pub(crate) async fn park_at_fork<B: SnapshotStore>(
         completed_branches: build_completed_branches(branch_results),
         wake_at,
     });
-    if let Err(e) = backend.save_snapshot(&updated_snapshot).await {
+    if let Err(e) = backend.save_snapshot(&mut updated_snapshot).await {
         return RuntimeError::from(e);
     }
     *snapshot = updated_snapshot;
@@ -534,7 +534,7 @@ where
                     .await?;
 
                     snapshot.mark_task_completed(sayiir_core::TaskId::from(id), output.clone());
-                    backend.save_snapshot(&snapshot).await?;
+                    backend.save_snapshot(&mut snapshot).await?;
 
                     Ok(ControlFlow::Continue(output))
                 }

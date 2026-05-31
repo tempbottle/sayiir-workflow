@@ -122,7 +122,7 @@ where
         task_id: first_task.id,
     });
     snapshot.set_task_hint(&first_task);
-    backend.save_snapshot(&snapshot).await?;
+    backend.save_snapshot(&mut snapshot).await?;
     Ok(PrepareRunOutcome::Fresh(Box::new(snapshot)))
 }
 

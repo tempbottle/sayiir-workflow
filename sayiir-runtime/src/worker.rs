@@ -2533,8 +2533,8 @@ mod tests {
         let registry = TaskRegistry::new();
 
         // Create a workflow snapshot so store_signal can validate it
-        let snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
-        backend.save_snapshot(&snapshot).await.ok();
+        let mut snapshot = WorkflowSnapshot::new("wf-1", "hash-1".into());
+        backend.save_snapshot(&mut snapshot).await.ok();
 
         let worker = PooledWorker::new("test-worker", backend, registry);
         let handle = worker.spawn(Duration::from_millis(50), EmptyWorkflows::new());

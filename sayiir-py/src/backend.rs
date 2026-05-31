@@ -176,7 +176,7 @@ macro_rules! dispatch {
 }
 
 impl SnapshotStore for BackendKind {
-    async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
+    async fn save_snapshot(&self, snapshot: &mut WorkflowSnapshot) -> Result<(), BackendError> {
         dispatch!(self, |b| b.save_snapshot(snapshot).await)
     }
 

@@ -685,6 +685,31 @@ impl WorkflowSnapshot {
         }
     }
 
+    /// Move every completed task's `output` out of the snapshot, leaving
+    /// each one empty, and return them keyed by task id.
+    ///
+    /// Pairs with [`hydrate_task_outputs`](Self::hydrate_task_outputs) to
+    /// restore: `take → encode → hydrate`. This lets a sidecar-staging
+    /// backend encode the outputs-stripped blob without cloning the whole
+    /// snapshot — the moves are cheap (no `Bytes` refcount churn) and the
+    /// snapshot is left logically unchanged once the outputs are hydrated
+    /// back. Empty outputs are skipped, so a round-trip with nothing to
+    /// strip allocates nothing.
+    #[must_use]
+    pub fn take_task_outputs(&mut self) -> Vec<(crate::TaskId, Bytes)> {
+        let Some(completed) = self.completed_tasks_mut() else {
+            return Vec::new();
+        };
+        let mut taken = Vec::with_capacity(completed.len());
+        for result in completed.values_mut() {
+            let output = std::mem::take(&mut result.output);
+            if !output.is_empty() {
+                taken.push((result.task_id, output));
+            }
+        }
+        taken
+    }
+
     /// Patch outputs back onto completed-task results from an external
     /// source (e.g. the `workflow_tasks` sidecar table). Outputs for
     /// task IDs not currently in `completed_tasks` are silently
@@ -741,6 +766,15 @@ impl WorkflowSnapshot {
     #[must_use]
     pub fn output_unflushed(&self) -> bool {
         self.output_unflushed
+    }
+
+    /// Clear the [`output_unflushed`](Self::output_unflushed) marker.
+    ///
+    /// Called by a persistence backend once it has durably written the
+    /// last completed task's output, so a subsequent save of the same
+    /// in-memory snapshot doesn't re-ship bytes that are already persisted.
+    pub fn mark_output_flushed(&mut self) {
+        self.output_unflushed = false;
     }
 
     /// ID of the most recently completed task, if any. Set by
@@ -1259,6 +1293,39 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().output, Bytes::from("output1"));
         assert_eq!(result.unwrap().task_id, crate::TaskId::from("task-1"));
+    }
+
+    #[test]
+    fn test_take_and_restore_task_outputs() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
+        snapshot.mark_task_completed(crate::TaskId::from("t1"), Bytes::from("out1"));
+        snapshot.mark_task_completed(crate::TaskId::from("t2"), Bytes::from("out2"));
+
+        // Take moves outputs out, leaving the completed-task entries empty.
+        let taken = snapshot.take_task_outputs();
+        assert_eq!(taken.len(), 2);
+        assert!(
+            snapshot
+                .get_task_result(&crate::TaskId::from("t1"))
+                .unwrap()
+                .output
+                .is_empty()
+        );
+
+        // Hydrating the taken outputs back restores the snapshot exactly.
+        snapshot.hydrate_task_outputs(taken);
+        assert_eq!(
+            snapshot.get_task_result_bytes(&crate::TaskId::from("t1")),
+            Some(Bytes::from("out1"))
+        );
+        assert_eq!(
+            snapshot.get_task_result_bytes(&crate::TaskId::from("t2")),
+            Some(Bytes::from("out2"))
+        );
+
+        // Nothing left to take after outputs are already empty.
+        snapshot.strip_task_outputs();
+        assert!(snapshot.take_task_outputs().is_empty());
     }
 
     #[test]

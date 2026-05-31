@@ -165,7 +165,7 @@ macro_rules! dispatch {
 type BResult<T> = std::result::Result<T, BackendError>;
 
 impl SnapshotStore for BackendKind {
-    async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> BResult<()> {
+    async fn save_snapshot(&self, snapshot: &mut WorkflowSnapshot) -> BResult<()> {
         dispatch!(self, |b| b.save_snapshot(snapshot).await)
     }
 

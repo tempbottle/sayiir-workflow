@@ -145,7 +145,7 @@ async fn cancel_and_resume() {
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("step1"),
     });
-    runner.backend().save_snapshot(&snapshot).await.unwrap();
+    runner.backend().save_snapshot(&mut snapshot).await.unwrap();
 
     // Signal cancellation via WorkflowClient
     let client = WorkflowClient::from_shared(Arc::clone(runner.backend()));
@@ -193,7 +193,7 @@ async fn pause_unpause_resume() {
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("step1"),
     });
-    runner.backend().save_snapshot(&snapshot).await.unwrap();
+    runner.backend().save_snapshot(&mut snapshot).await.unwrap();
 
     // Request pause via WorkflowClient
     let client = WorkflowClient::from_shared(Arc::clone(runner.backend()));
@@ -549,7 +549,7 @@ async fn definition_hash_mismatch_on_resume() {
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("step1"),
     });
-    runner.backend().save_snapshot(&snapshot).await.unwrap();
+    runner.backend().save_snapshot(&mut snapshot).await.unwrap();
 
     // Build a different workflow (v2 — different hash)
     let workflow_v2 = WorkflowBuilder::new(ctx())
@@ -598,7 +598,7 @@ async fn task_version_change_causes_hash_mismatch() {
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("process"),
     });
-    runner.backend().save_snapshot(&snapshot).await.unwrap();
+    runner.backend().save_snapshot(&mut snapshot).await.unwrap();
 
     // v2: same structure, same task ID, but different version
     let workflow_v2 = WorkflowBuilder::new(ctx())
@@ -670,7 +670,7 @@ async fn task_version_none_vs_some_causes_hash_mismatch() {
     snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("process"),
     });
-    runner.backend().save_snapshot(&snapshot).await.unwrap();
+    runner.backend().save_snapshot(&mut snapshot).await.unwrap();
 
     // Resume with v2 → mismatch
     let result = runner

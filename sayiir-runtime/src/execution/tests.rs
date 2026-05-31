@@ -517,7 +517,7 @@ async fn test_checkpointing_task_timeout() {
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("slow"),
     });
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let slow_task = |_id: &str, input: Bytes| async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -564,7 +564,7 @@ async fn test_checkpointing_skipped_tasks_bypass_timeout() {
         task_id: sayiir_core::TaskId::from("cached"),
     });
     snapshot.mark_task_completed(sayiir_core::TaskId::from("cached"), output.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let never_called = |_id: &str, _input: Bytes| async move {
         panic!("should not be called for cached tasks");
@@ -629,9 +629,9 @@ async fn test_prepare_run_creates_snapshot() {
 #[tokio::test]
 async fn test_prepare_resume_ready() {
     let backend = InMemoryBackend::new();
-    let snapshot =
+    let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), Bytes::from("input"));
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
         .await
@@ -657,7 +657,7 @@ async fn test_prepare_resume_with_completed_tasks() {
         sayiir_core::TaskId::from("task-1"),
         Bytes::from("task1_output"),
     );
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
         .await
@@ -676,7 +676,7 @@ async fn test_prepare_resume_already_completed() {
     let backend = InMemoryBackend::new();
     let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     snapshot.mark_completed(Bytes::from("result"));
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
         .await
@@ -692,7 +692,7 @@ async fn test_prepare_resume_already_failed() {
     let backend = InMemoryBackend::new();
     let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     snapshot.mark_failed("err".into());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
         .await
@@ -708,7 +708,7 @@ async fn test_prepare_resume_already_cancelled() {
     let backend = InMemoryBackend::new();
     let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     snapshot.mark_cancelled(Some("reason".into()), Some("admin".into()), None);
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let outcome = prepare_resume("inst-1", &"hash-1".into(), &backend)
         .await
@@ -724,8 +724,8 @@ async fn test_prepare_resume_already_cancelled() {
 #[tokio::test]
 async fn test_prepare_resume_hash_mismatch() {
     let backend = InMemoryBackend::new();
-    let snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let result = prepare_resume("inst-1", &"wrong-hash".into(), &backend).await;
     assert!(result.is_err());
@@ -736,7 +736,7 @@ async fn test_prepare_resume_hash_mismatch() {
 async fn test_finalize_execution_success() {
     let backend = InMemoryBackend::new();
     let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let (status, output) = finalize_execution(Ok(Bytes::from("output")), &mut snapshot, &backend)
         .await
@@ -756,7 +756,7 @@ async fn test_finalize_execution_success() {
 async fn test_finalize_execution_failure() {
     let backend = InMemoryBackend::new();
     let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let (status, output) = finalize_execution(
         Err(RuntimeError::from(BoxError::from("task failed"))),
@@ -784,7 +784,7 @@ async fn test_finalize_execution_cancellation() {
     let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
     // Mark as cancelled in backend so finalize can reload details
     snapshot.mark_cancelled(Some("timeout".into()), Some("system".into()), None);
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     // Reset local snapshot to in-progress for finalize logic
     let mut local_snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
@@ -821,7 +821,7 @@ async fn test_checkpointing_single_task() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let cont = stub_node("add_one", None);
 
@@ -862,7 +862,7 @@ async fn test_checkpointing_chain() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let double = stub_node("double", None);
     let add_one = stub_node("add_one", Some(Box::new(double)));
@@ -912,7 +912,7 @@ async fn test_checkpointing_skips_completed_tasks() {
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     // Pre-mark task as completed (simulates resume)
     snapshot.mark_task_completed(sayiir_core::TaskId::from("add_one"), encode_u32(11));
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let double = stub_node("double", None);
     let add_one = stub_node("add_one", Some(Box::new(double)));
@@ -960,7 +960,7 @@ async fn test_checkpointing_fork_sequential() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let branch_a = Arc::new(stub_node("branch_a", None));
     let branch_b = Arc::new(stub_node("branch_b", None));
@@ -1013,7 +1013,7 @@ async fn test_checkpointing_cancellation() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     // Request cancellation before execution
     backend
@@ -1187,7 +1187,7 @@ async fn test_checkpointing_delay_returns_waiting() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let next_task = stub_node("process", None);
     let delay = WorkflowContinuation::Delay {
@@ -1249,7 +1249,7 @@ async fn test_checkpointing_delay_skip_on_resume() {
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
     // Pre-mark delay as completed (simulates resume after delay expired)
     snapshot.mark_task_completed(sayiir_core::TaskId::from("wait"), encode_u32(42));
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let process = stub_node("process", None);
     let delay = WorkflowContinuation::Delay {
@@ -1291,7 +1291,7 @@ async fn test_checkpointing_delay_cancellation() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     // Request cancellation
     backend
@@ -1346,7 +1346,7 @@ async fn test_finalize_execution_waiting() {
         wake_at,
         next_task_id: Some("next_step".into()),
     });
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let (status, output) = finalize_execution(
         Err(WorkflowError::Waiting { wake_at }.into()),
@@ -1433,7 +1433,7 @@ async fn test_fork_with_delay_parks_at_fork() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let fork = fork_with_delay_in_branch();
     let callback = make_fork_callback();
@@ -1501,7 +1501,7 @@ async fn test_fork_with_delay_resumes_after_expiry() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     // Use a very short delay so it expires immediately
     let branch_a = Arc::new(stub_node("branch_a", None));
@@ -1566,7 +1566,7 @@ async fn test_fork_with_delays_in_multiple_branches() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     // Both branches have delays
     let after_delay_a = stub_node("after_a", None);
@@ -1650,7 +1650,7 @@ async fn test_fork_normal_branch_completes_delayed_branch_parks() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     // branch_a: normal task (completes immediately)
     // branch_b: delay (parks)
@@ -1972,7 +1972,7 @@ async fn test_checkpointing_retry_succeeds_after_failure() {
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("flaky"),
     });
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let cont = stub_node_with_retry("flaky", fast_retry(2), None);
     let attempts = Arc::new(AtomicU32::new(0));
@@ -2027,7 +2027,7 @@ async fn test_checkpointing_retry_exhaustion() {
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("always_fail"),
     });
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let cont = stub_node_with_retry("always_fail", fast_retry(1), None);
     let attempts = Arc::new(AtomicU32::new(0));
@@ -2066,7 +2066,7 @@ async fn test_checkpointing_retry_state_persisted() {
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("flaky"),
     });
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let cont = stub_node_with_retry("flaky", fast_retry(4), None);
     let attempts = Arc::new(AtomicU32::new(0));
@@ -2125,7 +2125,7 @@ async fn test_checkpointing_retry_with_timeout() {
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: sayiir_core::TaskId::from("slow_then_fast"),
     });
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     // Timeout of 10ms; first attempt sleeps 200ms (triggers timeout), second is instant
     let cont = stub_node_with_timeout_and_retry(
@@ -2170,7 +2170,7 @@ async fn test_checkpointing_retry_in_chain() {
     let input = encode_u32(5);
 
     let mut snapshot = WorkflowSnapshot::with_initial_input("inst-1", "hash".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let double = stub_node("double", None);
     let flaky = stub_node_with_retry("flaky", fast_retry(2), Some(Box::new(double)));
@@ -2313,7 +2313,7 @@ async fn test_checkpointing_timeout_mid_chain() {
     let input = encode_u32(5);
 
     let mut snapshot = WorkflowSnapshot::with_initial_input("inst-1", "hash".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     // fast_task → slow_task (times out)
     let slow_task = WorkflowContinuation::Task {
@@ -2389,7 +2389,7 @@ async fn test_checkpointing_delay_terminal_parks() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let delay = WorkflowContinuation::Delay {
         id: "final_wait".into(),
@@ -2447,7 +2447,7 @@ async fn test_checkpointing_delay_after_task_chain() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let process = stub_node("process", None);
     let delay = WorkflowContinuation::Delay {
@@ -2903,7 +2903,7 @@ async fn test_checkpointing_loop_basic() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let body = stub_node("countdown", None);
     let cont = WorkflowContinuation::Loop {
@@ -2952,7 +2952,7 @@ async fn test_checkpointing_loop_resumes_from_iteration() {
 
     // Simulate: 2 iterations already completed. Next input should be 3 (5→4→3).
     snapshot.set_loop_iteration(sayiir_core::TaskId::from("loop_0"), 2);
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let call_count = Arc::new(AtomicU32::new(0));
     let cc = call_count.clone();
@@ -3354,7 +3354,7 @@ async fn test_checkpointing_loop_caches_result_on_exit() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let body = stub_node("countdown", None);
     let cont = WorkflowContinuation::Loop {
@@ -3404,7 +3404,7 @@ async fn test_checkpointing_loop_short_circuits_when_cached() {
     // Pre-cache a result for the loop node.
     let cached_output = encode_u32(42);
     snapshot.mark_task_completed(sayiir_core::TaskId::from("loop_0"), cached_output.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let body = stub_node("body", None);
     let cont = WorkflowContinuation::Loop {
@@ -3448,7 +3448,7 @@ async fn test_checkpointing_loop_exit_with_last() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let body = stub_node("always_again", None);
     let cont = WorkflowContinuation::Loop {
@@ -3500,7 +3500,7 @@ async fn test_checkpointing_loop_in_chain() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let double = stub_node("double", None);
     let body = stub_node("countdown", None);
@@ -3559,7 +3559,7 @@ async fn test_checkpointing_loop_inside_fork_branch() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let body = stub_node("countdown", None);
     let loop_branch = Arc::new(WorkflowContinuation::Loop {
@@ -3630,7 +3630,7 @@ async fn test_checkpointing_loop_iteration_counter_persisted() {
 
     let mut snapshot =
         WorkflowSnapshot::with_initial_input("inst-1", "hash-1".into(), input.clone());
-    backend.save_snapshot(&snapshot).await.unwrap();
+    backend.save_snapshot(&mut snapshot).await.unwrap();
 
     let body = stub_node("countdown", None);
     let cont = WorkflowContinuation::Loop {
