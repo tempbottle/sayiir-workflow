@@ -14,8 +14,8 @@ use std::sync::Arc;
 use crate::task::RetryPolicy;
 
 /// Completed-task results keyed by [`TaskId`](crate::TaskId). `FxHashMap`, not
-/// the std default: `TaskId` is already a 32-byte SHA-256, so SipHash is wasted
-/// work on this hot, frequently-rebuilt/probed map.
+/// the std default: `TaskId` is already a 32-byte SHA-256, so `SipHash` is
+/// wasted work on this hot, frequently-rebuilt/probed map.
 type CompletedTasks = FxHashMap<crate::TaskId, TaskResult>;
 
 /// Pre-computed metadata about the next task to execute.
