@@ -966,7 +966,7 @@ where
                                 sayiir_core::TaskId::from(id),
                                 envelope_bytes.clone(),
                             );
-                            backend.save_snapshot(&snapshot).await?;
+                            backend.save_snapshot(&mut snapshot).await?;
 
                             Ok(ControlFlow::Continue(envelope_bytes))
                         }
@@ -1039,7 +1039,7 @@ where
 
                             snapshot
                                 .mark_task_completed(sayiir_core::TaskId::from(id), output.clone());
-                            backend.save_snapshot(&snapshot).await?;
+                            backend.save_snapshot(&mut snapshot).await?;
 
                             Ok(ControlFlow::Continue(output))
                         }
@@ -1301,7 +1301,7 @@ mod tests {
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("step1"),
         });
-        runner.backend().save_snapshot(&snapshot).await.unwrap();
+        runner.backend().save_snapshot(&mut snapshot).await.unwrap();
 
         // Build a different workflow
         let workflow2 = WorkflowBuilder::new(ctx())
@@ -1344,7 +1344,7 @@ mod tests {
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("slow_task"),
         });
-        runner.backend().save_snapshot(&snapshot).await.unwrap();
+        runner.backend().save_snapshot(&mut snapshot).await.unwrap();
 
         // Request cancellation via WorkflowClient
         let client = crate::WorkflowClient::from_shared(Arc::clone(runner.backend()));
@@ -1388,7 +1388,7 @@ mod tests {
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: sayiir_core::TaskId::from("task1"),
         });
-        runner.backend().save_snapshot(&snapshot).await.unwrap();
+        runner.backend().save_snapshot(&mut snapshot).await.unwrap();
 
         let client = crate::WorkflowClient::from_shared(Arc::clone(runner.backend()));
         client

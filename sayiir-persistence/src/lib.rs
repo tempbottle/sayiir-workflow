@@ -30,8 +30,8 @@
 //! let backend = InMemoryBackend::new();
 //!
 //! // Save a snapshot
-//! let snapshot = WorkflowSnapshot::new("instance-123", sayiir_core::DefinitionHash::from("hash-abc"));
-//! backend.save_snapshot(&snapshot).await?;
+//! let mut snapshot = WorkflowSnapshot::new("instance-123", sayiir_core::DefinitionHash::from("hash-abc"));
+//! backend.save_snapshot(&mut snapshot).await?;
 //!
 //! // Load it back
 //! let loaded = backend.load_snapshot("instance-123").await?;

@@ -12,7 +12,7 @@ where
     for<'c> &'c T: Executor<'c, Database = crate::backend::BackendDB>,
     T: Clone + Send + Sync,
 {
-    async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
+    async fn save_snapshot(&self, snapshot: &mut WorkflowSnapshot) -> Result<(), BackendError> {
         let data = self.encode(snapshot)?;
         let status = snapshot.state.as_ref();
         let task_id = snapshot.current_task_id().map(|t| t.to_hex());
@@ -96,7 +96,7 @@ where
         // Single-Worker: no concurrency, so sequential load → mutate → save is safe.
         let mut snapshot = self.load_snapshot(instance_id).await?;
         snapshot.mark_task_completed(*task_id, output);
-        self.save_snapshot(&snapshot).await
+        self.save_snapshot(&mut snapshot).await
     }
 
     async fn load_snapshot(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {

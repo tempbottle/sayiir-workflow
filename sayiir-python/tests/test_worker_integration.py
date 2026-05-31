@@ -55,7 +55,7 @@ def identity(x):
 @pytest.fixture(scope="module")
 def postgres_url():
     """Start a Postgres 17 container for the entire test module."""
-    with PostgresContainer("postgres:17-alpine", driver=None) as pg:
+    with PostgresContainer("postgres:18-alpine", driver=None) as pg:
         yield pg.get_connection_url()
 
 

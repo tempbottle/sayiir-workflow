@@ -6,11 +6,17 @@
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::task::RetryPolicy;
+
+/// Completed-task results keyed by [`TaskId`](crate::TaskId). `FxHashMap`, not
+/// the std default: `TaskId` is already a 32-byte SHA-256, so `SipHash` is
+/// wasted work on this hot, frequently-rebuilt/probed map.
+type CompletedTasks = FxHashMap<crate::TaskId, TaskResult>;
 
 /// Pre-computed metadata about the next task to execute.
 ///
@@ -293,7 +299,7 @@ pub enum WorkflowSnapshotState {
         /// Current execution position.
         position: ExecutionPosition,
         /// Results from completed tasks (by task ID).
-        completed_tasks: HashMap<crate::TaskId, TaskResult>,
+        completed_tasks: CompletedTasks,
         /// ID of the last completed task (for deterministic resume).
         /// This is needed because `HashMap` iteration order is not guaranteed.
         last_completed_task_id: Option<crate::TaskId>,
@@ -317,7 +323,7 @@ pub enum WorkflowSnapshotState {
         /// Timestamp when the workflow was cancelled.
         cancelled_at: DateTime<Utc>,
         /// Results from tasks that completed before cancellation.
-        completed_tasks: HashMap<crate::TaskId, TaskResult>,
+        completed_tasks: CompletedTasks,
         /// The task ID that was interrupted (if any).
         interrupted_at_task: Option<crate::TaskId>,
     },
@@ -332,7 +338,7 @@ pub enum WorkflowSnapshotState {
         /// Timestamp when the workflow was paused.
         paused_at: DateTime<Utc>,
         /// Results from tasks that completed before pausing.
-        completed_tasks: HashMap<crate::TaskId, TaskResult>,
+        completed_tasks: CompletedTasks,
         /// Execution position at the time of pause (for exact resume).
         position: ExecutionPosition,
         /// ID of the last completed task (for deterministic resume).
@@ -546,6 +552,15 @@ pub struct WorkflowSnapshot {
     /// Postgres reads/writes it from a dedicated column.
     #[serde(skip)]
     pub trace_parent: Option<String>,
+    /// Whether `last_completed_task_id`'s output still needs flushing to the
+    /// backend's task sidecar. In-memory only; set by
+    /// [`mark_task_completed`](Self::mark_task_completed), cleared by the
+    /// backend after a durable write, and read by `save_snapshot` to skip
+    /// re-shipping bytes on position-only saves. A loaded snapshot defaults to
+    /// `false` (outputs already persisted). `pub` only so the struct stays
+    /// literal-constructible — treat as internal.
+    #[serde(skip)]
+    pub output_unflushed: bool,
 }
 
 impl WorkflowSnapshot {
@@ -571,7 +586,7 @@ impl WorkflowSnapshot {
             definition_hash,
             state: WorkflowSnapshotState::InProgress {
                 position: ExecutionPosition::NotStarted,
-                completed_tasks: HashMap::new(),
+                completed_tasks: CompletedTasks::default(),
                 last_completed_task_id: None,
             },
             created_at: now,
@@ -583,6 +598,7 @@ impl WorkflowSnapshot {
             task_priority: None,
             task_tags: vec![],
             trace_parent: None,
+            output_unflushed: false,
         }
     }
 
@@ -599,7 +615,7 @@ impl WorkflowSnapshot {
             definition_hash,
             state: WorkflowSnapshotState::InProgress {
                 position: ExecutionPosition::NotStarted,
-                completed_tasks: HashMap::new(),
+                completed_tasks: CompletedTasks::default(),
                 last_completed_task_id: None,
             },
             created_at: now,
@@ -611,6 +627,7 @@ impl WorkflowSnapshot {
             task_priority: None,
             task_tags: vec![],
             trace_parent: None,
+            output_unflushed: false,
         }
     }
 
@@ -646,7 +663,7 @@ impl WorkflowSnapshot {
     /// retain `completed_tasks`), and `None` for `Completed` and `Failed` states
     /// (where task results have been discarded).
     #[must_use]
-    pub fn get_all_task_results(&self) -> Option<&HashMap<crate::TaskId, TaskResult>> {
+    pub fn get_all_task_results(&self) -> Option<&CompletedTasks> {
         match &self.state {
             WorkflowSnapshotState::InProgress {
                 completed_tasks, ..
@@ -672,6 +689,31 @@ impl WorkflowSnapshot {
         }
     }
 
+    /// Move every completed task's `output` out of the snapshot, leaving
+    /// each one empty, and return them keyed by task id.
+    ///
+    /// Pairs with [`hydrate_task_outputs`](Self::hydrate_task_outputs) to
+    /// restore: `take → encode → hydrate`. This lets a sidecar-staging
+    /// backend encode the outputs-stripped blob without cloning the whole
+    /// snapshot — the moves are cheap (no `Bytes` refcount churn) and the
+    /// snapshot is left logically unchanged once the outputs are hydrated
+    /// back. Empty outputs are skipped, so a round-trip with nothing to
+    /// strip allocates nothing.
+    #[must_use]
+    pub fn take_task_outputs(&mut self) -> Vec<(crate::TaskId, Bytes)> {
+        let Some(completed) = self.completed_tasks_mut() else {
+            return Vec::new();
+        };
+        let mut taken = Vec::with_capacity(completed.len());
+        for result in completed.values_mut() {
+            let output = std::mem::take(&mut result.output);
+            if !output.is_empty() {
+                taken.push((result.task_id, output));
+            }
+        }
+        taken
+    }
+
     /// Patch outputs back onto completed-task results from an external
     /// source (e.g. the `workflow_tasks` sidecar table). Outputs for
     /// task IDs not currently in `completed_tasks` are silently
@@ -690,7 +732,7 @@ impl WorkflowSnapshot {
         }
     }
 
-    fn completed_tasks_mut(&mut self) -> Option<&mut HashMap<crate::TaskId, TaskResult>> {
+    fn completed_tasks_mut(&mut self) -> Option<&mut CompletedTasks> {
         match &mut self.state {
             WorkflowSnapshotState::InProgress {
                 completed_tasks, ..
@@ -716,6 +758,9 @@ impl WorkflowSnapshot {
             completed_tasks.insert(task_id, TaskResult { task_id, output });
             *last_completed_task_id = Some(task_id);
             self.updated_at = Self::current_timestamp();
+            // The new output has not yet reached the backend's task sidecar;
+            // the next `save_snapshot` must ship it. See `output_unflushed`.
+            self.output_unflushed = true;
         }
     }
 
@@ -982,7 +1027,7 @@ impl WorkflowSnapshot {
             WorkflowSnapshotState::InProgress {
                 completed_tasks, ..
             } => completed_tasks.clone(),
-            _ => HashMap::new(),
+            _ => CompletedTasks::default(),
         };
 
         self.task_deadline = None;
@@ -1238,6 +1283,67 @@ mod tests {
     }
 
     #[test]
+    fn test_take_and_restore_task_outputs() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
+        snapshot.mark_task_completed(crate::TaskId::from("t1"), Bytes::from("out1"));
+        snapshot.mark_task_completed(crate::TaskId::from("t2"), Bytes::from("out2"));
+
+        // Take moves outputs out, leaving the completed-task entries empty.
+        let taken = snapshot.take_task_outputs();
+        assert_eq!(taken.len(), 2);
+        assert!(
+            snapshot
+                .get_task_result(&crate::TaskId::from("t1"))
+                .unwrap()
+                .output
+                .is_empty()
+        );
+
+        // Hydrating the taken outputs back restores the snapshot exactly.
+        snapshot.hydrate_task_outputs(taken);
+        assert_eq!(
+            snapshot.get_task_result_bytes(&crate::TaskId::from("t1")),
+            Some(Bytes::from("out1"))
+        );
+        assert_eq!(
+            snapshot.get_task_result_bytes(&crate::TaskId::from("t2")),
+            Some(Bytes::from("out2"))
+        );
+
+        // Nothing left to take after outputs are already empty.
+        snapshot.strip_task_outputs();
+        assert!(snapshot.take_task_outputs().is_empty());
+    }
+
+    #[test]
+    fn test_output_unflushed_marker() {
+        // Fresh snapshot: nothing completed, nothing to flush.
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
+        assert!(!snapshot.output_unflushed);
+
+        // Completing a task flags its output as needing a flush.
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
+        assert!(snapshot.output_unflushed);
+
+        // One-shot gate: a backend clears the marker after durably writing
+        // the output (this is what `save_snapshot` does post-execute), so a
+        // later save of the same in-memory snapshot won't re-ship the bytes.
+        snapshot.output_unflushed = false;
+        assert!(!snapshot.output_unflushed);
+
+        // Completing another task re-arms it for the next flush.
+        snapshot.mark_task_completed(crate::TaskId::from("task-2"), Bytes::from("out2"));
+        assert!(snapshot.output_unflushed);
+
+        // The marker is in-memory only: a decoded snapshot (serde-skipped
+        // field) defaults to clean, since its outputs were already persisted
+        // and are hydrated from the sidecar on load.
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let decoded: WorkflowSnapshot = serde_json::from_str(&json).unwrap();
+        assert!(!decoded.output_unflushed);
+    }
+
+    #[test]
     fn test_get_last_task_output() {
         let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
         assert!(snapshot.get_last_task_output().is_none());
@@ -1443,7 +1549,7 @@ mod tests {
     fn test_state_transitions() {
         let state = WorkflowSnapshotState::InProgress {
             position: ExecutionPosition::NotStarted,
-            completed_tasks: HashMap::new(),
+            completed_tasks: CompletedTasks::default(),
             last_completed_task_id: None,
         };
         assert!(state.is_in_progress());
@@ -1469,7 +1575,7 @@ mod tests {
             reason: None,
             cancelled_by: None,
             cancelled_at: Utc::now(),
-            completed_tasks: HashMap::new(),
+            completed_tasks: CompletedTasks::default(),
             interrupted_at_task: None,
         };
         assert!(state.is_cancelled());
@@ -1583,12 +1689,13 @@ mod proptests {
     }
 
     /// Strategy for arbitrary `HashMap<TaskId, TaskResult>`.
-    fn arb_completed_tasks() -> impl Strategy<Value = HashMap<crate::TaskId, TaskResult>> {
+    fn arb_completed_tasks() -> impl Strategy<Value = CompletedTasks> {
         proptest::collection::hash_map(
             "[a-z0-9]{1,8}".prop_map(|s| crate::TaskId::from(s.as_str())),
             arb_task_result(),
             0..4,
         )
+        .prop_map(|m| m.into_iter().collect())
     }
 
     /// Strategy for arbitrary `WorkflowSnapshotState`.

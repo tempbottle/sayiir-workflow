@@ -214,15 +214,35 @@ where
             .map_err(|e| BackendError::Serialization(e.to_string()))
     }
 
-    /// Encode the snapshot blob in the canonical "outputs stripped"
-    /// shape and return it alongside its SHA-256 hash.
+    /// Encode the outputs-stripped blob + its SHA-256, without cloning.
+    ///
+    /// Destructive: strips task outputs in place, no restore. For callers that
+    /// own the snapshot, read only metadata after, and drop it on commit
+    /// (`save_task_result`, the signal-store `check_and_*` paths). Callers that
+    /// read outputs back after encoding use
+    /// [`encode_blob_preserving`](Self::encode_blob_preserving).
     pub(crate) fn encode_blob(
         &self,
-        snapshot: &WorkflowSnapshot,
+        snapshot: &mut WorkflowSnapshot,
     ) -> Result<(Vec<u8>, [u8; 32]), BackendError> {
-        let mut stripped = snapshot.clone();
-        stripped.strip_task_outputs();
-        let data = self.encode(&stripped)?;
+        snapshot.strip_task_outputs();
+        let data = self.encode(snapshot)?;
+        let hash = crate::history::snapshot_hash(&data);
+        Ok((data, hash))
+    }
+
+    /// Like [`encode_blob`] but restores the task outputs after encoding,
+    /// so the snapshot is logically unchanged on return (including on the
+    /// encode-error path). Costs an extra O(n) hydrate; only use it when
+    /// the caller reads outputs back after encoding.
+    pub(crate) fn encode_blob_preserving(
+        &self,
+        snapshot: &mut WorkflowSnapshot,
+    ) -> Result<(Vec<u8>, [u8; 32]), BackendError> {
+        let outputs = snapshot.take_task_outputs();
+        let encoded = self.encode(snapshot);
+        snapshot.hydrate_task_outputs(outputs);
+        let data = encoded?;
         let hash = crate::history::snapshot_hash(&data);
         Ok((data, hash))
     }

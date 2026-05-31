@@ -39,8 +39,8 @@
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let backend = PostgresBackend::<JsonCodec>::connect("postgresql://localhost/sayiir").await?;
 //!
-//! let snapshot = WorkflowSnapshot::new("order-123", sayiir_core::DefinitionHash::from("hash-abc"));
-//! backend.save_snapshot(&snapshot).await?;
+//! let mut snapshot = WorkflowSnapshot::new("order-123", sayiir_core::DefinitionHash::from("hash-abc"));
+//! backend.save_snapshot(&mut snapshot).await?;
 //!
 //! let loaded = backend.load_snapshot("order-123").await?;
 //! # Ok(())

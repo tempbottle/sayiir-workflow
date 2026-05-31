@@ -68,7 +68,7 @@ describe("Worker integration (Postgres)", () => {
   let connectionUrl: string;
 
   beforeAll(async () => {
-    container = await new PostgreSqlContainer("postgres:17-alpine").start();
+    container = await new PostgreSqlContainer("postgres:18-alpine").start();
     connectionUrl = container.getConnectionUri();
   }, 60_000);
 

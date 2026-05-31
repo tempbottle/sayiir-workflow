@@ -39,7 +39,7 @@ use crate::error::PgError;
 pub(crate) async fn fetch_task_outputs<'e, E>(
     executor: E,
     instance_id: &str,
-) -> Result<HashMap<sayiir_core::TaskId, Bytes>, BackendError>
+) -> Result<Vec<(sayiir_core::TaskId, Bytes)>, BackendError>
 where
     E: sqlx::PgExecutor<'e>,
 {
@@ -52,7 +52,10 @@ where
     .await
     .map_err(PgError)?;
 
-    let mut outputs = HashMap::with_capacity(rows.len());
+    // Collected into a `Vec`, not a `HashMap`: the only consumer is
+    // `hydrate_task_outputs`, which just iterates — keying it here would
+    // hash every TaskId for nothing.
+    let mut outputs = Vec::with_capacity(rows.len());
     for row in rows {
         let task_id_bytes: &[u8] = row.get("task_id");
         let task_id = sayiir_core::TaskId::from_slice(task_id_bytes).map_err(|_| {
@@ -72,7 +75,7 @@ where
             ))
         })?;
         let output: Vec<u8> = row.get("output");
-        outputs.insert(task_id, Bytes::from(output));
+        outputs.push((task_id, Bytes::from(output)));
     }
     Ok(outputs)
 }
@@ -83,7 +86,7 @@ where
 pub(crate) async fn fetch_task_outputs_batched<'e, E>(
     executor: E,
     instance_ids: &[&str],
-) -> Result<HashMap<String, HashMap<sayiir_core::TaskId, Bytes>>, BackendError>
+) -> Result<HashMap<String, Vec<(sayiir_core::TaskId, Bytes)>>, BackendError>
 where
     E: sqlx::PgExecutor<'e>,
 {
@@ -99,7 +102,7 @@ where
     .await
     .map_err(PgError)?;
 
-    let mut grouped: HashMap<String, HashMap<sayiir_core::TaskId, Bytes>> = HashMap::new();
+    let mut grouped: HashMap<String, Vec<(sayiir_core::TaskId, Bytes)>> = HashMap::new();
     for row in rows {
         let instance_id: String = row.get("instance_id");
         let task_id_bytes: &[u8] = row.get("task_id");
@@ -118,7 +121,7 @@ where
         grouped
             .entry(instance_id)
             .or_default()
-            .insert(task_id, Bytes::from(output));
+            .push((task_id, Bytes::from(output)));
     }
     Ok(grouped)
 }
@@ -260,7 +263,8 @@ where
         let mut snapshot = self.decode(&data)?;
         let task_ids: Vec<Vec<u8>> = row.get("task_ids");
         let outputs_vec: Vec<Vec<u8>> = row.get("outputs");
-        let mut outputs = std::collections::HashMap::with_capacity(task_ids.len());
+        // `Vec`, not `HashMap`: `hydrate_task_outputs` only iterates these.
+        let mut outputs = Vec::with_capacity(task_ids.len());
         for (tid_bytes, output) in task_ids.into_iter().zip(outputs_vec) {
             // task_id is always a 32-byte SHA-256 (see migration 008
             // and every save_task_result write path). A wrong-sized
@@ -273,7 +277,7 @@ where
                     tid_bytes.len()
                 ))
             })?;
-            outputs.insert(task_id, Bytes::from(output));
+            outputs.push((task_id, Bytes::from(output)));
         }
         snapshot.hydrate_task_outputs(outputs);
         Ok(Some((snapshot, history_version)))

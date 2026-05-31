@@ -397,7 +397,7 @@ where
                     let delay_id_owned = *delay_id;
                     if let Some(next_id) = next_id_opt {
                         snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
-                        self.save_snapshot(&snapshot).await?;
+                        self.save_snapshot(&mut snapshot).await?;
                         next_id
                     } else {
                         // Delay is the last node — complete the workflow.
@@ -405,7 +405,7 @@ where
                             .get_task_result_bytes(&delay_id_owned)
                             .unwrap_or_default();
                         snapshot.mark_completed(output);
-                        self.save_snapshot(&snapshot).await?;
+                        self.save_snapshot(&mut snapshot).await?;
                         continue;
                     }
                 }
@@ -517,7 +517,8 @@ where
         let task_ids: Option<Vec<Vec<u8>>> = row.get("task_ids");
         let task_outputs: Option<Vec<Vec<u8>>> = row.get("task_outputs");
         if let (Some(ids), Some(outs)) = (task_ids, task_outputs) {
-            let mut outputs = std::collections::HashMap::with_capacity(ids.len());
+            // `Vec`, not `HashMap`: `hydrate_task_outputs` only iterates these.
+            let mut outputs = Vec::with_capacity(ids.len());
             for (id_bytes, out_bytes) in ids.into_iter().zip(outs.into_iter()) {
                 let tid = sayiir_core::TaskId::from_slice(&id_bytes).map_err(|_| {
                     BackendError::Backend(format!(
@@ -526,7 +527,7 @@ where
                         id_bytes.len()
                     ))
                 })?;
-                outputs.insert(tid, bytes::Bytes::from(out_bytes));
+                outputs.push((tid, bytes::Bytes::from(out_bytes)));
             }
             snapshot.hydrate_task_outputs(outputs);
         }

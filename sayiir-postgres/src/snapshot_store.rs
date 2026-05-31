@@ -27,9 +27,9 @@ where
         err(level = tracing::Level::ERROR),
     )]
     #[allow(clippy::too_many_lines)]
-    async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
+    async fn save_snapshot(&self, snapshot: &mut WorkflowSnapshot) -> Result<(), BackendError> {
         tracing::debug!("saving snapshot");
-        let (data, data_hash) = self.encode_blob(snapshot)?;
+        let (data, data_hash) = self.encode_blob_preserving(snapshot)?;
         let status = snapshot.state.as_ref();
         let task_id_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let task_id: Option<&[u8]> = task_id_bytes.as_ref().map(<[u8; 32]>::as_slice);
@@ -39,11 +39,10 @@ where
         let pos_kind = snapshot.position_kind();
         let wake_at = snapshot.delay_wake_at();
         let task_priority = i16::from(snapshot.current_task_priority());
-        let task_tags: Vec<&str> = snapshot
-            .current_task_tags()
-            .iter()
-            .map(String::as_str)
-            .collect();
+        // Bind the `&[String]` slice directly — sqlx encodes it as `text[]`,
+        // so the intermediate `Vec<&str>` collect (one alloc per save) is
+        // unnecessary.
+        let task_tags = snapshot.current_task_tags();
         let terminal_status = match SnapshotStatus::from(&snapshot.state) {
             SnapshotStatus::Failed => "failed",
             SnapshotStatus::Cancelled => "cancelled",
@@ -51,27 +50,25 @@ where
         };
         let notify_payload = build_task_ready_payload(snapshot);
 
-        // The runtime calls `mark_task_completed` then `save_snapshot`
-        // (not `save_task_result`); persist the just-completed task's
-        // output into the sidecar table here too, so dispatch can
-        // hydrate `completed_tasks[*].output` from `workflow_tasks`.
-        //
-        // `task_output` CTE's `WHERE … IS DISTINCT FROM EXCLUDED.output`
-        // gate suppresses the row write when bytes match, but the bytes
-        // still travel the wire. PERF TODO: thread an unflushed-output
-        // marker through the snapshot (requires `save_snapshot(&mut
-        // WorkflowSnapshot)` and SnapshotStore trait change) so
-        // position-only saves bind NULL here instead of re-shipping the
-        // last completed task's payload on every dispatch tick. The
-        // major position-only offender (worker.rs deadline save) is
-        // gone post review-fix #6.
-        let last_completed_bytes: Option<[u8; 32]> =
-            snapshot.last_completed_task_id().map(|t| *t.as_bytes());
+        // Ship the just-completed output to the sidecar ONLY when flagged
+        // unflushed (set by `mark_task_completed`, cleared post-write). On
+        // position-only saves (pause/cancel/delay/signal parking) the flag is
+        // false, so both binds are NULL and the `task_output` CTE no-ops via
+        // `WHERE $18 IS NOT NULL` — no re-shipping. Safe: an unflagged output
+        // is already in `workflow_tasks`.
+        let output_unflushed = snapshot.output_unflushed;
+        let last_completed_task_id: Option<[u8; 32]> = output_unflushed
+            .then(|| snapshot.last_completed_task_id().map(|t| *t.as_bytes()))
+            .flatten();
         let last_completed_slice: Option<&[u8]> =
-            last_completed_bytes.as_ref().map(<[u8; 32]>::as_slice);
-        let last_completed_output: Option<bytes::Bytes> = snapshot
-            .last_completed_task_id()
-            .and_then(|id| snapshot.get_task_result(&id).map(|r| r.output.clone()));
+            last_completed_task_id.as_ref().map(<[u8; 32]>::as_slice);
+        let last_completed_output: Option<bytes::Bytes> = output_unflushed
+            .then(|| {
+                snapshot
+                    .last_completed_task_id()
+                    .and_then(|id| snapshot.get_task_result(&id).map(|r| r.output.clone()))
+            })
+            .flatten();
         let last_completed_output_slice: Option<&[u8]> = last_completed_output.as_deref();
 
         // One round-trip via a CTE chain: bump the snapshot version,
@@ -183,7 +180,7 @@ where
             .bind(wake_at) // $9
             .bind(snapshot.trace_parent.as_deref()) // $10
             .bind(task_priority) // $11
-            .bind(&task_tags) // $12
+            .bind(task_tags) // $12
             .bind(data_hash.as_slice()) // $13
             .bind(&data) // $14
             .bind(terminal_status) // $15
@@ -194,6 +191,10 @@ where
             .execute(&self.pool)
             .await
             .map_err(PgError)?;
+        // The last completed output (if any) is now durable in
+        // `workflow_tasks`; clear the marker so a later save of this same
+        // in-memory snapshot binds NULL instead of re-shipping the bytes.
+        snapshot.output_unflushed = false;
         Ok(())
     }
 
@@ -223,18 +224,29 @@ where
         let output_bytes = output.clone();
         snapshot.mark_task_completed(*task_id, output);
 
-        let (data, data_hash) = self.encode_blob(&snapshot)?;
+        let (data, data_hash) = self.encode_blob(&mut snapshot)?;
         let status = snapshot.state.as_ref();
         let current_bytes: Option<[u8; 32]> = snapshot.current_task_id().map(|t| *t.as_bytes());
         let current: Option<&[u8]> = current_bytes.as_ref().map(<[u8; 32]>::as_slice);
         let task_count = snapshot.completed_task_count();
         let next_history_version = prev_history_version + 1;
-        let notify_payload = build_task_ready_payload(&snapshot);
 
-        // UPDATE snapshots + INSERT history + UPSERT workflow_tasks +
-        // pg_notify in one CTE — the lock acquired above by
+        // UPDATE snapshots + INSERT history + UPSERT workflow_tasks in
+        // one CTE — the lock acquired above by
         // lock_snapshot_for_mutation is still held in this same tx, so
-        // all four writes commit together.
+        // all three writes commit together.
+        //
+        // NOTIFY is deliberately NOT emitted here: `current_task_id`
+        // has just been marked completed in `completed_tasks` but the
+        // snapshot row's `current_task_id` still points at it (the
+        // position advance happens in the immediately-following
+        // `save_snapshot` from `commit_task_result`). A NOTIFY here
+        // would carry a stale hint — recipients would call
+        // `find_hinted_task`, hydrate workflow_tasks, see the task
+        // already completed in `completed_tasks`, and bail. On the
+        // linear bench this stale half doubled NOTIFY pressure and
+        // blew through the 16 384-slot mpmc channel (~9 600 drops on
+        // CI), forcing workers onto the slower polling fallback.
         sqlx::query(
             "WITH upd AS (
                  UPDATE sayiir_workflow_snapshots
@@ -265,11 +277,7 @@ where
              -- them unconditionally regardless of references, but any
              -- future refactor that converts one to a non-DML CTE
              -- would silently drop the write without this anchor.
-             -- pg_notify in the outer projection only fires when the
-             -- payload is non-NULL.
-             SELECT pg_notify($10, $11) FROM upd WHERE $11 IS NOT NULL
-             UNION ALL
-             SELECT NULL::void FROM upd WHERE $11 IS NULL",
+             SELECT 1 FROM upd",
         )
         .bind(status) // $1
         .bind(current) // $2
@@ -280,8 +288,6 @@ where
         .bind(&data) // $7
         .bind(task_id.as_bytes().as_slice()) // $8
         .bind(output_bytes.as_ref()) // $9
-        .bind(TASK_READY_CHANNEL) // $10
-        .bind(notify_payload.as_deref()) // $11
         .execute(&mut *tx)
         .await
         .map_err(PgError)?;
