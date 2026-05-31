@@ -56,22 +56,28 @@ where
         // output into the sidecar table here too, so dispatch can
         // hydrate `completed_tasks[*].output` from `workflow_tasks`.
         //
-        // `task_output` CTE's `WHERE … IS DISTINCT FROM EXCLUDED.output`
-        // gate suppresses the row write when bytes match, but the bytes
-        // still travel the wire. PERF TODO: thread an unflushed-output
-        // marker through the snapshot (requires `save_snapshot(&mut
-        // WorkflowSnapshot)` and SnapshotStore trait change) so
-        // position-only saves bind NULL here instead of re-shipping the
-        // last completed task's payload on every dispatch tick. The
-        // major position-only offender (worker.rs deadline save) is
-        // gone post review-fix #6.
-        let last_completed_bytes: Option<[u8; 32]> =
-            snapshot.last_completed_task_id().map(|t| *t.as_bytes());
+        // Ship the output ONLY when the snapshot flags it unflushed.
+        // `mark_task_completed` sets that flag; a freshly-loaded snapshot
+        // clears it (its outputs were already hydrated from the sidecar).
+        // Position-only saves (pause/cancel/delay/signal parking, which
+        // never call `mark_task_completed`) therefore bind NULL for both
+        // the task id and the payload, so the `task_output` CTE no-ops via
+        // `WHERE $18 IS NOT NULL` instead of re-shipping the last completed
+        // task's bytes on every dispatch tick. Skipping is always safe: an
+        // unflagged output is, by construction, already in `workflow_tasks`.
+        let output_unflushed = snapshot.output_unflushed();
+        let last_completed_task_id: Option<[u8; 32]> = output_unflushed
+            .then(|| snapshot.last_completed_task_id().map(|t| *t.as_bytes()))
+            .flatten();
         let last_completed_slice: Option<&[u8]> =
-            last_completed_bytes.as_ref().map(<[u8; 32]>::as_slice);
-        let last_completed_output: Option<bytes::Bytes> = snapshot
-            .last_completed_task_id()
-            .and_then(|id| snapshot.get_task_result(&id).map(|r| r.output.clone()));
+            last_completed_task_id.as_ref().map(<[u8; 32]>::as_slice);
+        let last_completed_output: Option<bytes::Bytes> = output_unflushed
+            .then(|| {
+                snapshot
+                    .last_completed_task_id()
+                    .and_then(|id| snapshot.get_task_result(&id).map(|r| r.output.clone()))
+            })
+            .flatten();
         let last_completed_output_slice: Option<&[u8]> = last_completed_output.as_deref();
 
         // One round-trip via a CTE chain: bump the snapshot version,

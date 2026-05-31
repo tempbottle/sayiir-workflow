@@ -546,6 +546,17 @@ pub struct WorkflowSnapshot {
     /// Postgres reads/writes it from a dedicated column.
     #[serde(skip)]
     pub trace_parent: Option<String>,
+    /// Whether `last_completed_task_id`'s output is still unflushed to the
+    /// backend's task sidecar table.
+    ///
+    /// In-memory only (never serialized): set by [`mark_task_completed`](
+    /// Self::mark_task_completed) when a fresh output is produced, and read by
+    /// persistence backends to decide whether `save_snapshot` must ship the
+    /// output bytes. A freshly-loaded snapshot defaults to `false` — its
+    /// outputs were already hydrated from the sidecar, so position-only saves
+    /// skip re-shipping the last completed payload on every dispatch tick.
+    #[serde(skip)]
+    output_unflushed: bool,
 }
 
 impl WorkflowSnapshot {
@@ -583,6 +594,7 @@ impl WorkflowSnapshot {
             task_priority: None,
             task_tags: vec![],
             trace_parent: None,
+            output_unflushed: false,
         }
     }
 
@@ -611,6 +623,7 @@ impl WorkflowSnapshot {
             task_priority: None,
             task_tags: vec![],
             trace_parent: None,
+            output_unflushed: false,
         }
     }
 
@@ -716,7 +729,18 @@ impl WorkflowSnapshot {
             completed_tasks.insert(task_id, TaskResult { task_id, output });
             *last_completed_task_id = Some(task_id);
             self.updated_at = Self::current_timestamp();
+            // The new output has not yet reached the backend's task sidecar;
+            // the next `save_snapshot` must ship it. See `output_unflushed`.
+            self.output_unflushed = true;
         }
+    }
+
+    /// Whether the last completed task's output still needs flushing to the
+    /// backend's task sidecar table. See [`output_unflushed`](
+    /// Self::output_unflushed) (the field) for the full contract.
+    #[must_use]
+    pub fn output_unflushed(&self) -> bool {
+        self.output_unflushed
     }
 
     /// ID of the most recently completed task, if any. Set by
@@ -1235,6 +1259,24 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().output, Bytes::from("output1"));
         assert_eq!(result.unwrap().task_id, crate::TaskId::from("task-1"));
+    }
+
+    #[test]
+    fn test_output_unflushed_marker() {
+        // Fresh snapshot: nothing completed, nothing to flush.
+        let mut snapshot = WorkflowSnapshot::new("inst-1", "hash-1".into());
+        assert!(!snapshot.output_unflushed());
+
+        // Completing a task flags its output as needing a flush.
+        snapshot.mark_task_completed(crate::TaskId::from("task-1"), Bytes::from("out1"));
+        assert!(snapshot.output_unflushed());
+
+        // The marker is in-memory only: a decoded snapshot (serde-skipped
+        // field) defaults to clean, since its outputs were already persisted
+        // and are hydrated from the sidecar on load.
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let decoded: WorkflowSnapshot = serde_json::from_str(&json).unwrap();
+        assert!(!decoded.output_unflushed());
     }
 
     #[test]
