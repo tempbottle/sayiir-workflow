@@ -50,20 +50,12 @@ where
         };
         let notify_payload = build_task_ready_payload(snapshot);
 
-        // The runtime calls `mark_task_completed` then `save_snapshot`
-        // (not `save_task_result`); persist the just-completed task's
-        // output into the sidecar table here too, so dispatch can
-        // hydrate `completed_tasks[*].output` from `workflow_tasks`.
-        //
-        // Ship the output ONLY when the snapshot flags it unflushed.
-        // `mark_task_completed` sets that flag; a freshly-loaded snapshot
-        // clears it (its outputs were already hydrated from the sidecar).
-        // Position-only saves (pause/cancel/delay/signal parking, which
-        // never call `mark_task_completed`) therefore bind NULL for both
-        // the task id and the payload, so the `task_output` CTE no-ops via
-        // `WHERE $18 IS NOT NULL` instead of re-shipping the last completed
-        // task's bytes on every dispatch tick. Skipping is always safe: an
-        // unflagged output is, by construction, already in `workflow_tasks`.
+        // Ship the just-completed output to the sidecar ONLY when flagged
+        // unflushed (set by `mark_task_completed`, cleared post-write). On
+        // position-only saves (pause/cancel/delay/signal parking) the flag is
+        // false, so both binds are NULL and the `task_output` CTE no-ops via
+        // `WHERE $18 IS NOT NULL` — no re-shipping. Safe: an unflagged output
+        // is already in `workflow_tasks`.
         let output_unflushed = snapshot.output_unflushed;
         let last_completed_task_id: Option<[u8; 32]> = output_unflushed
             .then(|| snapshot.last_completed_task_id().map(|t| *t.as_bytes()))

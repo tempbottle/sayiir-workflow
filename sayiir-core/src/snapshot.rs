@@ -13,14 +13,9 @@ use std::sync::Arc;
 
 use crate::task::RetryPolicy;
 
-/// Completed-task results keyed by [`TaskId`](crate::TaskId).
-///
-/// Uses `FxHashMap` rather than the default `HashMap`: `TaskId` is a 32-byte
-/// SHA-256 (already uniformly distributed), so the cryptographic `SipHash`
-/// the std map defaults to is wasted work. This map is on the hot path — rebuilt
-/// on every snapshot decode and probed by `hydrate_task_outputs` /
-/// `find_available_tasks` once per task — where the faster hasher measurably
-/// cuts CPU.
+/// Completed-task results keyed by [`TaskId`](crate::TaskId). `FxHashMap`, not
+/// the std default: `TaskId` is already a 32-byte SHA-256, so SipHash is wasted
+/// work on this hot, frequently-rebuilt/probed map.
 type CompletedTasks = FxHashMap<crate::TaskId, TaskResult>;
 
 /// Pre-computed metadata about the next task to execute.
@@ -557,19 +552,13 @@ pub struct WorkflowSnapshot {
     /// Postgres reads/writes it from a dedicated column.
     #[serde(skip)]
     pub trace_parent: Option<String>,
-    /// Whether `last_completed_task_id`'s output is still unflushed to the
-    /// backend's task sidecar table.
-    ///
-    /// Implementation detail — `pub` only so the struct stays constructible
-    /// by literal (like [`trace_parent`](Self::trace_parent)); treat it as
-    /// internal. In-memory only (never serialized): set by
-    /// [`mark_task_completed`](Self::mark_task_completed) when a fresh output
-    /// is produced, cleared by a persistence backend once it has durably
-    /// written that output, and read by `save_snapshot` to decide whether to
-    /// ship the output bytes. A freshly-loaded snapshot defaults to `false` —
-    /// its outputs were already hydrated from the sidecar, so position-only
-    /// saves skip re-shipping the last completed payload on every dispatch
-    /// tick.
+    /// Whether `last_completed_task_id`'s output still needs flushing to the
+    /// backend's task sidecar. In-memory only; set by
+    /// [`mark_task_completed`](Self::mark_task_completed), cleared by the
+    /// backend after a durable write, and read by `save_snapshot` to skip
+    /// re-shipping bytes on position-only saves. A loaded snapshot defaults to
+    /// `false` (outputs already persisted). `pub` only so the struct stays
+    /// literal-constructible — treat as internal.
     #[serde(skip)]
     pub output_unflushed: bool,
 }

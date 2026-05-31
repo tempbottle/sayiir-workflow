@@ -214,20 +214,13 @@ where
             .map_err(|e| BackendError::Serialization(e.to_string()))
     }
 
-    /// Encode the snapshot blob in the canonical "outputs stripped" shape
-    /// and return it alongside its SHA-256 hash, without cloning.
+    /// Encode the outputs-stripped blob + its SHA-256, without cloning.
     ///
-    /// **Destructive**: strips the task outputs in place and does NOT
-    /// restore them. Use from paths that own the snapshot, read only
-    /// metadata afterwards, and drop it when the transaction commits —
-    /// `save_task_result` and the signal-store `check_and_*` paths. This is
-    /// the common case; restoring would burn an O(n) hydrate (n hash
-    /// lookups) per write for nothing, which on the fanout hot path
-    /// (`save_task_result`, one call per branch) dominates the write.
-    ///
-    /// Callers that need the outputs intact after encoding (only
-    /// `save_snapshot`, which binds the last output into the `task_output`
-    /// CTE) must use [`encode_blob_preserving`](Self::encode_blob_preserving).
+    /// Destructive: strips task outputs in place, no restore. For callers that
+    /// own the snapshot, read only metadata after, and drop it on commit
+    /// (`save_task_result`, the signal-store `check_and_*` paths). Callers that
+    /// read outputs back after encoding use
+    /// [`encode_blob_preserving`](Self::encode_blob_preserving).
     pub(crate) fn encode_blob(
         &self,
         snapshot: &mut WorkflowSnapshot,

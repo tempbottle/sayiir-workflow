@@ -35,6 +35,22 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time;
 
+/// Fallback poll-tick interval, phase-shifted per worker so a fleet spawned
+/// together doesn't fire the `find_available_tasks` scan in lockstep (a
+/// synchronized DB herd). Offset is `hash(worker_id) % poll_interval`. Keeps
+/// the default `Burst` missed-tick behavior: a worker that falls behind catches
+/// up immediately, which is what drives saturated back-to-back pickup.
+fn staggered_poll_interval(worker_id: &str, poll_interval: Duration) -> time::Interval {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    worker_id.hash(&mut hasher);
+    let period_ns = u64::try_from(poll_interval.as_nanos())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    let offset = Duration::from_nanos(hasher.finish() % period_ns);
+    time::interval_at(time::Instant::now() + offset, poll_interval)
+}
+
 /// A list of workflow definitions keyed by their definition hash.
 pub type WorkflowRegistry<C, Input, M> =
     Vec<(sayiir_core::DefinitionHash, Arc<Workflow<C, Input, M>>)>;
@@ -497,7 +513,7 @@ where
         executor: ExternalTaskExecutor,
         mut cmd_rx: mpsc::Receiver<WorkerCommand>,
     ) -> Result<(), crate::error::RuntimeError> {
-        let mut interval = time::interval(poll_interval);
+        let mut interval = staggered_poll_interval(&self.worker_id, poll_interval);
 
         loop {
             let hint = tokio::select! {
@@ -883,7 +899,7 @@ where
             + sealed::EncodeValue<Input>
             + 'static,
     {
-        let mut interval = time::interval(poll_interval);
+        let mut interval = staggered_poll_interval(&self.worker_id, poll_interval);
 
         loop {
             // In-process mode only filters irrelevant wakes; the direct-
