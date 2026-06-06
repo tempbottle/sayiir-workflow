@@ -21,9 +21,9 @@
 //! magic, so a future incompatible layout bumps the version (and ships a
 //! compatible read path) while keeping the magic stable for identification.
 //!
-//! All operations here are pure byte manipulation with no dependency on the
-//! standard library beyond [`Vec`], keeping the format **wasm-safe** for the
-//! Cloudflare Workers / D1 path.
+//! All operations here are pure byte manipulation that depend only on `core`
+//! and `alloc` (for [`Vec`]) — no `std` — keeping the format **wasm-safe** for
+//! the Cloudflare Workers / D1 path.
 //!
 //! See `docs/FORMAT.md` for the normative specification and compatibility policy.
 //!
@@ -155,7 +155,7 @@ impl fmt::Display for FormatError {
     }
 }
 
-impl std::error::Error for FormatError {}
+impl core::error::Error for FormatError {}
 
 /// Wrap a codec payload in the v1 envelope.
 ///

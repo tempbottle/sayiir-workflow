@@ -270,6 +270,11 @@ async fn stored_blob_carries_v1_envelope_and_legacy_is_rejected() {
     .await
     .unwrap();
 
+    assert!(
+        data.len() >= 6,
+        "blob too short for the 6-byte envelope header: {} bytes",
+        data.len()
+    );
     assert_eq!(&data[0..4], &SNAPSHOT_MAGIC, "magic prefix");
     assert_eq!(data[4], SNAPSHOT_FORMAT_VERSION, "format version");
     assert_eq!(data[5], CodecId::Json.as_u8(), "codec id (json)");
