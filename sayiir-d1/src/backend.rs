@@ -1,8 +1,9 @@
 //! `SQLiteBackend` struct, inline JSON codec, and constructors.
 
 use bytes::Bytes;
-use sayiir_core::codec::{self, Decoder, Encoder};
+use sayiir_core::codec::{self, CodecIdentity, Decoder, Encoder};
 use sayiir_core::snapshot::WorkflowSnapshot;
+use sayiir_core::snapshot_format::{self, CodecId};
 use sayiir_persistence::BackendError;
 use sqlx::{Database, Executor, IntoArguments, Row};
 
@@ -18,6 +19,12 @@ pub struct JsonCodec;
 
 impl Encoder for JsonCodec {}
 impl Decoder for JsonCodec {}
+
+impl CodecIdentity for JsonCodec {
+    fn codec_id(&self) -> CodecId {
+        CodecId::Json
+    }
+}
 
 impl codec::sealed::EncodeValue<WorkflowSnapshot> for JsonCodec {
     fn encode_value(
@@ -243,22 +250,19 @@ where
 }
 
 impl<T> SQLiteBackend<T> {
-    /// Encode a snapshot to JSON bytes.
+    /// Encode a snapshot to JSON bytes wrapped in the durable
+    /// [`snapshot_format`](sayiir_core::snapshot_format) envelope.
     #[allow(clippy::unused_self)]
     pub(crate) fn encode(&self, snapshot: &WorkflowSnapshot) -> Result<Vec<u8>, BackendError> {
-        let codec = JsonCodec;
-        codec
-            .encode(snapshot)
-            .map(|b| b.to_vec())
+        snapshot_format::encode_framed(&JsonCodec, snapshot)
             .map_err(|e| BackendError::Serialization(e.to_string()))
     }
 
-    /// Decode a snapshot from JSON bytes.
+    /// Decode a snapshot from a durable blob: parse the envelope, validate the
+    /// codec id, then decode the JSON payload.
     #[allow(clippy::unused_self)]
     pub(crate) fn decode(&self, data: &[u8]) -> Result<WorkflowSnapshot, BackendError> {
-        let codec = JsonCodec;
-        codec
-            .decode(Bytes::copy_from_slice(data))
+        snapshot_format::decode_framed(&JsonCodec, data)
             .map_err(|e| BackendError::Serialization(e.to_string()))
     }
 }

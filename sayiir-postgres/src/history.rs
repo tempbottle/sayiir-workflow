@@ -135,7 +135,7 @@ pub(crate) fn snapshot_hash(data: &[u8]) -> [u8; 32] {
 
 impl<C> PostgresBackend<C>
 where
-    C: Decoder + codec::sealed::DecodeValue<WorkflowSnapshot>,
+    C: Decoder + codec::CodecIdentity + codec::sealed::DecodeValue<WorkflowSnapshot>,
 {
     /// Single point of indirection for snapshot blob reads.
     ///

@@ -245,6 +245,54 @@ async fn history_is_canonical_data_column_stays_null() {
     );
 }
 
+/// End-to-end: persisted blobs carry the v1 durable envelope, and a load of a
+/// de-framed (pre-1.0-shaped) blob is rejected with a clear error. This proves
+/// the framing is applied through the real `save_snapshot` path, not just in
+/// the unit tests.
+#[tokio::test]
+async fn stored_blob_carries_v1_envelope_and_legacy_is_rejected() {
+    use sayiir_core::snapshot_format::{CodecId, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_MAGIC};
+
+    let (_c, backend, pool) = setup_with_pool(DEFAULT_PG_VERSION).await;
+
+    let task_id = sayiir_core::TaskId::from("task-env");
+    let mut snapshot = WorkflowSnapshot::new("wf-env", "hash-env".into());
+    snapshot.update_position(ExecutionPosition::AtTask { task_id });
+    backend.save_snapshot(&mut snapshot).await.unwrap();
+
+    // The raw blob in the canonical history store begins with the 6-byte header.
+    let (data,): (Vec<u8>,) = sqlx::query_as(
+        "SELECT data FROM sayiir_workflow_snapshot_history
+         WHERE instance_id = $1 ORDER BY version DESC LIMIT 1",
+    )
+    .bind("wf-env")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(&data[0..4], &SNAPSHOT_MAGIC, "magic prefix");
+    assert_eq!(data[4], SNAPSHOT_FORMAT_VERSION, "format version");
+    assert_eq!(data[5], CodecId::Json.as_u8(), "codec id (json)");
+
+    // Simulate a pre-1.0 blob by stripping the envelope, then confirm the
+    // load path refuses it with the "missing magic" guidance.
+    sqlx::query(
+        "UPDATE sayiir_workflow_snapshot_history SET data = substring(data FROM 7)
+         WHERE instance_id = $1",
+    )
+    .bind("wf-env")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let err = backend.load_snapshot("wf-env").await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("pre-1.0") && msg.contains("drain"),
+        "expected pre-1.0 drain guidance, got: {msg}"
+    );
+}
+
 /// Dual-write: save_task_result must persist the output bytes into the
 /// `sayiir_workflow_tasks.output` column in addition to the snapshot's
 /// `completed_tasks` map. Once the cutover lands and the map is removed

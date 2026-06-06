@@ -3,7 +3,7 @@
 //! Overrides the 3 default composite methods with single-transaction
 //! implementations for true ACID atomicity.
 
-use sayiir_core::codec::{self, Decoder, Encoder};
+use sayiir_core::codec;
 use sayiir_core::snapshot::{PauseRequest, SignalKind, SignalRequest, WorkflowSnapshot};
 use sayiir_persistence::validation::validate_signal_allowed;
 use sayiir_persistence::{BackendError, SignalStore};
@@ -16,10 +16,7 @@ use crate::wakeup::{TASK_READY_CHANNEL, build_task_ready_payload};
 
 impl<C> SignalStore for PostgresBackend<C>
 where
-    C: Encoder
-        + Decoder
-        + codec::sealed::EncodeValue<WorkflowSnapshot>
-        + codec::sealed::DecodeValue<WorkflowSnapshot>,
+    C: codec::SnapshotCodec,
 {
     #[tracing::instrument(
         name = "db.store_signal",
