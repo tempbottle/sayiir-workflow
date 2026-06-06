@@ -1,6 +1,6 @@
 //! [`SnapshotStore`] implementation for Postgres.
 
-use sayiir_core::codec::{self, Decoder, Encoder};
+use sayiir_core::codec;
 use sayiir_core::snapshot::{SnapshotStatus, WorkflowSnapshot};
 use sayiir_persistence::{BackendError, SnapshotStore};
 use sqlx::Row;
@@ -11,10 +11,7 @@ use crate::wakeup::{TASK_READY_CHANNEL, build_task_ready_payload};
 
 impl<C> SnapshotStore for PostgresBackend<C>
 where
-    C: Encoder
-        + Decoder
-        + codec::sealed::EncodeValue<WorkflowSnapshot>
-        + codec::sealed::DecodeValue<WorkflowSnapshot>,
+    C: codec::SnapshotCodec,
 {
     #[tracing::instrument(
         name = "db.save_snapshot",

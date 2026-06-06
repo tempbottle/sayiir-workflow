@@ -8,7 +8,7 @@
 //! so racing workers short-circuit without blocking on a row lock.
 
 use chrono::{Duration, Utc};
-use sayiir_core::codec::{self, Decoder, Encoder};
+use sayiir_core::codec;
 use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
 use sayiir_core::task_claim::{AvailableTask, TaskClaim};
 use sayiir_persistence::{BackendError, SnapshotStore, TaskClaimStore};
@@ -42,10 +42,7 @@ const ELIGIBILITY_PREDICATE: &str = "NOT EXISTS (
 
 impl<C> TaskClaimStore for PostgresBackend<C>
 where
-    C: Encoder
-        + Decoder
-        + codec::sealed::EncodeValue<WorkflowSnapshot>
-        + codec::sealed::DecodeValue<WorkflowSnapshot>,
+    C: codec::SnapshotCodec,
 {
     #[tracing::instrument(
         name = "db.claim_task",

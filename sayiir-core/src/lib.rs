@@ -85,6 +85,7 @@ pub mod prelude;
 pub mod priority;
 pub mod registry;
 pub mod snapshot;
+pub mod snapshot_format;
 pub mod task;
 pub mod task_claim;
 pub mod task_index;

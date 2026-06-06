@@ -81,6 +81,53 @@ pub trait Codec: Encoder + Decoder {}
 /// Blanket impl `Codec` for any type that implements Encoder and Decoder.
 impl<U> Codec for U where U: Encoder + Decoder {}
 
+/// Identifies which durable wire format a codec produces.
+///
+/// Durable backends record this id in the snapshot envelope
+/// (see [`crate::snapshot_format`]) so a reader can reject a blob written by a
+/// different codec with a clear error instead of silently mis-decoding it.
+///
+/// This is a separate trait from [`Encoder`]/[`Decoder`] so that adding format
+/// awareness does not require every codec impl to change — only codecs used as
+/// the *snapshot* codec of a durable backend need to implement it.
+pub trait CodecIdentity {
+    /// The wire-format id this codec produces.
+    fn codec_id(&self) -> crate::snapshot_format::CodecId;
+}
+
+impl<C: CodecIdentity> CodecIdentity for std::sync::Arc<C> {
+    fn codec_id(&self) -> crate::snapshot_format::CodecId {
+        (**self).codec_id()
+    }
+}
+
+/// The full codec contract a durable backend needs to round-trip a
+/// [`WorkflowSnapshot`](crate::snapshot::WorkflowSnapshot).
+///
+/// Bundles the five bounds every snapshot store would otherwise repeat —
+/// [`Encoder`]/[`Decoder`], the [`CodecIdentity`] tag written into the snapshot
+/// envelope, and the sealed per-type encode/decode for the snapshot — into one
+/// name, so a backend writes `C: SnapshotCodec` instead of the full list (and a
+/// future addition to the contract is made in one place). Blanket-implemented
+/// for every type that satisfies the parts, so no codec opts in explicitly.
+pub trait SnapshotCodec:
+    Encoder
+    + Decoder
+    + CodecIdentity
+    + sealed::EncodeValue<crate::snapshot::WorkflowSnapshot>
+    + sealed::DecodeValue<crate::snapshot::WorkflowSnapshot>
+{
+}
+
+impl<C> SnapshotCodec for C where
+    C: Encoder
+        + Decoder
+        + CodecIdentity
+        + sealed::EncodeValue<crate::snapshot::WorkflowSnapshot>
+        + sealed::DecodeValue<crate::snapshot::WorkflowSnapshot>
+{
+}
+
 /// Blanket implementations for `Arc<C>` to allow passing Arc-wrapped codecs.
 impl<C, T> sealed::EncodeValue<T> for std::sync::Arc<C>
 where

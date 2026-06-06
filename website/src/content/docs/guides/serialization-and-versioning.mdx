@@ -55,6 +55,31 @@ let workflow = workflow! {
 
 **Rule of thumb:** Start with `JsonCodec` (the default). Switch to `RkyvCodec` when serialization shows up in profiling.
 
+## Durable Snapshot Format & 1.0 Compatibility
+
+Durable backends (PostgreSQL, D1) store each snapshot as a **self-describing, versioned envelope**: a fixed 6-byte header followed by the codec payload.
+
+```
+SYRS              4-byte magic ("SaYiiR Snapshot")
+01                format_version = 1
+01                codec_id (01 = JSON, 02 = rkyv)
+{...json...}      payload — the codec's bytes
+```
+
+This header makes the durable bytes **identifiable**, **version-checked**, and **codec-tagged**, which underpins the 1.0 compatibility commitment:
+
+- **Within 1.x, any build reads any 1.x snapshot** written with the same codec. Backward-compatible payload changes (new `#[serde(default)]` fields, etc. — see [Schema Evolution](#schema-evolution-for-task-inputsoutputs)) keep `format_version = 1`. A change that older readers can't decode bumps the version, and an old reader fails fast with a clear "unsupported version" error rather than mis-reading.
+- **Codec mismatches are caught, not corrupted.** The `codec_id` is validated on load; loading a JSON-written blob with an rkyv-configured backend (or vice versa) fails with a clear error. Switching the durable codec on a live system still requires a [drain](#migration-strategy) — the bytes already on disk were written by the old codec.
+- **rkyv is fragile across struct changes.** rkyv archives have no field-default tolerance, so prefer `JsonCodec` when you want the smoothest in-place upgrades.
+
+:::caution[Upgrading from a pre-1.0 (0.x) deployment]
+Snapshots written by 0.x have **no envelope** and are **not readable** by 1.0 — there is intentionally no in-place migration. A 1.0 load of a 0.x snapshot fails with a "missing magic / pre-1.0 snapshot" error directing you to drain.
+
+To upgrade: **stop new submissions → let in-flight workflows drain → deploy 1.0**. This is a one-time cost at the 0.x → 1.0 boundary; within 1.x, snapshots are never stranded by an upgrade.
+:::
+
+The format is specified normatively in [`docs/FORMAT.md`](https://github.com/sayiir/sayiir/blob/main/docs/FORMAT.md) and frozen by golden-blob tests in `sayiir-core`.
+
 ## Making Types Serializable
 
 Every type that flows through a task (inputs and outputs) must be serializable by the codec you choose.
@@ -155,7 +180,7 @@ The hash covers the **structure** of the workflow:
 | Change a signal name | **Changes** | No |
 | Bump task `version` | **Changes** | No |
 
-\* Switching codecs is hash-safe but existing serialized bytes must still be decodable by the new codec. In practice, switching codecs on a live system with in-flight data requires a drain first.
+\* Switching codecs is hash-safe, but the durable snapshot envelope tags each blob with the codec that wrote it (see [Durable Snapshot Format](#durable-snapshot-format--10-compatibility)). Loading a blob with a different codec fails fast with a clear `CodecMismatch` error rather than corrupting data — so switching codecs on a live system requires a drain first.
 
 ### Task Version — Opting In to Schema Change Detection
 

@@ -5,7 +5,7 @@
 //! discarded), the implementation falls back to the most recent `InProgress`
 //! entry in `sayiir_workflow_snapshot_history`.
 
-use sayiir_core::codec::{self, Decoder, Encoder};
+use sayiir_core::codec::{self, Decoder};
 use sayiir_core::snapshot::WorkflowSnapshot;
 use sayiir_persistence::{BackendError, SnapshotStore, TaskResultStore};
 use sqlx::Row;
@@ -15,10 +15,7 @@ use crate::error::PgError;
 
 impl<C> TaskResultStore for PostgresBackend<C>
 where
-    C: Encoder
-        + Decoder
-        + codec::sealed::EncodeValue<WorkflowSnapshot>
-        + codec::sealed::DecodeValue<WorkflowSnapshot>,
+    C: codec::SnapshotCodec,
 {
     #[tracing::instrument(
         name = "db.load_task_result",
@@ -51,7 +48,7 @@ where
 
 impl<C> PostgresBackend<C>
 where
-    C: Decoder + codec::sealed::DecodeValue<WorkflowSnapshot>,
+    C: Decoder + codec::CodecIdentity + codec::sealed::DecodeValue<WorkflowSnapshot>,
 {
     /// Load the most recent `InProgress` snapshot from the history table.
     ///

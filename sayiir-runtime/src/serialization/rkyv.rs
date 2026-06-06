@@ -2,8 +2,9 @@ use bytecheck::CheckBytes;
 use bytes::Bytes;
 use rkyv::rancor::{Error, Strategy};
 use rkyv::{Archive, Deserialize, Serialize, from_bytes, to_bytes};
-use sayiir_core::codec::{Decoder, Encoder, sealed};
+use sayiir_core::codec::{CodecIdentity, Decoder, Encoder, sealed};
 use sayiir_core::error::BoxError;
+use sayiir_core::snapshot_format::CodecId;
 
 /// A codec that can serialize and deserialize values using rkyv.
 ///
@@ -31,6 +32,12 @@ use sayiir_core::error::BoxError;
 pub struct RkyvCodec;
 
 impl Encoder for RkyvCodec {}
+
+impl CodecIdentity for RkyvCodec {
+    fn codec_id(&self) -> CodecId {
+        CodecId::Rkyv
+    }
+}
 
 impl<T> sealed::EncodeValue<T> for RkyvCodec
 where

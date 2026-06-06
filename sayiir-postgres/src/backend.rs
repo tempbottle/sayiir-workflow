@@ -3,8 +3,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use sayiir_core::codec::{self, Decoder, Encoder};
+use sayiir_core::codec::{self, CodecIdentity, Decoder, Encoder};
 use sayiir_core::snapshot::WorkflowSnapshot;
+use sayiir_core::snapshot_format;
 use sayiir_persistence::BackendError;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
@@ -204,13 +205,12 @@ where
 
 impl<C> PostgresBackend<C>
 where
-    C: Encoder + codec::sealed::EncodeValue<WorkflowSnapshot>,
+    C: Encoder + CodecIdentity + codec::sealed::EncodeValue<WorkflowSnapshot>,
 {
-    /// Encode a snapshot using the configured codec.
+    /// Encode a snapshot using the configured codec, wrapped in the durable
+    /// [`snapshot_format`](sayiir_core::snapshot_format) envelope.
     pub(crate) fn encode(&self, snapshot: &WorkflowSnapshot) -> Result<Vec<u8>, BackendError> {
-        self.codec
-            .encode(snapshot)
-            .map(|b| b.to_vec())
+        snapshot_format::encode_framed(&self.codec, snapshot)
             .map_err(|e| BackendError::Serialization(e.to_string()))
     }
 
@@ -250,12 +250,13 @@ where
 
 impl<C> PostgresBackend<C>
 where
-    C: Decoder + codec::sealed::DecodeValue<WorkflowSnapshot>,
+    C: Decoder + CodecIdentity + codec::sealed::DecodeValue<WorkflowSnapshot>,
 {
-    /// Decode a snapshot from raw bytes using the configured codec.
+    /// Decode a snapshot from a durable blob: parse the
+    /// [`snapshot_format`](sayiir_core::snapshot_format) envelope, validate the
+    /// codec id matches the configured codec, then decode the payload.
     pub(crate) fn decode(&self, data: &[u8]) -> Result<WorkflowSnapshot, BackendError> {
-        self.codec
-            .decode(bytes::Bytes::copy_from_slice(data))
+        snapshot_format::decode_framed(&self.codec, data)
             .map_err(|e| BackendError::Serialization(e.to_string()))
     }
 }

@@ -1,6 +1,7 @@
 use bytes::Bytes;
-use sayiir_core::codec::{Decoder, Encoder, sealed};
+use sayiir_core::codec::{CodecIdentity, Decoder, Encoder, sealed};
 use sayiir_core::error::BoxError;
+use sayiir_core::snapshot_format::CodecId;
 use serde::{Deserialize, Serialize};
 
 /// A codec that can serialize and deserialize values using `serde_json`.
@@ -23,6 +24,12 @@ use serde::{Deserialize, Serialize};
 pub struct JsonCodec;
 
 impl Encoder for JsonCodec {}
+
+impl CodecIdentity for JsonCodec {
+    fn codec_id(&self) -> CodecId {
+        CodecId::Json
+    }
+}
 
 impl<T> sealed::EncodeValue<T> for JsonCodec
 where
