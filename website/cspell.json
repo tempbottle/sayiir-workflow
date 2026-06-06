@@ -81,7 +81,8 @@
     "inlines",
     "jaegertracing",
     "traceparent",
-    "TOOBIG"
+    "TOOBIG",
+    "SYRS"
   ],
   "flagWords": [],
   "dictionaries": [
