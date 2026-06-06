@@ -17,6 +17,8 @@ exclude = [
   "https://example.com",
   # Example links — not yet on main (remove after merge)
   "https://github.com/sayiir/sayiir/tree/main/examples/",
+  # docs/FORMAT.md — added in this PR, not yet on main (remove after merge)
+  "https://github.com/sayiir/sayiir/blob/main/docs/FORMAT.md",
 ]
 
 # Accept these status codes
