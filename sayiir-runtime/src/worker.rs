@@ -1421,6 +1421,15 @@ where
         }
         self.backend.save_snapshot(snapshot).await?;
 
+        // If advancing off the fork landed on `AtSignal` (the join/next
+        // continuation starts with `AwaitSignal`) and a matching event was
+        // buffered while we were executing branches, consume it now. Mirrors
+        // `commit_task_result`: `PooledWorker` has no general `AtSignal` poll
+        // loop, so without this the workflow would park indefinitely on an
+        // event that already arrived.
+        self.drain_pending_signal(&available_task.instance_id, snapshot)
+            .await?;
+
         FORK_DRAINS.fetch_add(1, Ordering::Relaxed);
         FORK_BRANCHES_DRAINED.fetch_add(results.len() as u64, Ordering::Relaxed);
         tracing::debug!(
