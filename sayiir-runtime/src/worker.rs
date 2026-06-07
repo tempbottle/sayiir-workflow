@@ -3061,6 +3061,11 @@ mod tests {
         let output = snapshot.state.completed_output().unwrap();
         let result: State = serde_json::from_slice(output).unwrap();
         assert_eq!(result, State { id: 42 }, "join must see all branch outputs");
+        assert!(
+            fork_branches_drained_total() >= CHILDREN as u64,
+            "expected fork-drain fast path to execute at least {} branches",
+            CHILDREN
+        );
 
         handle.shutdown();
         tokio::time::timeout(Duration::from_secs(5), handle.join())
