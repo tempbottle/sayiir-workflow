@@ -1,14 +1,11 @@
 {
-  "name": "@sayiir/node-linux-x64-gnu",
+  "name": "@sayiir/node-win32-arm64-msvc",
   "version": "1.0.0",
   "os": [
-    "linux"
+    "win32"
   ],
   "cpu": [
-    "x64"
-  ],
-  "libc": [
-    "glibc"
+    "arm64"
   ],
   "main": "sayiir-node.node",
   "files": [

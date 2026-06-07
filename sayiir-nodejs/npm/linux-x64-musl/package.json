@@ -1,5 +1,5 @@
 {
-  "name": "@sayiir/node-linux-x64-gnu",
+  "name": "@sayiir/node-linux-x64-musl",
   "version": "1.0.0",
   "os": [
     "linux"
@@ -8,7 +8,7 @@
     "x64"
   ],
   "libc": [
-    "glibc"
+    "musl"
   ],
   "main": "sayiir-node.node",
   "files": [

@@ -7,6 +7,9 @@
   "cpu": [
     "arm64"
   ],
+  "libc": [
+    "glibc"
+  ],
   "main": "sayiir-node.node",
   "files": [
     "sayiir-node.node"
