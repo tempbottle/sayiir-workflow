@@ -106,9 +106,18 @@ importers:
       '@sayiir/node-linux-arm64-gnu':
         specifier: workspace:*
         version: link:npm/linux-arm64-gnu
+      '@sayiir/node-linux-arm64-musl':
+        specifier: workspace:*
+        version: link:npm/linux-arm64-musl
       '@sayiir/node-linux-x64-gnu':
         specifier: workspace:*
         version: link:npm/linux-x64-gnu
+      '@sayiir/node-linux-x64-musl':
+        specifier: workspace:*
+        version: link:npm/linux-x64-musl
+      '@sayiir/node-win32-arm64-msvc':
+        specifier: workspace:*
+        version: link:npm/win32-arm64-msvc
       '@sayiir/node-win32-x64-msvc':
         specifier: workspace:*
         version: link:npm/win32-x64-msvc
@@ -147,7 +156,13 @@ importers:
 
   sayiir-nodejs/npm/linux-arm64-gnu: {}
 
+  sayiir-nodejs/npm/linux-arm64-musl: {}
+
   sayiir-nodejs/npm/linux-x64-gnu: {}
+
+  sayiir-nodejs/npm/linux-x64-musl: {}
+
+  sayiir-nodejs/npm/win32-arm64-msvc: {}
 
   sayiir-nodejs/npm/win32-x64-msvc: {}
 
