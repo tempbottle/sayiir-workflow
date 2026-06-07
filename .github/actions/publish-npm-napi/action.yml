@@ -44,12 +44,20 @@ runs:
         echo "tag=$tag" >> "$GITHUB_OUTPUT"
         echo "Publishing version $version with tag: $tag"
 
+    # Idempotent: skip any package@version already on the registry so a partial
+    # release (e.g. one that failed after some platforms published) can be
+    # re-run safely without erroring on "cannot publish over previous version".
     - name: Publish platform packages
       shell: bash
       run: |
         for dir in ${{ inputs.package-dir }}/npm/*/; do
           name=$(node -p "require('./${dir}package.json').name")
-          echo "Publishing $name ..."
+          version=$(node -p "require('./${dir}package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version already published — skipping"
+            continue
+          fi
+          echo "Publishing $name@$version ..."
           cd "$dir"
           npm publish --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
           cd -
@@ -70,6 +78,12 @@ runs:
       shell: bash
       working-directory: ${{ inputs.package-dir }}
       run: |
+        name=$(node -p "require('./package.json').name")
+        version=$(node -p "require('./package.json').version")
+        if npm view "$name@$version" version >/dev/null 2>&1; then
+          echo "$name@$version already published — skipping"
+          exit 0
+        fi
         pnpm pack
         tarball=$(ls -1 *.tgz | head -1)
         echo "Publishing tarball: $tarball"
