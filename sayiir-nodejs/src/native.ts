@@ -236,14 +236,39 @@ export interface NativeAddon {
   };
 }
 
-// Platform package names keyed by `${process.platform}-${process.arch}`.
+// Platform package names keyed by `${process.platform}-${process.arch}`,
+// with the libc flavour (`-gnu`/`-musl`) appended on Linux.
 const PLATFORM_PACKAGES: Record<string, string> = {
-  "linux-x64": "@sayiir/node-linux-x64-gnu",
-  "linux-arm64": "@sayiir/node-linux-arm64-gnu",
+  "linux-x64-gnu": "@sayiir/node-linux-x64-gnu",
+  "linux-x64-musl": "@sayiir/node-linux-x64-musl",
+  "linux-arm64-gnu": "@sayiir/node-linux-arm64-gnu",
+  "linux-arm64-musl": "@sayiir/node-linux-arm64-musl",
   "darwin-x64": "@sayiir/node-darwin-x64",
   "darwin-arm64": "@sayiir/node-darwin-arm64",
   "win32-x64": "@sayiir/node-win32-x64-msvc",
+  "win32-arm64": "@sayiir/node-win32-arm64-msvc",
 };
+
+// Detect whether the running Linux uses musl (e.g. Alpine) rather than glibc.
+// `glibcVersionRuntime` is reported only on glibc systems, so its absence
+// indicates musl. Returns false on non-Linux platforms where it is unused.
+function isMusl(): boolean {
+  try {
+    const report = process.report?.getReport() as
+      | { header?: { glibcVersionRuntime?: string } }
+      | undefined;
+    return !report?.header?.glibcVersionRuntime;
+  } catch {
+    return false;
+  }
+}
+
+// Build the lookup key, appending the libc flavour on Linux so musl hosts
+// resolve to the musl binary instead of crashing on a glibc one.
+function platformKey(): string {
+  const base = `${process.platform}-${process.arch}`;
+  return process.platform === "linux" ? `${base}-${isMusl() ? "musl" : "gnu"}` : base;
+}
 
 // The native addon is loaded lazily to support environments where
 // it may not be available (e.g., type-checking only).
@@ -258,7 +283,7 @@ export function getNative(): NativeAddon {
 
 function loadNative(): NativeAddon {
   // 1. Try the platform-specific npm package (installed via optionalDependencies).
-  const key = `${process.platform}-${process.arch}`;
+  const key = platformKey();
   const pkg = PLATFORM_PACKAGES[key];
   if (pkg) {
     try {

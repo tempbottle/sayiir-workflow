@@ -25,7 +25,10 @@
     "@sayiir/node-darwin-arm64": "workspace:*",
     "@sayiir/node-darwin-x64": "workspace:*",
     "@sayiir/node-linux-arm64-gnu": "workspace:*",
+    "@sayiir/node-linux-arm64-musl": "workspace:*",
     "@sayiir/node-linux-x64-gnu": "workspace:*",
+    "@sayiir/node-linux-x64-musl": "workspace:*",
+    "@sayiir/node-win32-arm64-msvc": "workspace:*",
     "@sayiir/node-win32-x64-msvc": "workspace:*"
   },
   "peerDependencies": {
@@ -48,26 +51,44 @@
     "vitest": "^4.1.8"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "license": "MIT",
   "homepage": "https://docs.sayiir.dev",
   "bugs": {
     "url": "https://github.com/sayiir/sayiir/issues"
   },
-  "author": "Sayiir",
+  "author": {
+    "name": "Sayiir",
+    "url": "https://sayiir.dev"
+  },
   "keywords": [
     "workflow",
+    "workflow-engine",
     "durable",
+    "durable-execution",
     "orchestration",
     "task",
-    "typescript",
-    "rust",
+    "task-queue",
+    "job-queue",
+    "saga",
+    "dag",
+    "state-machine",
+    "distributed",
     "fault-tolerant",
-    "checkpointing"
+    "checkpointing",
+    "postgres",
+    "typescript",
+    "nodejs",
+    "rust"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/sayiir/sayiir"
+    "url": "git+https://github.com/sayiir/sayiir.git",
+    "directory": "sayiir-nodejs"
   }
 }

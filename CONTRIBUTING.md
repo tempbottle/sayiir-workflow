@@ -12,7 +12,7 @@ Thanks for your interest in contributing to Sayiir! Whether it's a bug fix, new 
 - **Python** 3.10+
 - **maturin** — for building Python bindings
 - **uv** — for Python dependency management
-- **Node.js** 18+ — for Node.js bindings
+- **Node.js** 20+ — for Node.js bindings
 - **pnpm** — for Node.js dependency management
 
 ### Clone and Build
@@ -120,7 +120,7 @@ Every pull request runs the following checks automatically:
 | `pytest` (Python 3.10–3.13) | Python tests across all supported versions |
 | `eslint` | TypeScript linting (typescript-eslint) |
 | `tsc --noEmit` | TypeScript type checking |
-| `vitest run` (Node 18/20/22) | Node.js tests across all supported versions |
+| `vitest run` (Node 20/22/24) | Node.js tests across all supported versions |
 
 All checks must pass before a PR can be merged.
 
