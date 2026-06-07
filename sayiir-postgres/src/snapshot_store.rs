@@ -104,6 +104,7 @@ where
                     history_version = sayiir_workflow_snapshots.history_version + 1,
                     completed_at = CASE WHEN $7 THEN now() ELSE sayiir_workflow_snapshots.completed_at END,
                     updated_at = now()
+                WHERE sayiir_workflow_snapshots.status NOT IN ('Completed', 'Failed', 'Cancelled')
                 RETURNING history_version
             ),
             hist AS (

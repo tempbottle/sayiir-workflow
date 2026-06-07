@@ -22,3 +22,7 @@ id_ssh*
 
 playground/codapi
 playground/codapi-cli
+
+
+# benchmark results
+results/
