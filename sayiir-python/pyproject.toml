@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Yacine Bouraoui", email = "ybsoft2011@live.com" }]
 keywords = ["workflow", "orchestration", "durable", "rust", "distributed"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
