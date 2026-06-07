@@ -16,7 +16,7 @@
 
 [![npm](https://img.shields.io/npm/v/sayiir.svg)](https://www.npmjs.com/package/sayiir)
 [![npm downloads](https://img.shields.io/npm/dm/sayiir.svg)](https://www.npmjs.com/package/sayiir)
-[![Node.js](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022-339933.svg)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/node-20%20%7C%2022%20%7C%2024-339933.svg)](https://nodejs.org)
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://www.npmjs.com/package/@sayiir/cloudflare)
 
 > Sayiir is under active development. Core functionality works. We welcome contributors, maintainers, and sponsors.

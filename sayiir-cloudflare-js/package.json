@@ -37,7 +37,7 @@
     "typescript-eslint": "^8.56.1"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "license": "MIT",
   "homepage": "https://docs.sayiir.dev",

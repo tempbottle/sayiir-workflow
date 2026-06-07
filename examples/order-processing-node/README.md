@@ -30,7 +30,7 @@ graph TD
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js 20+
 
 ## Run
 

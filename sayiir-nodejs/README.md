@@ -3,7 +3,7 @@
 **Durable workflows for Node.js and TypeScript, powered by a Rust runtime.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/sayiir/sayiir/blob/main/LICENSE)
-[![Node.js 18+](https://img.shields.io/badge/node-18+-339933.svg)](https://nodejs.org)
+[![Node.js 20+](https://img.shields.io/badge/node-20+-339933.svg)](https://nodejs.org)
 [![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/A2jWBFZsNK)
 
 Write plain TypeScript functions. Sayiir makes them durable — automatic checkpointing, crash recovery, and parallel execution with zero infrastructure.
@@ -379,7 +379,7 @@ TypeScript provides task implementations. Rust handles everything else: building
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 20+
 - Optional: `zod` for input/output validation
 
 ## License
