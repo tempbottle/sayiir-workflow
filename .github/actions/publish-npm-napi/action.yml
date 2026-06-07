@@ -51,16 +51,19 @@ runs:
       shell: bash
       run: |
         for dir in ${{ inputs.package-dir }}/npm/*/; do
-          name=$(node -p "require('./${dir}package.json').name")
-          version=$(node -p "require('./${dir}package.json').version")
-          if npm view "$name@$version" version >/dev/null 2>&1; then
-            echo "$name@$version already published — skipping"
-            continue
-          fi
-          echo "Publishing $name@$version ..."
-          cd "$dir"
-          npm publish --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
-          cd -
+          # Subshell isolates the cd; read package.json from inside the package
+          # dir so path handling works whether package-dir is relative or absolute.
+          (
+            cd "$dir"
+            name=$(node -p "require('./package.json').name")
+            version=$(node -p "require('./package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already published — skipping"
+              exit 0
+            fi
+            echo "Publishing $name@$version ..."
+            npm publish --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
+          )
         done
 
     # Build the TypeScript source to dist/.
