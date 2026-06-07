@@ -1,0 +1,117 @@
+---
+title: What's New in v1.0
+description: User-facing changes in Sayiir v1.0 — a frozen durable snapshot wire format with a 1.x compatibility commitment, and a major performance overhaul of the PostgreSQL backend (LISTEN/NOTIFY wakeups, history-as-canonical-store, claims folded into the snapshot row).
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution">
+Sayiir v1.0 freezes the **durable snapshot format**. Existing **APIs are backward-compatible** with v0.5 — your workflow code does not change. But snapshots written by 0.x are **not readable** by 1.0: there is intentionally no in-place migration. Upgrading requires **draining** in-flight workflows first. See [Migration](#migration) below.
+</Aside>
+
+---
+
+## The 1.0 durability commitment
+
+v1.0 is the first release with a **stable, frozen on-disk format**. Every durable snapshot is now a self-describing envelope — a fixed 6-byte header followed by the codec payload:
+
+```
+offset  bytes  field
+0..4      4    magic           = b"SYRS"   (ASCII; "SaYiiR Snapshot")
+4         1    format_version  = 1
+5         1    codec_id        (1 = JSON, 2 = rkyv)
+6..       N    payload         = codec output of the WorkflowSnapshot
+```
+
+Before 1.0, backends stored a snapshot as raw codec bytes with no header — the bytes were unidentifiable, and nothing recorded what produced them or what version they were. The envelope makes the durable bytes **identifiable**, **version-checked**, and **codec-tagged**, which is what underpins the compatibility guarantee:
+
+- **Within 1.x, any build reads any 1.x snapshot** written with the same codec. Additive, backward-compatible payload changes (new `#[serde(default)]` fields, etc.) keep `format_version = 1`.
+- **A change an older reader cannot decode bumps `format_version`** and ships the matching read path. An old reader hitting a newer version fails fast with `UnsupportedVersion` rather than mis-reading.
+- **A codec mismatch is a hard error.** Loading a blob tagged with a different codec than the backend is configured for fails with `CodecMismatch` naming both codecs, instead of silently mis-decoding.
+
+The format is locked by golden-blob tests in `sayiir-core` — a change to the wire bytes fails the build unless it is accompanied by a `format_version` bump and a documented read path. The framing is plain byte manipulation and WASM-safe, so the same format drives both PostgreSQL and the Cloudflare Workers / D1 path unchanged.
+
+The normative spec lives in [`docs/FORMAT.md`](https://github.com/sayiir/sayiir/blob/main/docs/FORMAT.md); the field-level rules for evolving your own task types are in the [Serialization & Versioning guide](/guides/serialization-and-versioning/).
+
+<Aside type="note">
+The rkyv codec is fragile across struct-layout changes — its archives have no field-default tolerance, so *any* layout-affecting change requires a `format_version` bump when rkyv is in use. **JSON is the recommended durable codec** for this reason.
+</Aside>
+
+---
+
+## Performance overhaul (PostgreSQL backend)
+
+v1.0 lands a large throughput and resource-usage rework of the Postgres backend, measured on the `linear` and `sleeping-giants` workloads with a new reproducible benchmark crate (`sayiir-bench`) committed alongside.
+
+### LISTEN/NOTIFY-driven wakeups
+
+Workers now learn about claimable tasks within **milliseconds** instead of waiting for the next poll tick. Each `NOTIFY` carries a `TaskWakeupHint` payload (`instance_id`, `task_id`, `definition_hash`, `tags`) so a worker can:
+
+- **Filter at receive time** — drop wakes for workflows it hasn't registered or tag sets it can't cover, before any DB round-trip.
+- **Direct-claim the named task** — a one-row eligibility check (`find_hinted_task`) instead of the full priority-ordered scan.
+
+The polling `find_available_tasks` path stays as the safety net for what `NOTIFY` can't cover (delay expiry, expired-claim cleanup, a lost `LISTEN` connection). With NOTIFY carrying the common case, the default poll interval is raised from **5 s → 30 s**.
+
+### History becomes the canonical snapshot store
+
+The snapshot blob no longer double-writes to both `sayiir_workflow_snapshots.data` and the history table. New writes go to **history only**; the metadata row holds just a `history_version` pointer + `data_hash`.
+
+- **~50% less WAL per save.**
+- The snapshots row becomes UPDATE-cheap — **HOT updates** become possible, with near-zero dead-tuple churn on the data column and far less vacuum pressure.
+- Indexes on `sayiir_workflow_snapshots` stay tight, with no MB-sized payload in the row.
+
+### Task outputs split out of the snapshot blob
+
+`completed_tasks[*].output` is persisted to a dedicated `sayiir_workflow_tasks.output` column and stripped from the snapshot encoding before write. Late-stage saves stop being **quadratic** in the number of completed tasks — a position-only save no longer re-ships every accumulated task output.
+
+### Task claims folded into the snapshot row
+
+The separate `sayiir_task_claims` table is gone. Claim ownership now lives in two columns on `sayiir_workflow_snapshots` — `claim_owner` and `claim_expires_at`. Per-task dispatch drops from **2 row writes** (INSERT claim, DELETE release) to **1** (UPDATE the claim columns), and the release UPDATE is HOT-eligible. An advisory-lock fast-fail avoids workers piling up on a contended instance.
+
+### Fixed-size identifiers, fewer allocations
+
+Internal string IDs (`TaskId`, `WorkflowId`, `DefinitionHash`) are now `Copy` 32-byte SHA-256 newtypes (`Hash32`) instead of heap-allocated `String`s, and `instance_id` moved to `Arc<str>`. The wins:
+
+- Fewer heap allocations on hot paths and faster hashmap lookups.
+- Smaller snapshots on disk.
+- Identifier kinds can no longer be confused at call sites — a class of invariants lifted from convention into the type system.
+
+### Clone-free blob encoding
+
+Snapshot encoding strips outputs in place rather than cloning the map, and `save_snapshot` takes `&mut WorkflowSnapshot` so position-only saves skip re-shipping unchanged task outputs (`output_unflushed` marker).
+
+---
+
+## Bug fixes
+
+### PooledWorker stalling on a delay/signal after a task
+
+A workflow with a `Delay` or `AwaitSignal` node immediately following a task could stall forever. `update_position_after_task` called `first_task_hint().id` on the next continuation, which for a delay/signal node returns the node's *own* id — so the worker persisted `AtTask(delay_hash)`, but task dispatch skips delay/signal nodes and every subsequent poll failed with `Task '<hash>' not found in registry`.
+
+The worker now enters `AtDelay` (computing `wake_at` from the duration) or `AtSignal` directly when the next continuation is a delay or signal, keeping the output chain continuous. Covered by a new `pooled_worker_handles_delay_in_chain` integration test.
+
+---
+
+## Rust crate versions
+
+Update your `Cargo.toml` dependencies from `0.5`/`0.4` to `1.0`:
+
+| Crate | Version |
+|-------|---------|
+| `sayiir-runtime` | `1.0` |
+| `sayiir-persistence` | `1.0` |
+| `sayiir-postgres` | `1.0` |
+
+---
+
+## Migration
+
+The API surface is unchanged from v0.5 — recompiling against `1.0` requires no code edits. The one migration cost is **durability**: 1.0 does not read 0.x snapshots.
+
+Snapshots written by 0.x are headerless raw codec output (no envelope). Loading one under 1.0 returns a `MissingMagic` error directing operators to drain. There is **no in-place migration** — this is a one-time cost at the 0.x → 1.0 boundary:
+
+1. **Stop** starting new workflow instances on the old version.
+2. Let in-flight workflows **drain** to completion.
+3. **Deploy 1.0.**
+
+Within 1.x, the `format_version` mechanism means snapshots are never stranded by an upgrade again. If you run the **rkyv** durable codec, prefer draining and switching to **JSON** during this upgrade — JSON is the codec with field-level forward/backward tolerance, and switching codecs on a running system also requires draining (the bytes on disk were written by the old codec).
