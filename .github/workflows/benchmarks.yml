@@ -219,7 +219,12 @@ jobs:
           set -euo pipefail
           OUT=benchmarks/results/pr-comment.md
           : > "$OUT"
-          BASE_SHA="$(jq -r '.git_sha // "unknown"' benchmarks/baseline-main/linear-*.json 2>/dev/null | head -1)"
+          # `|| true` so a missing baseline (no `bench-baseline-main` artifact,
+          # e.g. first PR before main has published one) doesn't abort under
+          # `set -euo pipefail`: the unexpanded glob makes jq exit 2, pipefail
+          # propagates it. The per-scenario loop below already skips gracefully.
+          BASE_SHA="$(jq -r '.git_sha // "unknown"' benchmarks/baseline-main/linear-*.json 2>/dev/null | head -1 || true)"
+          BASE_SHA="${BASE_SHA:-unknown}"
           {
             echo "## Benchmark vs \`main\`"
             echo
