@@ -148,7 +148,8 @@ export default defineConfig({
         {
           label: "Changelog",
           items: [
-            { label: "v0.5", slug: "changelog/v05", badge: "Latest" },
+            { label: "v1.0", slug: "changelog/v10", badge: "Latest" },
+            { label: "v0.5", slug: "changelog/v05" },
             { label: "v0.4", slug: "changelog/v04" },
             { label: "v0.3", slug: "changelog/v03" },
             { label: "v0.2", slug: "changelog/v02" },

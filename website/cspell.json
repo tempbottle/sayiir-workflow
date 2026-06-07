@@ -82,7 +82,11 @@
     "jaegertracing",
     "traceparent",
     "TOOBIG",
-    "SYRS"
+    "SYRS",
+    "wakeups",
+    "newtypes",
+    "unflushed",
+    "headerless"
   ],
   "flagWords": [],
   "dictionaries": [
