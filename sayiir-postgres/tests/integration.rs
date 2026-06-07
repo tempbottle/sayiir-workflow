@@ -118,6 +118,46 @@ async fn save_snapshot_overwrites() {
     }
 }
 
+/// Terminal states are final: a stale `save_snapshot` carrying a non-terminal
+/// state must NOT resurrect a Completed/Failed/Cancelled row back to InProgress.
+///
+/// This guards the lost-update race where two executors advance the same
+/// instance (e.g. a worker and a manual `resume_workflow` poll loop). One
+/// completes the workflow; the other, advancing from an out-of-date in-memory
+/// base, then writes a position-only `InProgress` snapshot. Without the guard
+/// that stale write overwrites the terminal row and `status()` reads
+/// `in_progress` for a workflow that already finished.
+#[tokio::test]
+async fn save_snapshot_does_not_resurrect_terminal_state() {
+    use sayiir_core::snapshot::WorkflowSnapshotState;
+
+    let (_c, backend) = setup().await;
+
+    // Reach Completed (as the winning executor would).
+    let mut snapshot = WorkflowSnapshot::new("test-terminal", "hash-1".into());
+    backend.save_snapshot(&mut snapshot).await.unwrap();
+    snapshot.state = WorkflowSnapshotState::Completed {
+        final_output: Bytes::from_static(b"42"),
+    };
+    backend.save_snapshot(&mut snapshot).await.unwrap();
+
+    // A stale executor writes a non-terminal, position-only snapshot.
+    let mut stale = WorkflowSnapshot::new("test-terminal", "hash-1".into());
+    stale.update_position(ExecutionPosition::AtTask {
+        task_id: sayiir_core::TaskId::from("step-2"),
+    });
+    backend.save_snapshot(&mut stale).await.unwrap();
+
+    // The terminal state must survive.
+    let loaded = backend.load_snapshot("test-terminal").await.unwrap();
+    match &loaded.state {
+        WorkflowSnapshotState::Completed { final_output } => {
+            assert_eq!(final_output.as_ref(), b"42");
+        }
+        other => panic!("stale save resurrected terminal state: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn delete_snapshot() {
     let (_c, backend) = setup().await;
