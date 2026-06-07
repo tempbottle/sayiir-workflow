@@ -251,8 +251,9 @@ type BranchDrainOutput =
 
 /// A boxed, `Send` branch-execution future. Owning its captures (rather than
 /// borrowing the shared continuation) keeps the `JoinSet` drive future `Send`.
-type BranchDrainFuture<'a> =
-    Pin<Box<dyn std::future::Future<Output = (sayiir_core::TaskId, BranchDrainOutput)> + Send + 'a>>;
+type BranchDrainFuture<'a> = Pin<
+    Box<dyn std::future::Future<Output = (sayiir_core::TaskId, BranchDrainOutput)> + Send + 'a>,
+>;
 
 /// Outcome of an attempted fork drain in [`PooledWorker::try_drain_fork`].
 enum DrainResult<'a, B> {
@@ -1361,7 +1362,8 @@ where
         // nothing and fall back: the dispatched branch re-runs alone via the
         // normal path (idempotent + side-effect-free), and its failure flows
         // through the usual retry/fail handling.
-        let mut by_tid: HashMap<sayiir_core::TaskId, Bytes> = HashMap::with_capacity(outcomes.len());
+        let mut by_tid: HashMap<sayiir_core::TaskId, Bytes> =
+            HashMap::with_capacity(outcomes.len());
         for (tid, res) in outcomes {
             match res {
                 Ok(Ok(output)) => {
@@ -1408,10 +1410,7 @@ where
         // dispatched task id (the snapshot's current position); since every
         // drained branch now has a result, it skips them all and lands on the
         // first undrained branch or the join.
-        let last_output = results
-            .last()
-            .map(|(_, o)| o.clone())
-            .unwrap_or(fork_input);
+        let last_output = results.last().map(|(_, o)| o.clone()).unwrap_or(fork_input);
         for (tid, output) in &results {
             snapshot.mark_task_completed(*tid, output.clone());
         }
@@ -1444,11 +1443,12 @@ where
     fn find_enclosing_fork<'a>(
         cont: &'a WorkflowContinuation,
         task_id: &sayiir_core::TaskId,
-    ) -> Option<(&'a [Arc<WorkflowContinuation>], Option<&'a WorkflowContinuation>)> {
+    ) -> Option<(
+        &'a [Arc<WorkflowContinuation>],
+        Option<&'a WorkflowContinuation>,
+    )> {
         match cont {
-            WorkflowContinuation::Fork {
-                branches, join, ..
-            } => {
+            WorkflowContinuation::Fork { branches, join, .. } => {
                 if branches
                     .iter()
                     .any(|b| sayiir_core::TaskId::from(b.first_task_id()) == *task_id)
@@ -3002,14 +3002,17 @@ mod tests {
             fork = fork.branch(&format!("branch_{i}"), |s: State| async move { Ok(s) });
         }
         let workflow = Arc::new(
-            fork.join("final_emit", |outputs: BranchOutputs<JsonCodec>| async move {
-                // Every branch carries the same id; pull it from the last one
-                // to prove all branch outputs reached the join envelope.
-                let s: State = outputs
-                    .get_by_id(&format!("branch_{}", CHILDREN - 1))
-                    .unwrap_or(State { id: 0 });
-                Ok(s)
-            })
+            fork.join(
+                "final_emit",
+                |outputs: BranchOutputs<JsonCodec>| async move {
+                    // Every branch carries the same id; pull it from the last one
+                    // to prove all branch outputs reached the join envelope.
+                    let s: State = outputs
+                        .get_by_id(&format!("branch_{}", CHILDREN - 1))
+                        .unwrap_or(State { id: 0 });
+                    Ok(s)
+                },
+            )
             .build()
             .unwrap(),
         );
@@ -3046,10 +3049,7 @@ mod tests {
         // final value proves every branch ran, was persisted, and reached the
         // join envelope via the drain.
         let snapshot = handle.backend().load_snapshot("fo-1").await.unwrap();
-        let output = snapshot
-            .state
-            .completed_output()
-            .expect("completed workflow has output");
+        let output = snapshot.state.completed_output().unwrap();
         let result: State = serde_json::from_slice(output).unwrap();
         assert_eq!(result, State { id: 42 }, "join must see all branch outputs");
 
