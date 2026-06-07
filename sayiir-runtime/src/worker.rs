@@ -3063,8 +3063,7 @@ mod tests {
         assert_eq!(result, State { id: 42 }, "join must see all branch outputs");
         assert!(
             fork_branches_drained_total() >= CHILDREN as u64,
-            "expected fork-drain fast path to execute at least {} branches",
-            CHILDREN
+            "expected fork-drain fast path to execute at least {CHILDREN} branches"
         );
 
         handle.shutdown();
