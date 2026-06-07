@@ -76,6 +76,17 @@ pub struct ResultsBlock {
     /// fallback poll loop was carrying load — a useful signal that the
     /// channel cap or worker count needs tuning.
     pub wakeup_drops: Option<u64>,
+    /// Number of forks drained in a single dispatch via `PooledWorker`'s
+    /// fork-drain fast path during the run. For fanout, a healthy run has
+    /// this ≈ number of workflows (one drain per fork); `0` means the path
+    /// never engaged and every branch took a separate claim cycle. `None`
+    /// for scenarios that don't track it.
+    #[serde(default)]
+    pub fork_drains: Option<u64>,
+    /// Total fork branches executed through the drain fast path. For fanout,
+    /// ≈ `workflows × children` when the path is fully engaged.
+    #[serde(default)]
+    pub fork_branches_drained: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -169,6 +180,8 @@ pub fn build_report(
             steps_per_workflow,
             latency_ms,
             wakeup_drops,
+            fork_drains: None,
+            fork_branches_drained: None,
         },
         samples,
         prometheus,

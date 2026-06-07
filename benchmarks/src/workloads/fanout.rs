@@ -29,7 +29,9 @@ use sayiir_core::task::BranchOutputs;
 use sayiir_core::workflow::WorkflowBuilder;
 use sayiir_postgres::{PostgresBackend, wakeup_drops_total};
 use sayiir_runtime::serialization::JsonCodec;
-use sayiir_runtime::{PooledWorker, WorkflowClient};
+use sayiir_runtime::{
+    PooledWorker, WorkflowClient, fork_branches_drained_total, fork_drains_total,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 
@@ -103,6 +105,8 @@ pub async fn run(ctx: crate::CommonContext, args: FanoutArgs) -> Result<()> {
     }
 
     let wakeup_drops_baseline = wakeup_drops_total();
+    let fork_drains_baseline = fork_drains_total();
+    let fork_branches_drained_baseline = fork_branches_drained_total();
     let bench_start = Instant::now();
 
     let submit_times = Arc::new(
@@ -226,6 +230,9 @@ pub async fn run(ctx: crate::CommonContext, args: FanoutArgs) -> Result<()> {
     let total_elapsed = bench_start.elapsed();
     let sustained = best_window(&samples, Duration::from_secs(60));
     let wakeup_drops = wakeup_drops_total().saturating_sub(wakeup_drops_baseline);
+    let fork_drains = fork_drains_total().saturating_sub(fork_drains_baseline);
+    let fork_branches_drained =
+        fork_branches_drained_total().saturating_sub(fork_branches_drained_baseline);
 
     let steps_per_workflow = 1 + children + 1; // pickup + branches + join
     let mut latency = BTreeMap::new();
@@ -242,6 +249,10 @@ pub async fn run(ctx: crate::CommonContext, args: FanoutArgs) -> Result<()> {
         LatencyBlock::from_histogram_ns(&makespan_hist),
     );
 
+    // Confirm the fork-drain fast path engaged: a fully-drained run has
+    // `fork_drains ≈ completed` (one drain per fork) and
+    // `fork_branches_drained ≈ completed × children`. `0` means every branch
+    // fell back to a separate claim cycle.
     tracing::info!(
         completed,
         expected = args.workflows,
@@ -249,6 +260,8 @@ pub async fn run(ctx: crate::CommonContext, args: FanoutArgs) -> Result<()> {
         sustained,
         children,
         steps_per_workflow,
+        fork_drains,
+        fork_branches_drained,
         "fanout summary"
     );
 
@@ -270,7 +283,7 @@ pub async fn run(ctx: crate::CommonContext, args: FanoutArgs) -> Result<()> {
         "poll_ms": args.poll_ms,
         "batch_size": args.batch_size,
     });
-    let report = crate::report::build_report(
+    let mut report = crate::report::build_report(
         "fanout",
         params_json,
         completed,
@@ -286,6 +299,8 @@ pub async fn run(ctx: crate::CommonContext, args: FanoutArgs) -> Result<()> {
         pg_info,
         prom,
     );
+    report.results.fork_drains = Some(fork_drains);
+    report.results.fork_branches_drained = Some(fork_branches_drained);
     if let Err(e) = crate::report::write_report(&report, &ctx.results_dir) {
         tracing::warn!(error = %e, "failed to write report");
     }

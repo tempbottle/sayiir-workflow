@@ -200,6 +200,36 @@ pub trait SnapshotStore: Send + Sync {
         output: bytes::Bytes,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
+    /// Save many task results in a single round-trip.
+    ///
+    /// Used for fork fan-out, where a worker drains every branch of a fork in
+    /// one dispatch and persists all branch outputs together. Each result is
+    /// individually durable once the call commits — recovered on resume via
+    /// [`load_snapshot`](Self::load_snapshot)'s task-output hydration — so a
+    /// crash mid-fork only re-runs branches whose batch had not yet committed.
+    ///
+    /// Unlike repeated [`save_task_result`](Self::save_task_result) calls, an
+    /// optimized backend implementation need not touch the snapshot blob,
+    /// history, or take the per-call snapshot lock: the caller advances the
+    /// execution position once, afterwards, via
+    /// [`save_snapshot`](Self::save_snapshot).
+    ///
+    /// The default implementation loops over [`save_task_result`](Self::save_task_result);
+    /// backends override it for a batched write.
+    fn save_task_results(
+        &self,
+        instance_id: &str,
+        results: &[(sayiir_core::TaskId, bytes::Bytes)],
+    ) -> impl Future<Output = Result<(), BackendError>> + Send {
+        async move {
+            for (task_id, output) in results {
+                self.save_task_result(instance_id, task_id, output.clone())
+                    .await?;
+            }
+            Ok(())
+        }
+    }
+
     /// Load a workflow snapshot by instance ID.
     fn load_snapshot(
         &self,

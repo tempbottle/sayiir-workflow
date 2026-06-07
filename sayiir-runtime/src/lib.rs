@@ -106,7 +106,7 @@ pub use runner::distributed::CheckpointingRunner;
 pub use runner::in_process::InProcessRunner;
 pub use worker::{
     ExternalTaskExecutor, ExternalWorkflow, PooledWorker, PooledWorkerBuilder, WorkerHandle,
-    WorkflowIndex, WorkflowRegistry,
+    WorkflowIndex, WorkflowRegistry, fork_branches_drained_total, fork_drains_total,
 };
 
 pub use sayiir_core::branch_key::BranchKey;

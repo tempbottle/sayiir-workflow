@@ -12,6 +12,7 @@
 //! You want a single process to run an entire workflow with crash recovery.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use chrono;
@@ -219,6 +220,50 @@ fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// Process-global count of forks drained in a single dispatch via the
+/// fork-drain fast path. Surfaced through [`fork_drains_total`] so a
+/// benchmark harness can confirm the path is being exercised (and by how
+/// much) without taking a metrics-crate dependency — mirrors
+/// `sayiir_postgres::wakeup_drops_total`.
+static FORK_DRAINS: AtomicU64 = AtomicU64::new(0);
+
+/// Process-global count of individual branches executed through fork drains.
+static FORK_BRANCHES_DRAINED: AtomicU64 = AtomicU64::new(0);
+
+/// Number of forks drained in a single dispatch (one per drained fork).
+/// Monotonic; a benchmark records it at scenario start and end and reports
+/// the delta.
+#[must_use]
+pub fn fork_drains_total() -> u64 {
+    FORK_DRAINS.load(Ordering::Relaxed)
+}
+
+/// Total fork branches executed through the drain fast path. Monotonic.
+#[must_use]
+pub fn fork_branches_drained_total() -> u64 {
+    FORK_BRANCHES_DRAINED.load(Ordering::Relaxed)
+}
+
+/// Result of executing one fork branch during a drain: its task id paired
+/// with the panic-isolated task outcome.
+type BranchDrainOutput =
+    Result<Result<Bytes, crate::error::RuntimeError>, Box<dyn std::any::Any + Send>>;
+
+/// A boxed, `Send` branch-execution future. Owning its captures (rather than
+/// borrowing the shared continuation) keeps the `JoinSet` drive future `Send`.
+type BranchDrainFuture<'a> =
+    Pin<Box<dyn std::future::Future<Output = (sayiir_core::TaskId, BranchDrainOutput)> + Send + 'a>>;
+
+/// Outcome of an attempted fork drain in [`PooledWorker::try_drain_fork`].
+enum DrainResult<'a, B> {
+    /// The fork was drained; the workflow status is settled and the claim
+    /// released.
+    Handled(WorkflowStatus),
+    /// Draining did not apply; the (still-held) claim is handed back so the
+    /// caller can run the normal single-task dispatch path.
+    NotApplicable(ActiveTaskClaim<'a, B>),
+}
+
 /// A pooled worker that claims and executes tasks from a shared backend.
 ///
 /// `PooledWorker` is designed for horizontal scaling: multiple workers can run
@@ -269,6 +314,19 @@ pub struct PooledWorker<B> {
     batch_size: NonZeroUsize,
     aging_interval: Duration,
     tags: Vec<String>,
+    fork_concurrency: NonZeroUsize,
+}
+
+/// Default cap on concurrently-executed fork branches per drain.
+///
+/// Derived from available parallelism, clamped to `4..=32` so a single
+/// fork drain never starves the connection pool that polling and claims
+/// also draw from. Falls back to 8 if parallelism can't be queried.
+fn default_fork_concurrency() -> NonZeroUsize {
+    let n = std::thread::available_parallelism()
+        .map_or(8, NonZeroUsize::get)
+        .clamp(4, 32);
+    NonZeroUsize::new(n).unwrap_or(NonZeroUsize::MIN)
 }
 
 impl<B> PooledWorker<B>
@@ -297,7 +355,23 @@ where
             batch_size: NonZeroUsize::MIN,           // Default: fetch one task at a time (1)
             aging_interval: Duration::from_mins(5),  // Default 5 minutes
             tags: vec![],
+            fork_concurrency: default_fork_concurrency(),
         }
+    }
+
+    /// Set the maximum number of fork branches executed concurrently per
+    /// drain.
+    ///
+    /// When a dispatch lands on a fork whose branches are simple single-task
+    /// nodes, the worker executes all of them in one dispatch (instead of one
+    /// branch per claim cycle), bounded by this cap. Each completed branch is
+    /// individually durable; the cap bounds in-flight branches so a single
+    /// wide fork can't exhaust the connection pool. Default: available
+    /// parallelism clamped to `4..=32`.
+    #[must_use]
+    pub fn with_fork_concurrency(mut self, concurrency: NonZeroUsize) -> Self {
+        self.fork_concurrency = concurrency;
+        self
     }
 
     /// Set the TTL for task claims.
@@ -1101,6 +1175,18 @@ where
             "Executing task"
         );
 
+        // 3b. Fork-drain fast path: if this dispatch lands on a fork whose
+        // branches are simple single-task nodes, execute them all in this one
+        // dispatch (bounded by `fork_concurrency`) instead of one branch per
+        // claim cycle. Returns the claim untouched when it can't safely batch.
+        let claim = match self
+            .try_drain_fork(workflow, &available_task, &mut snapshot, claim)
+            .await?
+        {
+            DrainResult::Handled(status) => return Ok(status),
+            DrainResult::NotApplicable(claim) => claim,
+        };
+
         // 4. Execute with deadline + heartbeat, then settle the result
         let execution_result = self
             .execute_with_deadline(workflow, &available_task, &mut snapshot, &claim)
@@ -1114,6 +1200,307 @@ where
             claim,
         )
         .await
+    }
+
+    /// Drain an entire fork in a single dispatch when its branches are simple
+    /// single-task nodes.
+    ///
+    /// `PooledWorker` normally advances a fork one branch per claim cycle —
+    /// for a K-way fan-out that's K claim/load/execute/save/release round-trips
+    /// on one exclusively-claimed workflow. This collapses them: every
+    /// drainable, not-yet-completed branch runs concurrently (bounded by
+    /// `fork_concurrency`) under the existing claim heartbeat, all outputs are
+    /// persisted in one `save_task_results` batch, and the position advances
+    /// once via `save_snapshot`.
+    ///
+    /// Durability is unchanged: each branch result is individually durable on
+    /// commit (recovered via `load_snapshot`'s task-output hydration), so a
+    /// crash mid-drain only re-runs branches whose batch hadn't committed —
+    /// and those are side-effect-free single tasks, safe to re-run.
+    ///
+    /// Falls back (returns the claim via `NotApplicable`) whenever it can't
+    /// safely batch: the dispatched task isn't a simple branch entry, fewer
+    /// than two branches are drainable, or any branch fails/panics (in which
+    /// case nothing is persisted and the normal per-branch path handles the
+    /// retry/failure).
+    #[allow(clippy::too_many_lines)]
+    async fn try_drain_fork<'c, C, Input, M>(
+        &'c self,
+        workflow: &Workflow<C, Input, M>,
+        available_task: &AvailableTask,
+        snapshot: &mut WorkflowSnapshot,
+        claim: ActiveTaskClaim<'c, B>,
+    ) -> Result<DrainResult<'c, B>, crate::error::RuntimeError>
+    where
+        Input: Send + 'static,
+        M: Send + Sync + 'static,
+        C: Codec
+            + EnvelopeCodec
+            + sealed::DecodeValue<Input>
+            + sealed::EncodeValue<Input>
+            + 'static,
+    {
+        let continuation = workflow.continuation();
+        let task_index = workflow.task_index();
+        let task_id = available_task.task_id;
+
+        // Only consider draining when the dispatched task is a branch entry of
+        // some fork.
+        let Some((branches, _join)) = Self::find_enclosing_fork(continuation, &task_id) else {
+            return Ok(DrainResult::NotApplicable(claim));
+        };
+
+        // A branch is drainable only if it's a single native Task with no
+        // continuation and no timeout — anything else (multi-task chains,
+        // delays, signals, nested forks, timeouts) keeps the per-branch path,
+        // which advances within the branch and enforces deadlines correctly.
+        let is_drainable = |b: &WorkflowContinuation| {
+            matches!(
+                b,
+                WorkflowContinuation::Task {
+                    func: Some(_),
+                    next: None,
+                    timeout: None,
+                    ..
+                }
+            )
+        };
+
+        let drainable: Vec<&Arc<WorkflowContinuation>> = branches
+            .iter()
+            .filter(|b| is_drainable(b))
+            .filter(|b| {
+                snapshot
+                    .get_task_result(&sayiir_core::TaskId::from(b.first_task_id()))
+                    .is_none()
+            })
+            .collect();
+
+        // Fall back unless the dispatched task is itself drainable and there's
+        // more than one branch to drain (a lone branch is no cheaper here).
+        let dispatched_drainable = drainable
+            .iter()
+            .any(|b| sayiir_core::TaskId::from(b.first_task_id()) == task_id);
+        if !dispatched_drainable || drainable.len() < 2 {
+            return Ok(DrainResult::NotApplicable(claim));
+        }
+
+        let fork_input = available_task.input.clone();
+        let cap = self.fork_concurrency.get();
+
+        // Build one panic-isolated, context-scoped future per branch. All
+        // branches receive the fork's input (the output of the task preceding
+        // the fork, which is what this dispatch carries).
+        // Each branch future owns everything it needs (the branch `Arc`, the
+        // task context, the input) so the `buffer_unordered` set is `'static`
+        // and `Send` — borrowing the shared `continuation` here would break
+        // higher-ranked `Send` inference for the spawned worker loop. Since a
+        // drainable branch is a single native `Task`, we invoke its `func`
+        // directly instead of walking the tree via `execute_task_by_id`.
+        let workflow_id: Arc<str> = Arc::from(workflow.context().workflow_id());
+        let metadata_json = workflow.context().metadata_json.clone();
+        let branch_futs = drainable.iter().map(|b| -> BranchDrainFuture<'static> {
+            let branch = Arc::clone(b);
+            let tid = sayiir_core::TaskId::from(b.first_task_id());
+            let task_name: Arc<str> = task_index
+                .get(&tid)
+                .map_or_else(|| Arc::from(tid.to_hex()), |m| Arc::clone(m.name()));
+            let task_ctx = TaskExecutionContext {
+                workflow_id: Arc::clone(&workflow_id),
+                instance_id: Arc::clone(&available_task.instance_id),
+                task_id: Arc::clone(&task_name),
+                metadata: task_index.build_task_metadata(&tid),
+                workflow_metadata_json: metadata_json.clone(),
+            };
+            let input = fork_input.clone();
+            Box::pin(async move {
+                let res = match &*branch {
+                    WorkflowContinuation::Task { func: Some(f), .. } => {
+                        let fut = with_task_context(task_ctx, f.run(input));
+                        AssertUnwindSafe(fut)
+                            .catch_unwind()
+                            .await
+                            .map(|r| r.map_err(crate::error::RuntimeError::from))
+                    }
+                    // Unreachable: `drainable` only keeps `Task { func: Some }`.
+                    _ => Ok(Err(WorkflowError::TaskNotImplemented(tid.to_hex()).into())),
+                };
+                (tid, res)
+            })
+        });
+
+        // Run them concurrently under the claim heartbeat, bounded by `cap`
+        // in-flight branches (deadline is `None` — per-branch timeouts
+        // excluded a branch from draining above). A `JoinSet` of `'static`
+        // tasks keeps the drive future `Send`, which `buffer_unordered` over
+        // borrowed data would not.
+        let mut pending = branch_futs.collect::<Vec<_>>().into_iter();
+        let drain_fut = async move {
+            let mut set: tokio::task::JoinSet<(sayiir_core::TaskId, BranchDrainOutput)> =
+                tokio::task::JoinSet::new();
+            for _ in 0..cap {
+                match pending.next() {
+                    Some(f) => {
+                        set.spawn(f);
+                    }
+                    None => break,
+                }
+            }
+            let mut outcomes = Vec::with_capacity(set.len());
+            while let Some(joined) = set.join_next().await {
+                outcomes.push(joined.map_err(crate::error::RuntimeError::from)?);
+                if let Some(f) = pending.next() {
+                    set.spawn(f);
+                }
+            }
+            Ok::<_, crate::error::RuntimeError>(outcomes)
+        };
+        let outcomes = self.run_with_heartbeat(&claim, None, drain_fut).await??;
+
+        // Commit only on full success. On any branch error/panic, persist
+        // nothing and fall back: the dispatched branch re-runs alone via the
+        // normal path (idempotent + side-effect-free), and its failure flows
+        // through the usual retry/fail handling.
+        let mut by_tid: HashMap<sayiir_core::TaskId, Bytes> = HashMap::with_capacity(outcomes.len());
+        for (tid, res) in outcomes {
+            match res {
+                Ok(Ok(output)) => {
+                    by_tid.insert(tid, output);
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        instance_id = %available_task.instance_id,
+                        task_id = %tid,
+                        error = %e,
+                        "fork branch failed during drain; falling back to per-branch dispatch"
+                    );
+                    return Ok(DrainResult::NotApplicable(claim));
+                }
+                Err(_panic) => {
+                    tracing::warn!(
+                        instance_id = %available_task.instance_id,
+                        task_id = %tid,
+                        "fork branch panicked during drain; falling back to per-branch dispatch"
+                    );
+                    return Ok(DrainResult::NotApplicable(claim));
+                }
+            }
+        }
+
+        // Order results by branch declaration order so the no-join "last
+        // branch result" and join envelope construction stay deterministic.
+        let mut results: Vec<(sayiir_core::TaskId, Bytes)> = Vec::with_capacity(drainable.len());
+        for b in &drainable {
+            let tid = sayiir_core::TaskId::from(b.first_task_id());
+            if let Some(output) = by_tid.remove(&tid) {
+                results.push((tid, output));
+            }
+        }
+
+        // One round-trip persists every branch output (each individually
+        // durable). No snapshot lock / blob / history per branch.
+        self.backend
+            .save_task_results(&available_task.instance_id, &results)
+            .await?;
+
+        // Reflect completions in the local snapshot, then advance the position
+        // off the fork. `update_position_after_task` is driven with the
+        // dispatched task id (the snapshot's current position); since every
+        // drained branch now has a result, it skips them all and lands on the
+        // first undrained branch or the join.
+        let last_output = results
+            .last()
+            .map(|(_, o)| o.clone())
+            .unwrap_or(fork_input);
+        for (tid, output) in &results {
+            snapshot.mark_task_completed(*tid, output.clone());
+        }
+        Self::update_position_after_task(continuation, &task_id, snapshot)?;
+        #[cfg(feature = "otel")]
+        {
+            snapshot.trace_parent = crate::trace_context::current_trace_parent();
+        }
+        self.backend.save_snapshot(snapshot).await?;
+
+        FORK_DRAINS.fetch_add(1, Ordering::Relaxed);
+        FORK_BRANCHES_DRAINED.fetch_add(results.len() as u64, Ordering::Relaxed);
+        tracing::debug!(
+            instance_id = %available_task.instance_id,
+            drained = results.len(),
+            "drained fork branches in a single dispatch"
+        );
+
+        claim.release().await?;
+        Self::resolve_loop_completions(continuation, snapshot, self.backend.as_ref()).await?;
+        let status = self
+            .determine_post_task_status(continuation, available_task, snapshot, last_output)
+            .await?;
+        Ok(DrainResult::Handled(status))
+    }
+
+    /// Find the fork whose branch entries contain `task_id`, returning that
+    /// fork's branches and join. Used by [`try_drain_fork`](Self::try_drain_fork)
+    /// to recognise a fork fan-out dispatch.
+    fn find_enclosing_fork<'a>(
+        cont: &'a WorkflowContinuation,
+        task_id: &sayiir_core::TaskId,
+    ) -> Option<(&'a [Arc<WorkflowContinuation>], Option<&'a WorkflowContinuation>)> {
+        match cont {
+            WorkflowContinuation::Fork {
+                branches, join, ..
+            } => {
+                if branches
+                    .iter()
+                    .any(|b| sayiir_core::TaskId::from(b.first_task_id()) == *task_id)
+                {
+                    return Some((&branches[..], join.as_deref()));
+                }
+                for b in branches {
+                    if let Some(found) = Self::find_enclosing_fork(b, task_id) {
+                        return Some(found);
+                    }
+                }
+                join.as_deref()
+                    .and_then(|j| Self::find_enclosing_fork(j, task_id))
+            }
+            WorkflowContinuation::Task { next, .. }
+            | WorkflowContinuation::Delay { next, .. }
+            | WorkflowContinuation::AwaitSignal { next, .. } => next
+                .as_deref()
+                .and_then(|n| Self::find_enclosing_fork(n, task_id)),
+            WorkflowContinuation::Loop { body, next, .. } => {
+                Self::find_enclosing_fork(body, task_id).or_else(|| {
+                    next.as_deref()
+                        .and_then(|n| Self::find_enclosing_fork(n, task_id))
+                })
+            }
+            WorkflowContinuation::ChildWorkflow { child, next, .. } => {
+                Self::find_enclosing_fork(child, task_id).or_else(|| {
+                    next.as_deref()
+                        .and_then(|n| Self::find_enclosing_fork(n, task_id))
+                })
+            }
+            WorkflowContinuation::Branch {
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                for b in branches.values() {
+                    if let Some(found) = Self::find_enclosing_fork(b, task_id) {
+                        return Some(found);
+                    }
+                }
+                if let Some(found) = default
+                    .as_deref()
+                    .and_then(|d| Self::find_enclosing_fork(d, task_id))
+                {
+                    return Some(found);
+                }
+                next.as_deref()
+                    .and_then(|n| Self::find_enclosing_fork(n, task_id))
+            }
+        }
     }
 
     /// Run the task future with an optional deadline, returning the panic-wrapped result.
@@ -2192,6 +2579,7 @@ where
             batch_size: NonZeroUsize::MIN,
             aging_interval: Duration::from_mins(5),
             tags: vec![],
+            fork_concurrency: default_fork_concurrency(),
         }
     }
 
@@ -2429,6 +2817,7 @@ pub struct PooledWorkerBuilder<B> {
     batch_size: NonZeroUsize,
     aging_interval: Duration,
     tags: Vec<String>,
+    fork_concurrency: NonZeroUsize,
 }
 
 impl<B> PooledWorkerBuilder<B>
@@ -2481,6 +2870,14 @@ where
         self
     }
 
+    /// Set the maximum number of fork branches executed concurrently per
+    /// drain (default: available parallelism clamped to `4..=32`).
+    #[must_use]
+    pub fn fork_concurrency(mut self, concurrency: NonZeroUsize) -> Self {
+        self.fork_concurrency = concurrency;
+        self
+    }
+
     /// Build the [`PooledWorker`].
     ///
     /// If no `worker_id` was set, generates one from `{hostname}-{pid}`.
@@ -2495,6 +2892,7 @@ where
             batch_size: self.batch_size,
             aging_interval: self.aging_interval,
             tags: self.tags,
+            fork_concurrency: self.fork_concurrency,
         }
     }
 }
@@ -2572,6 +2970,88 @@ mod tests {
             .get_signal("wf-1", SignalKind::Cancel)
             .await;
         assert!(signal.is_ok_and(|s| s.is_some()));
+
+        handle.shutdown();
+        tokio::time::timeout(Duration::from_secs(5), handle.join())
+            .await
+            .ok();
+    }
+
+    /// End-to-end fan-out through `PooledWorker`, exercising `try_drain_fork`:
+    /// a fork of single-task branches must complete with every branch result
+    /// fed to the join, and all branch outputs persisted.
+    #[tokio::test]
+    async fn test_fanout_drains_fork_to_completion() {
+        use sayiir_core::context::WorkflowContext;
+        use sayiir_core::task::BranchOutputs;
+        use sayiir_core::workflow::WorkflowBuilder;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+        struct State {
+            id: u64,
+        }
+
+        const CHILDREN: usize = 8;
+
+        let ctx = WorkflowContext::new("drain-fanout", Arc::new(JsonCodec), Arc::new(()));
+        let mut fork = WorkflowBuilder::new(ctx)
+            .then("pickup", |s: State| async move { Ok(s) })
+            .fork();
+        for i in 0..CHILDREN {
+            fork = fork.branch(&format!("branch_{i}"), |s: State| async move { Ok(s) });
+        }
+        let workflow = Arc::new(
+            fork.join("final_emit", |outputs: BranchOutputs<JsonCodec>| async move {
+                // Every branch carries the same id; pull it from the last one
+                // to prove all branch outputs reached the join envelope.
+                let s: State = outputs
+                    .get_by_id(&format!("branch_{}", CHILDREN - 1))
+                    .unwrap_or(State { id: 0 });
+                Ok(s)
+            })
+            .build()
+            .unwrap(),
+        );
+        let def_hash = *workflow.definition_hash();
+
+        let backend = InMemoryBackend::new();
+        let worker = PooledWorker::new("drain-worker", backend, TaskRegistry::new());
+        let handle = worker.spawn(
+            Duration::from_millis(20),
+            vec![(def_hash, Arc::clone(&workflow))],
+        );
+
+        let client = crate::WorkflowClient::from_shared(Arc::clone(handle.backend()));
+        client
+            .submit(workflow.as_ref(), "fo-1", State { id: 42 })
+            .await
+            .unwrap();
+
+        // Poll to completion.
+        let mut status = WorkflowStatus::InProgress;
+        for _ in 0..200 {
+            status = client.status("fo-1").await.unwrap();
+            if matches!(status, WorkflowStatus::Completed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            matches!(status, WorkflowStatus::Completed),
+            "workflow should complete, got {status:?}"
+        );
+
+        // The join read its id off the LAST branch's output, so a correct
+        // final value proves every branch ran, was persisted, and reached the
+        // join envelope via the drain.
+        let snapshot = handle.backend().load_snapshot("fo-1").await.unwrap();
+        let output = snapshot
+            .state
+            .completed_output()
+            .expect("completed workflow has output");
+        let result: State = serde_json::from_slice(output).unwrap();
+        assert_eq!(result, State { id: 42 }, "join must see all branch outputs");
 
         handle.shutdown();
         tokio::time::timeout(Duration::from_secs(5), handle.join())

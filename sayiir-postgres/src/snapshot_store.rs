@@ -295,6 +295,58 @@ where
     }
 
     #[tracing::instrument(
+        name = "db.save_task_results",
+        skip(self, results),
+        fields(db.system = "postgresql", count = results.len()),
+        err(level = tracing::Level::ERROR),
+    )]
+    async fn save_task_results(
+        &self,
+        instance_id: &str,
+        results: &[(sayiir_core::TaskId, bytes::Bytes)],
+    ) -> Result<(), BackendError> {
+        if results.is_empty() {
+            return Ok(());
+        }
+        tracing::debug!("saving task results batch");
+
+        // Branch outputs live in `workflow_tasks`, hydrated back into the
+        // snapshot by `load_snapshot`. So persisting a batch of fork-branch
+        // results needs only a multi-row UPSERT here — NOT the snapshot
+        // FOR UPDATE lock, blob re-encode, or history row that single-task
+        // `save_task_result` performs. The caller advances the execution
+        // position once afterwards via `save_snapshot` (which bumps
+        // `completed_task_count`/`history_version` to reflect every branch).
+        //
+        // One statement, one round-trip, all rows commit atomically — each
+        // branch is individually durable on commit. `ON CONFLICT DO UPDATE`
+        // keeps the write idempotent if a branch re-runs (claim expiry, retry).
+        let task_ids: Vec<&[u8]> = results
+            .iter()
+            .map(|(t, _)| t.as_bytes().as_slice())
+            .collect();
+        let outputs: Vec<&[u8]> = results.iter().map(|(_, o)| o.as_ref()).collect();
+
+        sqlx::query(
+            "INSERT INTO sayiir_workflow_tasks
+                 (instance_id, task_id, status, completed_at, output)
+             SELECT $1, t.task_id, 'completed', now(), t.output
+             FROM UNNEST($2::bytea[], $3::bytea[]) AS t(task_id, output)
+             ON CONFLICT (instance_id, task_id) DO UPDATE SET
+                 status = 'completed', completed_at = now(), error = NULL,
+                 output = EXCLUDED.output",
+        )
+        .bind(instance_id)
+        .bind(&task_ids)
+        .bind(&outputs)
+        .execute(&self.pool)
+        .await
+        .map_err(PgError)?;
+
+        Ok(())
+    }
+
+    #[tracing::instrument(
         name = "db.load_snapshot",
         skip(self),
         fields(db.system = "postgresql"),
