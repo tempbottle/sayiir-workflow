@@ -57,10 +57,20 @@ impl sayiir_core::codec::EnvelopeCodec for JsonCodec {
     }
 
     fn encode_branch_envelope(&self, key: &str, result_bytes: &[u8]) -> Result<Bytes, BoxError> {
-        let result_value: serde_json::Value =
-            serde_json::from_slice(result_bytes).unwrap_or(serde_json::Value::Null);
-        let envelope = serde_json::json!({ "branch": key, "result": result_value });
-        Ok(Bytes::from(serde_json::to_vec(&envelope)?))
+        #[derive(Serialize)]
+        struct Envelope<'a> {
+            branch: &'a str,
+            result: &'a serde_json::value::RawValue,
+        }
+        // RawValue splices the already-encoded result without building a
+        // Value tree (validate-only parse, no per-node allocation).
+        // Invalid result bytes degrade to a null result, as before.
+        let result = serde_json::from_slice::<&serde_json::value::RawValue>(result_bytes)
+            .or_else(|_| serde_json::from_slice(b"null"))?;
+        Ok(Bytes::from(serde_json::to_vec(&Envelope {
+            branch: key,
+            result,
+        })?))
     }
 
     fn encode_named_results(&self, results: &[(String, Bytes)]) -> Result<Bytes, BoxError> {
