@@ -35,6 +35,12 @@ export interface WorkerOptions {
   claimTtl?: Duration;
   /** Affinity tags for this worker. When set, the worker only picks up tasks whose tags are a subset of these tags. */
   tags?: string[];
+  /**
+   * How many tasks this worker executes concurrently (default: 1). Each
+   * in-flight task has its own claim and heartbeat; I/O-bound throughput
+   * scales with this knob.
+   */
+  maxConcurrentTasks?: number;
 }
 
 /** Handle for controlling a running worker. */
@@ -130,6 +136,7 @@ export class Worker {
         pollMs,
         claimMs,
         tags,
+        this.options.maxConcurrentTasks,
       );
     }
 
@@ -140,6 +147,7 @@ export class Worker {
         pollMs,
         claimMs,
         tags,
+        this.options.maxConcurrentTasks,
       );
     }
 

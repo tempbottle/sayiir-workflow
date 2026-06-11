@@ -6,7 +6,7 @@
 use sayiir_core::codec;
 use sayiir_core::snapshot::{PauseRequest, SignalKind, SignalRequest, WorkflowSnapshot};
 use sayiir_persistence::validation::validate_signal_allowed;
-use sayiir_persistence::{BackendError, SignalStore};
+use sayiir_persistence::{BackendError, ControlSignal, SignalStore};
 use sqlx::Row;
 
 use crate::backend::PostgresBackend;
@@ -594,6 +594,42 @@ where
         tx.commit().await.map_err(PgError)?;
         tracing::info!(instance_id, "workflow paused");
         Ok(true)
+    }
+
+    #[tracing::instrument(
+        name = "db.check_control_signals",
+        skip(self),
+        fields(db.system = "postgresql"),
+        err(level = tracing::Level::ERROR),
+    )]
+    async fn check_control_signals(
+        &self,
+        instance_id: &str,
+        interrupted_at_task: Option<sayiir_core::TaskId>,
+    ) -> Result<Option<ControlSignal>, BackendError> {
+        // Dispatch eligibility already excludes instances with any signal
+        // row, so the overwhelmingly common case here is "no signal": one
+        // PK probe, no transaction, instead of two FOR UPDATE transactions.
+        let row =
+            sqlx::query("SELECT 1 FROM sayiir_workflow_signals WHERE instance_id = $1 LIMIT 1")
+                .bind(instance_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(PgError)?;
+        if row.is_none() {
+            return Ok(None);
+        }
+
+        if self
+            .check_and_cancel(instance_id, interrupted_at_task)
+            .await?
+        {
+            return Ok(Some(ControlSignal::Cancelled));
+        }
+        if self.check_and_pause(instance_id).await? {
+            return Ok(Some(ControlSignal::Paused));
+        }
+        Ok(None)
     }
 
     #[tracing::instrument(

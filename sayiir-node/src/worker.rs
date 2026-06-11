@@ -30,6 +30,7 @@ pub struct NapiWorker {
     postgres: Option<(String, PoolOptions)>,
     poll_interval: Duration,
     claim_ttl: Duration,
+    max_concurrent_tasks: Option<u32>,
     tags: Vec<String>,
 }
 
@@ -43,6 +44,7 @@ impl NapiWorker {
         poll_interval_ms: Option<f64>,
         claim_ttl_ms: Option<f64>,
         tags: Option<Vec<String>>,
+        max_concurrent_tasks: Option<u32>,
     ) -> Self {
         Self {
             worker_id,
@@ -60,6 +62,7 @@ impl NapiWorker {
                     claim_ttl_ms.unwrap_or(300_000.0) as u64
                 },
             ),
+            max_concurrent_tasks,
             tags: tags.unwrap_or_default(),
         }
     }
@@ -72,6 +75,7 @@ impl NapiWorker {
         poll_interval_ms: Option<f64>,
         claim_ttl_ms: Option<f64>,
         tags: Option<Vec<String>>,
+        max_concurrent_tasks: Option<u32>,
     ) -> Self {
         Self {
             worker_id,
@@ -89,6 +93,7 @@ impl NapiWorker {
                     claim_ttl_ms.unwrap_or(300_000.0) as u64
                 },
             ),
+            max_concurrent_tasks,
             tags: tags.unwrap_or_default(),
         }
     }
@@ -162,6 +167,7 @@ impl NapiWorker {
         };
         let worker_id = self.worker_id.clone();
         let claim_ttl = self.claim_ttl;
+        let max_concurrent_tasks = self.max_concurrent_tasks;
         let poll_interval = self.poll_interval;
         let tags = self.tags.clone();
 
@@ -203,9 +209,15 @@ impl NapiWorker {
                     }
                 };
 
-                let worker = PooledWorker::new(&worker_id, backend_kind, TaskRegistry::default())
-                    .with_claim_ttl(Some(claim_ttl))
-                    .with_tags(tags);
+                let mut worker =
+                    PooledWorker::new(&worker_id, backend_kind, TaskRegistry::default())
+                        .with_claim_ttl(Some(claim_ttl))
+                        .with_tags(tags);
+                if let Some(max) =
+                    max_concurrent_tasks.and_then(|m| std::num::NonZeroUsize::new(m as usize))
+                {
+                    worker = worker.with_max_concurrent_tasks(max);
+                }
 
                 let _guard = runtime.enter();
                 let handle =

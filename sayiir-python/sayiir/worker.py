@@ -64,6 +64,8 @@ class Worker:
         backend: Either ``InMemoryBackend()`` or ``PostgresBackend(url)``.
         poll_interval: Seconds between polls for available tasks.
         claim_ttl: Task claim TTL in seconds.
+        max_concurrent_tasks: How many tasks this worker runs at once
+            (default: 1). I/O-bound throughput scales with this knob.
     """
 
     def __init__(
@@ -73,8 +75,15 @@ class Worker:
         *,
         poll_interval: float = 5.0,
         claim_ttl: float = 300.0,
+        max_concurrent_tasks: int | None = None,
     ) -> None:
-        self._inner = _PyWorker(worker_id, backend, poll_interval, claim_ttl)
+        self._inner = _PyWorker(
+            worker_id,
+            backend,
+            poll_interval,
+            claim_ttl,
+            max_concurrent_tasks=max_concurrent_tasks,
+        )
 
     def start(self, workflows: list[Workflow]) -> WorkerHandle:
         """Start the worker and return a handle for lifecycle control.
