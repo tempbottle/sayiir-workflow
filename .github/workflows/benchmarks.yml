@@ -249,10 +249,20 @@ jobs:
               echo >> "$OUT"
               continue
             fi
+            # sleeping-giants' sustained rate divides completions by
+            # (elapsed − sleep): on a ~9 s run with a ~6 s denominator,
+            # normal ±0.7 s runner jitter moves the metric ~12%, so the
+            # default 10% gate flags pure noise. Widen to 15%; real
+            # capacity loss in this scenario shows up well beyond that.
+            throughput_pct=10
+            if [[ "$scenario" == "sleeping-giants" ]]; then
+              throughput_pct=15
+            fi
             ./benchmarks/target/release/sayiir-bench compare \
               --scenario "$scenario" \
               --baseline "$baseline_file" \
               --candidate "$candidate_file" \
+              --throughput-pct "$throughput_pct" \
               --format markdown \
               --report-only \
               --output /tmp/cmp-"$scenario".md > /dev/null

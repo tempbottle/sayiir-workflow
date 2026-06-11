@@ -284,7 +284,7 @@ async fn build_pool(url: &str, concurrency: usize, workers: usize) -> Result<sql
     let target = (concurrency + workers * 4 + 16) as u32;
     PgPoolOptions::new()
         .max_connections(target)
-        .acquire_timeout(Duration::from_secs(60))
+        .acquire_timeout(Duration::from_mins(1))
         .connect(url)
         .await
         .with_context(|| format!("connecting to postgres at {url}"))
@@ -303,7 +303,7 @@ fn spawn_workers(
         let worker_backend = backend.clone();
         let registry = sayiir_core::registry::TaskRegistry::new();
         let worker = PooledWorker::new(format!("sg-worker-{i}"), worker_backend, registry)
-            .with_claim_ttl(Some(Duration::from_secs(120)))
+            .with_claim_ttl(Some(Duration::from_mins(2)))
             .with_batch_size(batch_size)
             .with_max_concurrent_tasks(WORKER_PARALLELISM);
         let entries = vec![(def_hash.clone(), Arc::clone(&workflow))];

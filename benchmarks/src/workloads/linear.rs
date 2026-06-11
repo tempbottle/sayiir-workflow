@@ -256,7 +256,7 @@ pub async fn run(ctx: crate::CommonContext, args: LinearArgs) -> Result<()> {
     }
 
     let total_elapsed = bench_start.elapsed();
-    let sustained = best_window(&samples, Duration::from_secs(60));
+    let sustained = crate::report::best_window_rate(&samples, Duration::from_mins(1));
 
     let wakeup_drops = wakeup_drops_total().saturating_sub(wakeup_drops_baseline);
 
@@ -522,51 +522,13 @@ fn spawn_workers(
         let worker_backend = backend.clone();
         let registry = sayiir_core::registry::TaskRegistry::new();
         let worker = PooledWorker::new(format!("bench-worker-{i}"), worker_backend, registry)
-            .with_claim_ttl(Some(Duration::from_secs(60)))
+            .with_claim_ttl(Some(Duration::from_mins(1)))
             .with_batch_size(batch_size)
             .with_max_concurrent_tasks(WORKER_PARALLELISM);
         let entries = vec![(def_hash.clone(), Arc::clone(&workflow))];
         handles.push(worker.spawn(poll, entries));
     }
     handles
-}
-
-/// Best sliding-window completions/sec from the (time, cumulative) samples.
-///
-/// Prefers a `target` window (e.g. 60s), but if the run is shorter than `target`,
-/// falls back to the full elapsed range so we still produce a meaningful number
-/// on short smoke tests.
-fn best_window(samples: &[(Duration, usize)], target: Duration) -> f64 {
-    if samples.len() < 2 {
-        return match samples.first() {
-            Some((dt, n)) if !dt.is_zero() => *n as f64 / dt.as_secs_f64(),
-            _ => 0.0,
-        };
-    }
-    let total = samples.last().unwrap().0.saturating_sub(samples[0].0);
-    let window = if total < target { total } else { target };
-    if window.is_zero() {
-        return 0.0;
-    }
-    let mut best = 0.0f64;
-    let mut left = 0usize;
-    for right in 0..samples.len() {
-        while samples[right].0.saturating_sub(samples[left].0) > window {
-            left += 1;
-        }
-        let dt = samples[right]
-            .0
-            .saturating_sub(samples[left].0)
-            .as_secs_f64();
-        if dt > 0.0 {
-            let dn = (samples[right].1 - samples[left].1) as f64;
-            let rate = dn / dt;
-            if rate > best {
-                best = rate;
-            }
-        }
-    }
-    best
 }
 
 fn print_summary(

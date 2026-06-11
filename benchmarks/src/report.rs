@@ -115,6 +115,103 @@ pub struct Sample {
     pub completed: usize,
 }
 
+/// Best sustained completion rate: the highest `Δcompleted / Δt` over any
+/// window spanning at least `min(target, run length)`.
+///
+/// Requiring full-width windows is the point of this function. Maximizing
+/// over arbitrary sub-spans lets a handful of completions landing in one
+/// 100 ms sample tick report a "sustained" rate of thousands of wf/s —
+/// observed swinging the metric ±40% between identical CI runs (a 0.9 s
+/// burst at bench start once reported 140 wf/s "sustained" on a run whose
+/// true 60 s ceiling was 83). Runs shorter than `target` yield the
+/// whole-run rate.
+pub fn best_window_rate(samples: &[(Duration, usize)], target: Duration) -> f64 {
+    if samples.len() < 2 {
+        return match samples.first() {
+            Some((dt, n)) if !dt.is_zero() => *n as f64 / dt.as_secs_f64(),
+            _ => 0.0,
+        };
+    }
+    let total = samples.last().unwrap().0.saturating_sub(samples[0].0);
+    let window = if total < target { total } else { target };
+    if window.is_zero() {
+        return 0.0;
+    }
+    let mut best = 0.0f64;
+    let mut left = 0usize;
+    for right in 0..samples.len() {
+        // Narrowest window ending at `right` that still spans >= `window`.
+        while left < right && samples[right].0.saturating_sub(samples[left + 1].0) >= window {
+            left += 1;
+        }
+        let dt = samples[right].0.saturating_sub(samples[left].0);
+        if dt >= window {
+            let dn = (samples[right].1 - samples[left].1) as f64;
+            let rate = dn / dt.as_secs_f64();
+            if rate > best {
+                best = rate;
+            }
+        }
+    }
+    best
+}
+
+#[cfg(test)]
+mod best_window_tests {
+    use super::*;
+
+    fn s(t_ms: u64, n: usize) -> (Duration, usize) {
+        (Duration::from_millis(t_ms), n)
+    }
+
+    #[test]
+    fn early_burst_does_not_inflate_sustained() {
+        // 100 completions in the first second, then a 60 s stall, then
+        // 120 more over 60 s. Any-span maximization would report
+        // ~100 wf/s off the burst; full-window must not.
+        let mut samples = vec![s(0, 0), s(1_000, 100)];
+        for i in 1u64..=60 {
+            samples.push(s(61_000 + i * 1_000, 100 + (i as usize) * 2));
+        }
+        let rate = best_window_rate(&samples, Duration::from_mins(1));
+        assert!(
+            rate < 5.0,
+            "burst leaked into sustained: {rate:.1} wf/s (expected < 5)"
+        );
+    }
+
+    #[test]
+    fn run_shorter_than_target_is_whole_run_rate() {
+        let samples = vec![s(0, 0), s(5_000, 25), s(10_000, 100)];
+        let rate = best_window_rate(&samples, Duration::from_mins(1));
+        assert!((rate - 10.0).abs() < 1e-9, "expected 100/10s, got {rate}");
+    }
+
+    #[test]
+    fn picks_best_full_window_in_long_run() {
+        // 0..60 s at 1 wf/s, 60..120 s at 10 wf/s: best 60 s window is
+        // the second half.
+        let mut samples = vec![s(0, 0)];
+        for i in 1u64..=60 {
+            samples.push(s(i * 1_000, i as usize));
+        }
+        for i in 1u64..=60 {
+            samples.push(s(60_000 + i * 1_000, 60 + (i as usize) * 10));
+        }
+        let rate = best_window_rate(&samples, Duration::from_mins(1));
+        assert!((rate - 10.0).abs() < 0.2, "expected ~10 wf/s, got {rate}");
+    }
+
+    #[test]
+    fn degenerate_inputs() {
+        assert!(best_window_rate(&[], Duration::from_mins(1)).abs() < f64::EPSILON);
+        assert!(
+            (best_window_rate(&[s(2_000, 10)], Duration::from_mins(1)) - 5.0).abs() < 1e-9,
+            "single-sample fallback should be n/t"
+        );
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct PrometheusSnapshot {
     pub pg_db_size_mb: Option<f64>,
