@@ -37,6 +37,9 @@ use crate::driver::submit_bounded;
 use crate::metrics::{COMPLETION_TX, record_completion};
 use crate::report::LatencyBlock;
 
+/// In-flight task cap per bench worker.
+const WORKER_PARALLELISM: std::num::NonZeroUsize = std::num::NonZeroUsize::new(2).unwrap();
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct State {
     id: u64,
@@ -301,7 +304,8 @@ fn spawn_workers(
         let registry = sayiir_core::registry::TaskRegistry::new();
         let worker = PooledWorker::new(format!("sg-worker-{i}"), worker_backend, registry)
             .with_claim_ttl(Some(Duration::from_secs(120)))
-            .with_batch_size(batch_size);
+            .with_batch_size(batch_size)
+            .with_max_concurrent_tasks(WORKER_PARALLELISM);
         let entries = vec![(def_hash.clone(), Arc::clone(&workflow))];
         handles.push(worker.spawn(poll, entries));
     }
