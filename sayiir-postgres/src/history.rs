@@ -80,6 +80,33 @@ where
     Ok(outputs)
 }
 
+/// Single-task variant of [`fetch_task_outputs`]: one PK lookup, no blob
+/// decode. Keeps the "completed with durable output" predicate in this
+/// module alongside the other two fetchers.
+pub(crate) async fn fetch_task_output<'e, E>(
+    executor: E,
+    instance_id: &str,
+    task_id: &sayiir_core::TaskId,
+) -> Result<Option<Bytes>, BackendError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let row = sqlx::query(
+        "SELECT output FROM sayiir_workflow_tasks
+         WHERE instance_id = $1 AND task_id = $2
+           AND status = 'completed' AND output IS NOT NULL",
+    )
+    .bind(instance_id)
+    .bind(task_id.as_bytes().as_slice())
+    .fetch_optional(executor)
+    .await
+    .map_err(PgError)?;
+    Ok(row.map(|r| {
+        let raw: Vec<u8> = r.get("output");
+        Bytes::from(raw)
+    }))
+}
+
 /// Batched variant of [`fetch_task_outputs`] for dispatch SELECTs that
 /// load multiple snapshots at once. Returns rows grouped by
 /// `instance_id` so each snapshot can be hydrated independently.
