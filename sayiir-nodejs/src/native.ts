@@ -221,6 +221,7 @@ export interface NativeAddon {
       pollIntervalMs?: number,
       claimTtlMs?: number,
       tags?: string[],
+      maxConcurrentTasks?: number,
     ): NapiWorker;
     withPostgres(
       workerId: string,
@@ -228,6 +229,7 @@ export interface NativeAddon {
       pollIntervalMs?: number,
       claimTtlMs?: number,
       tags?: string[],
+      maxConcurrentTasks?: number,
     ): NapiWorker;
   };
   NapiWorkflowClient: {

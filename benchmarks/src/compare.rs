@@ -17,6 +17,7 @@
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use comfy_table::{Cell, CellAlignment, ContentArrangement, Table, presets};
@@ -62,8 +63,8 @@ pub fn run(args: CompareArgs) -> Result<()> {
     let throughput_thresh_pct = args.throughput_pct;
     let latency_thresh_pct = args.latency_pct;
 
-    let b_sustained = baseline.results.throughput_wf_per_sec_sustained;
-    let c_sustained = candidate.results.throughput_wf_per_sec_sustained;
+    let b_sustained = sustained_rate(&baseline);
+    let c_sustained = sustained_rate(&candidate);
     let throughput_delta_pct = pct_change(b_sustained, c_sustained);
     rows.push(ComparisonRow {
         metric: "sustained_wf_per_sec",
@@ -158,6 +159,35 @@ pub fn run(args: CompareArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Window width of the workloads' sustained-throughput metric; the
+/// recomputation below must match what `best_window_rate` callers use.
+const SUSTAINED_WINDOW: Duration = Duration::from_mins(1);
+
+/// Sustained throughput under the current full-window definition.
+///
+/// Recomputed from the report's completion samples rather than read from
+/// `results`: the stored value reflects whatever definition the
+/// *producing* harness had, and the `bench-baseline-main` artifact is
+/// built by main's harness — an older main can carry the any-span
+/// burst-peak variant, inflated 50–100% vs the full-window rate, which
+/// manufactures regressions against an honest candidate. Recomputing
+/// both sides keeps the gate apples-to-apples across harness versions.
+///
+/// Falls back to the stored value when samples are missing, and for
+/// sleeping-giants, whose sustained metric (completions per *awake*
+/// second) is intentionally not derivable from the completion samples.
+fn sustained_rate(report: &Report) -> f64 {
+    if report.scenario == "sleeping-giants" || report.samples.len() < 2 {
+        return report.results.throughput_wf_per_sec_sustained;
+    }
+    let points: Vec<(Duration, usize)> = report
+        .samples
+        .iter()
+        .map(|s| (Duration::from_millis(s.t_ms), s.completed))
+        .collect();
+    crate::report::best_window_rate(&points, SUSTAINED_WINDOW)
 }
 
 /// `(candidate - baseline) / baseline * 100`. Zero baselines collapse

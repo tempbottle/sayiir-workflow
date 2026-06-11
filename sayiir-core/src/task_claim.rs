@@ -167,8 +167,24 @@ pub struct AvailableTask {
     ///
     /// Wrapped in `Arc` so the dispatch loop can move the owned
     /// snapshot in once, and so workers that lose the claim race drop
-    /// their copy cheaply (refcount decrement). Only the worker that
-    /// actually executes the task pays a deep `clone()` — and only
-    /// when it needs a mutable working copy.
+    /// their copy cheaply (refcount decrement). The winning worker
+    /// extracts a mutable working copy via [`Self::take_snapshot`]
+    /// without a deep clone.
     pub snapshot: Arc<crate::snapshot::WorkflowSnapshot>,
+}
+
+impl AvailableTask {
+    /// Take ownership of the dispatch snapshot, leaving an empty
+    /// placeholder behind. Backends build one `Arc` per dispatch, so the
+    /// refcount is 1 and this is a move-out, not a deep clone (the clone
+    /// fallback only fires if the `Arc` was shared).
+    #[must_use]
+    pub fn take_snapshot(&mut self) -> crate::snapshot::WorkflowSnapshot {
+        let placeholder = Arc::new(crate::snapshot::WorkflowSnapshot::new(
+            "",
+            crate::DefinitionHash::default(),
+        ));
+        let arc = std::mem::replace(&mut self.snapshot, placeholder);
+        Arc::try_unwrap(arc).unwrap_or_else(|shared| (*shared).clone())
+    }
 }

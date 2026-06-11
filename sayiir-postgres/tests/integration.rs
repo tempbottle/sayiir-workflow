@@ -739,7 +739,7 @@ async fn release_task_claim_wrong_worker() {
     let result = backend
         .release_task_claim("wf-1", &sayiir_core::TaskId::from("task-1"), "worker-2")
         .await;
-    assert!(matches!(result, Err(BackendError::Backend(_))));
+    assert!(matches!(result, Err(BackendError::ClaimLost(_))));
 }
 
 #[tokio::test]
@@ -771,8 +771,12 @@ async fn extend_task_claim() {
 
     // Read the column directly: a "still held" reclaim probe would
     // pass even if extend was a silent no-op (the original 10s TTL
-    // hasn't elapsed yet), so check the actual expiration moved by
-    // ~the additional duration.
+    // hasn't elapsed yet), so check the actual expiration.
+    //
+    // Renewal is absolute (now + 300s), not additive: the original
+    // expiry was now + 10s, so the delta must be ~290s. An additive
+    // implementation would yield exactly 300 — keep the upper bound
+    // below that so lease-drift regressions fail here.
     let (claim_owner, claim_expires_at): (Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
         sqlx::query_as(
             "SELECT worker_id, expires_at
@@ -785,10 +789,11 @@ async fn extend_task_claim() {
 
     assert_eq!(claim_owner.as_deref(), Some("worker-1"));
     let new_expiry_secs = claim_expires_at.unwrap().timestamp().cast_unsigned();
-    assert_eq!(
-        new_expiry_secs,
-        original_expiry_secs + 300,
-        "extend should move expires_at forward by exactly 300s"
+    let delta = new_expiry_secs - original_expiry_secs;
+    assert!(
+        (289..300).contains(&delta),
+        "extend should renew expires_at to now()+300s (absolute, not additive); \
+         expected delta ~290s, got {delta}s"
     );
 }
 
@@ -815,7 +820,7 @@ async fn extend_task_claim_wrong_worker() {
             Duration::seconds(300),
         )
         .await;
-    assert!(matches!(result, Err(BackendError::Backend(_))));
+    assert!(matches!(result, Err(BackendError::ClaimLost(_))));
 }
 
 #[tokio::test]

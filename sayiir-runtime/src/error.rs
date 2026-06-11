@@ -72,12 +72,6 @@ impl From<RunConflict> for RuntimeError {
 }
 
 impl RuntimeError {
-    /// Returns `true` if this error is a `TaskTimedOut` workflow error.
-    #[must_use]
-    pub fn is_timeout(&self) -> bool {
-        matches!(self, Self::Workflow(WorkflowError::TaskTimedOut { .. }))
-    }
-
     /// Returns `true` if this error is a codec decode failure (schema mismatch).
     #[must_use]
     pub fn is_decode_error(&self) -> bool {

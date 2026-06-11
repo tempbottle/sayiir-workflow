@@ -423,8 +423,8 @@ impl TaskClaimStore for InMemoryBackend {
 
         if let Some(claim) = claims.get(&key) {
             if claim.worker_id != worker_id {
-                return Err(BackendError::Backend(format!(
-                    "Claim owned by different worker: {}",
+                return Err(BackendError::ClaimLost(format!(
+                    "claim owned by {}",
                     claim.worker_id
                 )));
             }
@@ -443,24 +443,25 @@ impl TaskClaimStore for InMemoryBackend {
         instance_id: &str,
         task_id: &sayiir_core::TaskId,
         worker_id: &str,
-        additional_duration: Duration,
+        ttl: Duration,
     ) -> Result<(), BackendError> {
         let key = Self::claim_key(instance_id, task_id);
         let mut claims = self.claims.write().map_err(Self::lock_error)?;
 
         if let Some(claim) = claims.get_mut(&key) {
             if claim.worker_id != worker_id {
-                return Err(BackendError::Backend(format!(
-                    "Claim owned by different worker: {}",
+                return Err(BackendError::ClaimLost(format!(
+                    "claim owned by {}",
                     claim.worker_id
                 )));
             }
 
-            if let Some(expires_at) = claim.expires_at {
-                let expires_datetime = chrono::DateTime::from_timestamp(expires_at as i64, 0)
-                    .ok_or_else(|| BackendError::Backend("Invalid timestamp".to_string()))?;
-                let new_expiry = expires_datetime
-                    .checked_add_signed(additional_duration)
+            if claim.expires_at.is_some() {
+                // Absolute renewal (now + ttl), matching the Postgres
+                // backend: additive extension would drift the lease ahead
+                // of the wall clock on every heartbeat tick.
+                let new_expiry = chrono::Utc::now()
+                    .checked_add_signed(ttl)
                     .ok_or_else(|| BackendError::Backend("Time overflow".to_string()))?;
                 claim.expires_at = Some(new_expiry.timestamp() as u64);
             }
@@ -969,7 +970,7 @@ mod tests {
                 "worker-2",
             )
             .await;
-        assert!(matches!(result, Err(BackendError::Backend(_))));
+        assert!(matches!(result, Err(BackendError::ClaimLost(_))));
     }
 
     #[tokio::test]
@@ -1014,11 +1015,18 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify extension by checking internal state
+        // Verify extension by checking internal state. Renewal is
+        // absolute (now + 300s): the new expiry must land beyond the
+        // original now+10s, but strictly before original+300s — an
+        // additive implementation would yield exactly original+300.
         let claims = backend.claims.read().unwrap();
         let key = InMemoryBackend::claim_key("workflow-1", &sayiir_core::TaskId::from("task-1"));
-        let extended_claim = claims.get(&key).unwrap();
-        assert!(extended_claim.expires_at.unwrap() > original_expiry);
+        let extended = claims.get(&key).unwrap().expires_at.unwrap();
+        assert!(extended > original_expiry);
+        assert!(
+            extended < original_expiry + 300,
+            "extend should renew to now+ttl (absolute), not expires_at+ttl (additive)"
+        );
     }
 
     #[tokio::test]
@@ -1045,7 +1053,7 @@ mod tests {
                 Duration::seconds(300),
             )
             .await;
-        assert!(matches!(result, Err(BackendError::Backend(_))));
+        assert!(matches!(result, Err(BackendError::ClaimLost(_))));
     }
 
     #[tokio::test]

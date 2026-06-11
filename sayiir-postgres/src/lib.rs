@@ -77,8 +77,8 @@ pub use wakeup::wakeup_drops_total;
 
 /// Per-instance child tables — i.e. everything that holds rows keyed by
 /// `instance_id` other than `sayiir_workflow_snapshots` itself. Source
-/// of truth for both `delete_snapshot`'s cleanup loop and the
-/// benchmark's `reset_sayiir_tables` truncate.
+/// of truth for `delete_snapshot` and the benchmark's
+/// `reset_sayiir_tables` truncate.
 pub const WORKFLOW_CHILD_TABLES: &[&str] = &[
     "sayiir_workflow_snapshot_history",
     "sayiir_workflow_tasks",
@@ -86,3 +86,17 @@ pub const WORKFLOW_CHILD_TABLES: &[&str] = &[
     "sayiir_workflow_signals",
     "sayiir_workflow_claims",
 ];
+
+/// Build the `d{i} AS (DELETE FROM {table} WHERE {predicate}),` CTE chain
+/// covering every [`WORKFLOW_CHILD_TABLES`] entry (trailing comma included).
+/// Table names come from the const, never from input.
+pub(crate) fn child_delete_ctes(predicate: &str) -> String {
+    use std::fmt::Write;
+    WORKFLOW_CHILD_TABLES
+        .iter()
+        .enumerate()
+        .fold(String::new(), |mut acc, (i, table)| {
+            let _ = write!(acc, "d{i} AS (DELETE FROM {table} WHERE {predicate}),");
+            acc
+        })
+}

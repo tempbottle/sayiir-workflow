@@ -166,6 +166,11 @@ pub enum BackendError {
     /// Cannot pause workflow in current state.
     #[error("Cannot pause workflow in state: {0}")]
     CannotPause(String),
+    /// A claim operation found the claim owned by another worker — the
+    /// caller's lease is structurally lost (stolen after expiry), not a
+    /// transient failure.
+    #[error("Claim lost: {0}")]
+    ClaimLost(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +224,16 @@ pub trait SnapshotStore: Send + Sync {
 // ---------------------------------------------------------------------------
 // SignalStore — cancel + pause via SignalKind
 // ---------------------------------------------------------------------------
+
+/// Outcome of a combined cancel-then-pause check (see
+/// [`SignalStore::check_control_signals`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlSignal {
+    /// A pending cancel was found and applied.
+    Cancelled,
+    /// A pending pause was found and applied.
+    Paused,
+}
 
 /// Signal storage for cancel and pause workflows.
 ///
@@ -320,6 +335,29 @@ pub trait SignalStore: SnapshotStore {
         }
     }
 
+    /// Check for a pending cancel, then a pending pause, applying the first
+    /// one found. Backends can override this to collapse the two checks into
+    /// fewer round-trips — the common case on the worker hot path is "no
+    /// signal at all", which an override can answer with a single probe.
+    fn check_control_signals(
+        &self,
+        instance_id: &str,
+        interrupted_at_task: Option<sayiir_core::TaskId>,
+    ) -> impl Future<Output = Result<Option<ControlSignal>, BackendError>> + Send {
+        async move {
+            if self
+                .check_and_cancel(instance_id, interrupted_at_task)
+                .await?
+            {
+                return Ok(Some(ControlSignal::Cancelled));
+            }
+            if self.check_and_pause(instance_id).await? {
+                return Ok(Some(ControlSignal::Paused));
+            }
+            Ok(None)
+        }
+    }
+
     /// Transition a paused workflow back to in-progress and return the updated snapshot.
     fn unpause(
         &self,
@@ -354,7 +392,12 @@ pub trait SignalStore: SnapshotStore {
 ///
 /// Only needed when using [`PooledWorker`](crate). Single-process backends
 /// (used with `CheckpointingRunner`) do not need to implement this.
-pub trait TaskClaimStore: Send + Sync {
+///
+/// `SnapshotStore` is a supertrait: claim stores hand out decoded
+/// snapshots (`find_available_tasks`) and gate snapshot writes on claim
+/// ownership (`save_snapshot_fenced`), so a claim store that can't store
+/// snapshots is incoherent.
+pub trait TaskClaimStore: SnapshotStore {
     /// Claim a task for execution by a worker node.
     ///
     /// Returns `Ok(Some(claim))` if successful, `Ok(None)` if already claimed.
@@ -374,13 +417,21 @@ pub trait TaskClaimStore: Send + Sync {
         worker_id: &str,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
-    /// Extend a task claim's expiration time.
+    /// Renew a task claim's lease.
+    ///
+    /// Sets the claim's expiration to `now + ttl` (absolute renewal), so a
+    /// claim expires one TTL after the holder's last successful heartbeat
+    /// regardless of how many heartbeats preceded it. Implementations must
+    /// NOT add `ttl` to the current expiration: under periodic heartbeats
+    /// that drifts the lease arbitrarily far ahead of the wall clock, and a
+    /// crashed holder's orphaned claim would block reclaim for much longer
+    /// than one TTL. Extending a no-TTL (eternal) claim is a silent no-op.
     fn extend_task_claim(
         &self,
         instance_id: &str,
         task_id: &sayiir_core::TaskId,
         worker_id: &str,
-        additional_duration: Duration,
+        ttl: Duration,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Find available tasks across all workflow instances.
@@ -431,6 +482,26 @@ pub trait TaskClaimStore: Send + Sync {
         _hint: &TaskWakeupHint,
     ) -> impl Future<Output = Result<Option<AvailableTask>, BackendError>> + Send {
         async move { Ok(None) }
+    }
+
+    /// Save `snapshot` only while `worker_id` still holds a live claim on
+    /// `(instance_id, task_id)`. Returns `Ok(false)` without writing when
+    /// the claim is gone — a worker whose lease expired mid-execution must
+    /// not overwrite the new claimant's progress.
+    ///
+    /// The default is an unfenced save (today's behaviour) for backends
+    /// without claim-aware transactions.
+    fn save_snapshot_fenced(
+        &self,
+        snapshot: &mut WorkflowSnapshot,
+        task_id: &sayiir_core::TaskId,
+        worker_id: &str,
+    ) -> impl Future<Output = Result<bool, BackendError>> + Send {
+        let _ = (task_id, worker_id);
+        async move {
+            self.save_snapshot(snapshot).await?;
+            Ok(true)
+        }
     }
 }
 

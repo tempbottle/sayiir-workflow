@@ -42,6 +42,9 @@ use crate::driver::submit_bounded;
 use crate::metrics::{COMPLETION_TX, PICKUP_TX, record_completion, record_pickup};
 use crate::report::LatencyBlock;
 
+/// In-flight task cap per bench worker.
+const WORKER_PARALLELISM: std::num::NonZeroUsize = std::num::NonZeroUsize::new(2).unwrap();
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct State {
     id: u64,
@@ -261,7 +264,7 @@ pub async fn run(ctx: crate::CommonContext, args: SignalDrivenArgs) -> Result<()
     }
 
     let total_elapsed = bench_start.elapsed();
-    let sustained = best_window(&samples, Duration::from_secs(60));
+    let sustained = crate::report::best_window_rate(&samples, Duration::from_mins(1));
     let wakeup_drops = wakeup_drops_total().saturating_sub(wakeup_drops_baseline);
 
     let mut latency = BTreeMap::new();
@@ -339,7 +342,7 @@ async fn build_pool(url: &str, concurrency: usize, workers: usize) -> Result<sql
     let target = (concurrency + workers * 4 + 32) as u32;
     PgPoolOptions::new()
         .max_connections(target)
-        .acquire_timeout(Duration::from_secs(60))
+        .acquire_timeout(Duration::from_mins(1))
         .connect(url)
         .await
         .with_context(|| format!("connecting to postgres at {url}"))
@@ -378,43 +381,12 @@ fn spawn_workers(
         let worker_backend = backend.clone();
         let registry = sayiir_core::registry::TaskRegistry::new();
         let worker = PooledWorker::new(format!("sd-worker-{i}"), worker_backend, registry)
-            .with_claim_ttl(Some(Duration::from_secs(120)))
-            .with_batch_size(batch_size);
+            .with_claim_ttl(Some(Duration::from_mins(2)))
+            .with_batch_size(batch_size)
+            .with_max_concurrent_tasks(WORKER_PARALLELISM);
         let entries = vec![(def_hash.clone(), Arc::clone(&workflow))];
         handles.push(worker.spawn(poll, entries));
     }
     handles
 }
 
-fn best_window(samples: &[(Duration, usize)], target: Duration) -> f64 {
-    if samples.len() < 2 {
-        return match samples.first() {
-            Some((dt, n)) if !dt.is_zero() => *n as f64 / dt.as_secs_f64(),
-            _ => 0.0,
-        };
-    }
-    let total = samples.last().unwrap().0.saturating_sub(samples[0].0);
-    let window = if total < target { total } else { target };
-    if window.is_zero() {
-        return 0.0;
-    }
-    let mut best = 0.0f64;
-    let mut left = 0usize;
-    for right in 0..samples.len() {
-        while samples[right].0.saturating_sub(samples[left].0) > window {
-            left += 1;
-        }
-        let dt = samples[right]
-            .0
-            .saturating_sub(samples[left].0)
-            .as_secs_f64();
-        if dt > 0.0 {
-            let dn = (samples[right].1 - samples[left].1) as f64;
-            let rate = dn / dt;
-            if rate > best {
-                best = rate;
-            }
-        }
-    }
-    best
-}

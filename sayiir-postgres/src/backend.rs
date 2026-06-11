@@ -18,9 +18,11 @@ const MIN_PG_MAJOR_VERSION: u32 = 13;
 
 /// Connection-pool configuration for the Postgres backend.
 ///
-/// All fields are optional; unset fields fall back to sqlx defaults
-/// (e.g. `max_connections = 10`, no idle/lifetime caps, no session-level
-/// timeouts).
+/// All fields are optional; unset fields fall back to the defaults noted
+/// per field. `max_connections` defaults to 20 and `min_connections` to 2
+/// (warm connections avoid cold-start latency after idle periods); size
+/// `max_connections` to at least `workers × concurrent tasks + a few` for
+/// the signal/claim transactions.
 ///
 /// `statement_timeout` and `idle_in_transaction_session_timeout` are applied
 /// at the *session* level via `SET` on every newly-acquired connection, so
@@ -31,9 +33,9 @@ const MIN_PG_MAJOR_VERSION: u32 = 13;
 /// to [`PostgresBackend::connect_with_options`].
 #[derive(Debug, Clone, Default)]
 pub struct PoolOptions {
-    /// Maximum number of connections held by the pool. sqlx default: 10.
+    /// Maximum number of connections held by the pool. Default: 20.
     pub max_connections: Option<u32>,
-    /// Minimum number of connections kept warm. sqlx default: 0.
+    /// Minimum number of connections kept warm. Default: 2.
     pub min_connections: Option<u32>,
     /// Time to wait for a connection from the pool before erroring out.
     pub acquire_timeout: Option<Duration>,
@@ -115,13 +117,9 @@ where
         url: &str,
         options: PoolOptions,
     ) -> Result<Self, BackendError> {
-        let mut builder = PgPoolOptions::new();
-        if let Some(n) = options.max_connections {
-            builder = builder.max_connections(n);
-        }
-        if let Some(n) = options.min_connections {
-            builder = builder.min_connections(n);
-        }
+        let mut builder = PgPoolOptions::new()
+            .max_connections(options.max_connections.unwrap_or(20))
+            .min_connections(options.min_connections.unwrap_or(2));
         if let Some(d) = options.acquire_timeout {
             builder = builder.acquire_timeout(d);
         }
@@ -167,7 +165,9 @@ where
         }
 
         let pool = builder.connect(url).await.map_err(PgError)?;
-        Self::init(pool).await
+        // The listener gets its own connection (from the url) so it doesn't
+        // permanently occupy a pool slot.
+        Self::init(pool, Some(url.to_string())).await
     }
 
     /// Use an existing connection pool and run migrations.
@@ -176,14 +176,18 @@ where
     /// standard pool knobs — this method is meant for callers who need full
     /// control over the sqlx `PgPool` (custom TLS, listeners, etc.).
     ///
+    /// Note: with no URL available, the LISTEN/NOTIFY listener holds one
+    /// pooled connection for the backend's lifetime — size the pool
+    /// accordingly.
+    ///
     /// # Errors
     ///
     /// Returns an error if the migration fails.
     pub async fn connect_with(pool: PgPool) -> Result<Self, BackendError> {
-        Self::init(pool).await
+        Self::init(pool, None).await
     }
 
-    async fn init(pool: PgPool) -> Result<Self, BackendError> {
+    async fn init(pool: PgPool, url: Option<String>) -> Result<Self, BackendError> {
         check_pg_version(&pool).await?;
 
         tracing::info!("running postgres migrations");
@@ -192,7 +196,7 @@ where
             .await
             .map_err(|e| BackendError::Backend(format!("migration failed: {e}")))?;
 
-        let wakeup = WakeupListener::spawn(pool.clone());
+        let wakeup = WakeupListener::spawn(pool.clone(), url);
 
         tracing::info!("postgres backend ready");
         Ok(Self {

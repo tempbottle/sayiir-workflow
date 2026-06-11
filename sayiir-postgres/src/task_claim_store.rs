@@ -230,9 +230,13 @@ where
         instance_id: &str,
         task_id: &sayiir_core::TaskId,
         worker_id: &str,
-        additional_duration: Duration,
+        ttl: Duration,
     ) -> Result<(), BackendError> {
-        // Heartbeat. A no-TTL claim is eternal-until-released; mirror
+        // Heartbeat. Renewal is absolute (`now() + ttl`), not additive:
+        // adding to `expires_at` would let the lease drift ahead of the
+        // wall clock by ~ttl per tick, so an orphaned claim from a
+        // crashed worker would block reclaim for far longer than one
+        // TTL. A no-TTL claim is eternal-until-released; mirror
         // the in-memory backend by silently no-op'ing the extension in
         // that case (no `COALESCE` — that would *introduce* a TTL).
         // When the row exists with our worker AND our task_id but
@@ -250,7 +254,7 @@ where
         let row = sqlx::query(
             "WITH upd AS (
                  UPDATE sayiir_workflow_claims
-                 SET expires_at = expires_at + $3
+                 SET expires_at = now() + $3
                  WHERE instance_id = $1
                    AND worker_id = $2
                    AND task_id = $4
@@ -269,7 +273,7 @@ where
         )
         .bind(instance_id)
         .bind(worker_id)
-        .bind(additional_duration)
+        .bind(ttl)
         .bind(task_id.as_bytes().as_slice())
         .fetch_one(&self.pool)
         .await
@@ -292,72 +296,106 @@ where
         aging_interval: Duration,
         worker_tags: &[String],
     ) -> Result<Vec<AvailableTask>, BackendError> {
-        // Expired claims are picked up implicitly via the eligibility
-        // predicate's `c.expires_at > now()` check — no explicit
-        // garbage-collect needed here.
+        // Expired claims are reclaimable via the eligibility predicate's
+        // `c.expires_at > now()` check; dead rows linger until the next
+        // successful claim on the instance overwrites them (steal path).
 
         let aging_secs = (aging_interval.num_milliseconds() as f64 / 1000.0).max(1.0);
         let worker_tags_vec: Vec<&str> = worker_tags.iter().map(String::as_str).collect();
         let tag_filter = if worker_tags.is_empty() {
             ""
         } else {
-            "AND s.task_tags <@ $3"
+            "AND s.task_tags <@ $2"
         };
 
+        // Two LIMIT-bounded index-order arms instead of one full-set sort.
+        // The old single query ordered by the aging expression
+        // `(task_priority - age/interval)`, which is non-SARGable: every
+        // poll tick sorted ALL InProgress rows (~190ms at 200k rows).
+        // Each arm below is satisfied by an index in order — arm 1 by
+        // idx_snapshots_inprogress (task_priority, updated_at), arm 2 by
+        // idx_snapshots_inprogress_updated (updated_at) — so PG stops
+        // after `limit` rows per arm. The exact aging score is then
+        // computed in Rust over <= 2*limit candidates.
+        //
+        // Aging becomes approximate: the true score-optimal row is almost
+        // always in one of the two arms (best-priority or oldest), and the
+        // oldest-first arm guarantees starved rows are eventually offered,
+        // which is what aging exists for.
+        //
         // `FOR UPDATE OF s SKIP LOCKED` keeps statement-scope dedup —
         // two pollers running simultaneously skip each other's rows
-        // instead of returning the full set in duplicate. The actual
+        // instead of returning the full set in duplicate. Both arms run
+        // in the same transaction, so arm 2 sees arm 1's own locks as its
+        // own and may return the same row; DISTINCT ON dedups. The actual
         // claim race is resolved by the conditional UPDATE in
-        // `claim_task` plus its advisory lock.
-        //
-        // The inner subquery filters, sorts and locks snapshots without
-        // pulling the 1 KB history blob through the sort. JOINing
-        // history outside the LIMIT means only `$limit` blob rows are
-        // ever materialised — at 200k InProgress rows this drops
-        // EXPLAIN ANALYZE from ~615ms / 214 MB temp-file spill down to
-        // ~190ms / 11 MB on the bench fixture. The order-by expression
-        // is non-SARGable either way, but sorting narrow rows
-        // (instance_id + i32 + nullable text) keeps the spill (if any)
-        // small enough to stay inside work_mem on a reasonably tuned
-        // PG. `FOR UPDATE OF s SKIP LOCKED` stays scoped to the
-        // snapshot row; the outer history join is a non-locking read.
-        let query = format!(
-            "SELECT r.instance_id, h.data, r.trace_parent
-             FROM (
-                 SELECT s.instance_id, s.history_version, s.trace_parent
-                 FROM sayiir_workflow_snapshots s
-                 WHERE s.status = 'InProgress'
+        // `claim_task` plus its advisory lock. The history JOIN stays
+        // outside the locking subqueries so only candidate blob rows are
+        // materialised.
+        let dispatchable = "s.status = 'InProgress'
                    AND (
                        s.position_kind = 'AtTask'
                        OR (s.position_kind = 'AtDelay'
                            AND s.delay_wake_at IS NOT NULL
                            AND s.delay_wake_at <= now())
-                   )
-                   AND {ELIGIBILITY_PREDICATE}
-                   {tag_filter}
-                 ORDER BY
-                   (s.task_priority - EXTRACT(EPOCH FROM (now() - s.updated_at)) / $2) ASC,
-                   s.updated_at ASC
-                 LIMIT $1
-                 FOR UPDATE OF s SKIP LOCKED
+                   )";
+        let arm = |order_by: &str, alias: &str| {
+            format!(
+                "SELECT * FROM
+                     (SELECT s.instance_id, s.history_version, s.trace_parent,
+                             s.task_priority, s.updated_at
+                      FROM sayiir_workflow_snapshots s
+                      WHERE {dispatchable}
+                        AND {ELIGIBILITY_PREDICATE}
+                        {tag_filter}
+                      ORDER BY {order_by}
+                      LIMIT $1
+                      FOR UPDATE OF s SKIP LOCKED) {alias}"
+            )
+        };
+        let arm_priority = arm("s.task_priority ASC, s.updated_at ASC", "arm_priority");
+        let arm_oldest = arm("s.updated_at ASC", "arm_oldest");
+        let query = format!(
+            "SELECT r.instance_id, r.task_priority, r.updated_at, h.data, r.trace_parent
+             FROM (
+                 SELECT DISTINCT ON (u.instance_id)
+                        u.instance_id, u.history_version, u.trace_parent,
+                        u.task_priority, u.updated_at
+                 FROM ({arm_priority} UNION ALL {arm_oldest}) u
+                 ORDER BY u.instance_id
              ) r
              JOIN sayiir_workflow_snapshot_history h
                ON h.instance_id = r.instance_id AND h.version = r.history_version"
         );
 
-        let mut q = sqlx::query(&query)
-            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-            .bind(aging_secs);
+        let mut q = sqlx::query(&query).bind(i64::try_from(limit).unwrap_or(i64::MAX));
         if !worker_tags.is_empty() {
             q = q.bind(&worker_tags_vec);
         }
         let rows = q.fetch_all(&self.pool).await.map_err(PgError)?;
 
+        // Score on the narrow columns first and truncate to `limit` —
+        // the two arms can return up to 2*limit candidates, and only the
+        // survivors are worth the blob decode + outputs hydration below.
+        let now = Utc::now();
+        let mut scored: Vec<(f64, &sqlx::postgres::PgRow)> = rows
+            .iter()
+            .map(|row| {
+                let priority: i16 = row.get("task_priority");
+                let updated_at: chrono::DateTime<Utc> = row.get("updated_at");
+                let age_secs = (now - updated_at).num_milliseconds() as f64 / 1000.0;
+                (f64::from(priority) - age_secs / aging_secs, row)
+            })
+            .collect();
+        scored.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+        scored.truncate(limit);
+
         // Decode-then-hydrate: outputs no longer live in the snapshot
         // blob, so batch-fetch them from `sayiir_workflow_tasks` once for
-        // every candidate before the match loop touches `completed_tasks`.
-        let mut decoded: Vec<WorkflowSnapshot> = Vec::with_capacity(rows.len());
-        for row in &rows {
+        // every surviving candidate before the match loop touches
+        // `completed_tasks`.
+        let mut decoded: Vec<WorkflowSnapshot> = Vec::with_capacity(scored.len());
+        for (_, row) in &scored {
             let raw: &[u8] = row.get("data");
             let mut snapshot = self.decode(raw)?;
             snapshot.trace_parent = row.get("trace_parent");
@@ -544,6 +582,58 @@ where
 
         Ok(build_available_task(snapshot, hint_task_id))
     }
+
+    #[tracing::instrument(
+        name = "db.save_snapshot_fenced",
+        skip(self, snapshot),
+        fields(
+            db.system = "postgresql",
+            instance_id = %snapshot.instance_id,
+            status = %snapshot.state.as_ref(),
+        ),
+        err(level = tracing::Level::ERROR),
+    )]
+    async fn save_snapshot_fenced(
+        &self,
+        snapshot: &mut WorkflowSnapshot,
+        task_id: &sayiir_core::TaskId,
+        worker_id: &str,
+    ) -> Result<bool, BackendError> {
+        // Fencing: lock our claim row first. FOR UPDATE makes a concurrent
+        // expired-claim steal (claim_task's ON CONFLICT UPDATE) wait until
+        // this commit, so "claim verified live" holds for the whole save.
+        // No live claim row for (instance, task, us) → the lease expired or
+        // was stolen; refuse the write so a slow worker can't clobber the
+        // new claimant's progress.
+        let mut tx = self.pool.begin().await.map_err(PgError)?;
+        let owned = sqlx::query(
+            "SELECT 1 FROM sayiir_workflow_claims
+             WHERE instance_id = $1 AND worker_id = $2 AND task_id = $3
+               AND (expires_at IS NULL OR expires_at > now())
+             FOR UPDATE",
+        )
+        .bind(&*snapshot.instance_id)
+        .bind(worker_id)
+        .bind(task_id.as_bytes().as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(PgError)?;
+
+        if owned.is_none() {
+            tx.rollback().await.map_err(PgError)?;
+            tracing::warn!(
+                instance_id = %snapshot.instance_id,
+                %task_id,
+                worker_id,
+                "claim no longer held; snapshot save fenced off"
+            );
+            return Ok(false);
+        }
+
+        self.exec_save_snapshot(&mut *tx, snapshot).await?;
+        tx.commit().await.map_err(PgError)?;
+        Ok(true)
+    }
 }
 
 /// Decode the `(done, owner, current_task_id)` shape returned by the
@@ -578,8 +668,8 @@ fn disambiguate_writeback(
         return Err(BackendError::NotFound(format!("{instance_id}:{task_id}")));
     };
     if owner != worker_id {
-        return Err(BackendError::Backend(format!(
-            "Claim owned by different worker: {owner}"
+        return Err(BackendError::ClaimLost(format!(
+            "claim on {instance_id}:{task_id} owned by {owner}"
         )));
     }
     // owner == self: verify the row's task_id matches the request.

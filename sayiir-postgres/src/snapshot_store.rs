@@ -6,25 +6,25 @@ use sayiir_persistence::{BackendError, SnapshotStore};
 use sqlx::Row;
 
 use crate::backend::PostgresBackend;
-use crate::error::PgError;
+use crate::error::{PgError, with_transient_retry};
 use crate::wakeup::{TASK_READY_CHANNEL, build_task_ready_payload};
 
-impl<C> SnapshotStore for PostgresBackend<C>
+impl<C> PostgresBackend<C>
 where
     C: codec::SnapshotCodec,
 {
-    #[tracing::instrument(
-        name = "db.save_snapshot",
-        skip(self, snapshot),
-        fields(
-            db.system = "postgresql",
-            instance_id = %snapshot.instance_id,
-            status = %snapshot.state.as_ref(),
-        ),
-        err(level = tracing::Level::ERROR),
-    )]
+    /// The full save-snapshot CTE, generic over the executor so it can run
+    /// either directly on the pool or inside a fencing transaction (see
+    /// `save_snapshot_fenced`).
     #[allow(clippy::too_many_lines)]
-    async fn save_snapshot(&self, snapshot: &mut WorkflowSnapshot) -> Result<(), BackendError> {
+    pub(crate) async fn exec_save_snapshot<'e, E>(
+        &self,
+        executor: E,
+        snapshot: &mut WorkflowSnapshot,
+    ) -> Result<(), BackendError>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
         tracing::debug!("saving snapshot");
         let (data, data_hash) = self.encode_blob_preserving(snapshot)?;
         let status = snapshot.state.as_ref();
@@ -186,7 +186,7 @@ where
             .bind(notify_payload.as_deref()) // $17
             .bind(last_completed_slice) // $18
             .bind(last_completed_output_slice) // $19
-            .execute(&self.pool)
+            .execute(executor)
             .await
             .map_err(PgError)?;
         // The last completed output (if any) is now durable in
@@ -196,19 +196,14 @@ where
         Ok(())
     }
 
-    #[tracing::instrument(
-        name = "db.save_task_result",
-        skip(self, output),
-        fields(db.system = "postgresql"),
-        err(level = tracing::Level::ERROR),
-    )]
-    async fn save_task_result(
+    /// One attempt of `save_task_result`; retried on transient errors by
+    /// the trait method.
+    async fn save_task_result_once(
         &self,
         instance_id: &str,
         task_id: &sayiir_core::TaskId,
         output: bytes::Bytes,
-    ) -> Result<(), BackendError> {
-        tracing::debug!("saving task result");
+    ) -> Result<(), crate::error::TxError> {
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
         // FOR UPDATE on s serialises read-modify-write across this path
@@ -293,6 +288,46 @@ where
         tx.commit().await.map_err(PgError)?;
         Ok(())
     }
+}
+
+impl<C> SnapshotStore for PostgresBackend<C>
+where
+    C: codec::SnapshotCodec,
+{
+    #[tracing::instrument(
+        name = "db.save_snapshot",
+        skip(self, snapshot),
+        fields(
+            db.system = "postgresql",
+            instance_id = %snapshot.instance_id,
+            status = %snapshot.state.as_ref(),
+        ),
+        err(level = tracing::Level::ERROR),
+    )]
+    async fn save_snapshot(&self, snapshot: &mut WorkflowSnapshot) -> Result<(), BackendError> {
+        self.exec_save_snapshot(&self.pool, snapshot).await
+    }
+
+    #[tracing::instrument(
+        name = "db.save_task_result",
+        skip(self, output),
+        fields(db.system = "postgresql"),
+        err(level = tracing::Level::ERROR),
+    )]
+    async fn save_task_result(
+        &self,
+        instance_id: &str,
+        task_id: &sayiir_core::TaskId,
+        output: bytes::Bytes,
+    ) -> Result<(), BackendError> {
+        tracing::debug!("saving task result");
+        // The transaction rolls back on failure, so re-running on a
+        // serialization failure / deadlock / connection drop is safe.
+        with_transient_retry("save_task_result", || {
+            self.save_task_result_once(instance_id, task_id, output.clone())
+        })
+        .await
+    }
 
     #[tracing::instrument(
         name = "db.load_snapshot",
@@ -333,25 +368,21 @@ where
     async fn delete_snapshot(&self, instance_id: &str) -> Result<(), BackendError> {
         tracing::debug!("deleting snapshot");
 
-        let mut tx = self.pool.begin().await.map_err(PgError)?;
-
-        for table in crate::WORKFLOW_CHILD_TABLES {
-            sqlx::query(&format!("DELETE FROM {table} WHERE instance_id = $1"))
-                .bind(instance_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(PgError)?;
-        }
-
-        let result = sqlx::query("DELETE FROM sayiir_workflow_snapshots WHERE instance_id = $1")
+        // One round-trip: child-table DELETEs and the snapshot DELETE are
+        // sibling DML CTEs (always executed), atomic without an explicit tx.
+        let child_ctes = crate::child_delete_ctes("instance_id = $1");
+        let query = format!(
+            "WITH {child_ctes}
+             del AS (DELETE FROM sayiir_workflow_snapshots WHERE instance_id = $1 RETURNING 1)
+             SELECT EXISTS (SELECT 1 FROM del) AS deleted"
+        );
+        let row = sqlx::query(&query)
             .bind(instance_id)
-            .execute(&mut *tx)
+            .fetch_one(&self.pool)
             .await
             .map_err(PgError)?;
 
-        tx.commit().await.map_err(PgError)?;
-
-        if result.rows_affected() == 0 {
+        if !row.get::<bool, _>("deleted") {
             return Err(BackendError::NotFound(instance_id.to_string()));
         }
         Ok(())
@@ -365,11 +396,40 @@ where
     )]
     async fn list_snapshots(&self) -> Result<Vec<String>, BackendError> {
         tracing::debug!("listing snapshots");
-        let rows = sqlx::query("SELECT instance_id FROM sayiir_workflow_snapshots")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(PgError)?;
+        let rows =
+            sqlx::query("SELECT instance_id FROM sayiir_workflow_snapshots ORDER BY instance_id")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(PgError)?;
 
+        Ok(rows.iter().map(|r| r.get("instance_id")).collect())
+    }
+}
+
+impl<C> PostgresBackend<C> {
+    /// Keyset-paginated variant of `list_snapshots` for large tables:
+    /// returns up to `limit` instance ids strictly after `after` (pass the
+    /// last id of the previous page; `None` starts from the beginning).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub async fn list_snapshots_page(
+        &self,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<String>, BackendError> {
+        let rows = sqlx::query(
+            "SELECT instance_id FROM sayiir_workflow_snapshots
+             WHERE ($1::text IS NULL OR instance_id > $1)
+             ORDER BY instance_id
+             LIMIT $2",
+        )
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(PgError)?;
         Ok(rows.iter().map(|r| r.get("instance_id")).collect())
     }
 }

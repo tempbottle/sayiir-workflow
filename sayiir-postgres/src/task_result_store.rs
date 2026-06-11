@@ -28,6 +28,15 @@ where
         instance_id: &str,
         task_id: &sayiir_core::TaskId,
     ) -> Result<Option<bytes::Bytes>, BackendError> {
+        // Fast path: outputs live denormalised in sayiir_workflow_tasks —
+        // a single PK lookup, no blob decode. The snapshot/history walk
+        // below only runs for results that never reached the sidecar.
+        if let Some(output) =
+            crate::history::fetch_task_output(&self.pool, instance_id, task_id).await?
+        {
+            return Ok(Some(output));
+        }
+
         let snapshot = self.load_snapshot(instance_id).await?;
 
         // Non-terminal states carry completed_tasks directly.

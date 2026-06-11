@@ -36,6 +36,9 @@ use crate::flow::PyWorkflow;
 ///         worst-case latency for events NOTIFY can't cover (delay
 ///         expiry, expired claims, lost LISTEN connections).
 ///     `claim_ttl_secs`: Task claim TTL in seconds (default: 300.0)
+///     `max_concurrent_tasks`: How many tasks this worker runs at once
+///         (default: 1). Each in-flight task has its own claim and
+///         heartbeat; I/O-bound throughput scales with this knob.
 #[pyclass]
 pub struct PyWorker {
     worker_id: String,
@@ -43,19 +46,21 @@ pub struct PyWorker {
     postgres: Option<(String, PoolOptions)>,
     poll_interval: Duration,
     claim_ttl: Duration,
+    max_concurrent_tasks: Option<usize>,
     tags: Vec<String>,
 }
 
 #[pymethods]
 impl PyWorker {
     #[new]
-    #[pyo3(signature = (worker_id, backend, poll_interval_secs=30.0, claim_ttl_secs=300.0, tags=None))]
+    #[pyo3(signature = (worker_id, backend, poll_interval_secs=30.0, claim_ttl_secs=300.0, tags=None, max_concurrent_tasks=None))]
     fn new(
         worker_id: String,
         backend: &Bound<'_, PyAny>,
         poll_interval_secs: f64,
         claim_ttl_secs: f64,
         tags: Option<Vec<String>>,
+        max_concurrent_tasks: Option<usize>,
     ) -> PyResult<Self> {
         let (backend_kind, postgres) = extract_backend(backend)?;
         Ok(Self {
@@ -64,6 +69,7 @@ impl PyWorker {
             postgres,
             poll_interval: Duration::from_secs_f64(poll_interval_secs),
             claim_ttl: Duration::from_secs_f64(claim_ttl_secs),
+            max_concurrent_tasks,
             tags: tags.unwrap_or_default(),
         })
     }
@@ -126,6 +132,7 @@ impl PyWorker {
         };
         let worker_id = self.worker_id.clone();
         let claim_ttl = self.claim_ttl;
+        let max_concurrent_tasks = self.max_concurrent_tasks;
         let poll_interval = self.poll_interval;
         let tags = self.tags.clone();
 
@@ -164,9 +171,13 @@ impl PyWorker {
                     ),
                 };
 
-                let worker = PooledWorker::new(&worker_id, backend_kind, TaskRegistry::default())
-                    .with_claim_ttl(Some(claim_ttl))
-                    .with_tags(tags);
+                let mut worker =
+                    PooledWorker::new(&worker_id, backend_kind, TaskRegistry::default())
+                        .with_claim_ttl(Some(claim_ttl))
+                        .with_tags(tags);
+                if let Some(max) = max_concurrent_tasks.and_then(std::num::NonZeroUsize::new) {
+                    worker = worker.with_max_concurrent_tasks(max);
+                }
 
                 // We need to enter the runtime context before spawning.
                 let _guard = runtime.enter();
