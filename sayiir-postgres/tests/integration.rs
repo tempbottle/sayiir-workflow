@@ -739,7 +739,7 @@ async fn release_task_claim_wrong_worker() {
     let result = backend
         .release_task_claim("wf-1", &sayiir_core::TaskId::from("task-1"), "worker-2")
         .await;
-    assert!(matches!(result, Err(BackendError::Backend(_))));
+    assert!(matches!(result, Err(BackendError::ClaimLost(_))));
 }
 
 #[tokio::test]
@@ -815,7 +815,7 @@ async fn extend_task_claim_wrong_worker() {
             Duration::seconds(300),
         )
         .await;
-    assert!(matches!(result, Err(BackendError::Backend(_))));
+    assert!(matches!(result, Err(BackendError::ClaimLost(_))));
 }
 
 #[tokio::test]
