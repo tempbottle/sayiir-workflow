@@ -625,6 +625,27 @@ where
         }
     }
 
+    /// Wait until the in-flight set has a free slot, reaping finished
+    /// tasks. `Break` means shutdown was requested while waiting.
+    async fn acquire_slot(
+        &self,
+        inflight: &mut tokio::task::JoinSet<()>,
+        cmd_rx: &mut mpsc::Receiver<WorkerCommand>,
+        max_inflight: usize,
+    ) -> std::ops::ControlFlow<()> {
+        loop {
+            while inflight.try_join_next().is_some() {}
+            if inflight.len() < max_inflight {
+                return std::ops::ControlFlow::Continue(());
+            }
+            tokio::select! {
+                biased;
+                _ = cmd_rx.recv() => return std::ops::ControlFlow::Break(()),
+                _ = inflight.join_next() => {}
+            }
+        }
+    }
+
     /// Fetch up to `limit` dispatchable tasks, logging (not propagating)
     /// backend errors so a transient DB outage doesn't kill the worker.
     async fn poll_batch(&self, limit: usize) -> Vec<AvailableTask> {
@@ -705,10 +726,20 @@ where
                 }
             }
 
-            // Fetch up to the free slots — `batch_size` only seeds the
-            // default concurrency; the in-flight cap is the real budget.
-            let limit = max_inflight - inflight.len();
+            // Prefetch up to `batch_size` candidates (claims resolve any
+            // cross-worker races on them) so one dispatch scan amortises
+            // across many executions, but never fewer than the free
+            // slots so concurrency-only configs still fill up. Spawning
+            // is gated on slot availability below.
+            let limit = self.batch_size.get().max(max_inflight - inflight.len());
             for task in self.poll_batch(limit).await {
+                if self
+                    .acquire_slot(&mut inflight, &mut cmd_rx, max_inflight)
+                    .await
+                    .is_break()
+                {
+                    return self.drain_inflight(inflight).await;
+                }
                 if let Ok(WorkerCommand::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) =
                     cmd_rx.try_recv()
                 {
@@ -1148,10 +1179,20 @@ where
                 continue;
             }
 
-            // Fetch up to the free slots — `batch_size` only seeds the
-            // default concurrency; the in-flight cap is the real budget.
-            let limit = max_inflight - inflight.len();
+            // Prefetch up to `batch_size` candidates (claims resolve any
+            // cross-worker races on them) so one dispatch scan amortises
+            // across many executions, but never fewer than the free
+            // slots so concurrency-only configs still fill up. Spawning
+            // is gated on slot availability below.
+            let limit = self.batch_size.get().max(max_inflight - inflight.len());
             for task in self.poll_batch(limit).await {
+                if self
+                    .acquire_slot(&mut inflight, &mut cmd_rx, max_inflight)
+                    .await
+                    .is_break()
+                {
+                    return self.drain_inflight(inflight).await;
+                }
                 if let Ok(WorkerCommand::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) =
                     cmd_rx.try_recv()
                 {

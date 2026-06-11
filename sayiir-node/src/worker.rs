@@ -128,16 +128,18 @@ impl NapiWorker {
             })
             .collect();
 
-        // Build a ThreadsafeFunction from the JS executor.
-        let tsfn: ThreadsafeFunction<String, Promise<String>, _, _, true> = task_executor
+        // Build a ThreadsafeFunction from the JS executor. NOT callee-handled:
+        // the JS dispatcher's signature is `(payload) => Promise<string>`, so it
+        // must receive the payload directly, not Node-style `(err, payload)`.
+        let tsfn: ThreadsafeFunction<String, Promise<String>, _, _, false> = task_executor
             .build_threadsafe_function()
-            .callee_handled::<true>()
+            .callee_handled::<false>()
             .build()?;
 
         let tsfn = Arc::new(tsfn);
 
         let executor: ExternalTaskExecutor = Arc::new(move |task_id: &str, input: Bytes| {
-            let tsfn: Arc<ThreadsafeFunction<String, Promise<String>, _, _, true>> =
+            let tsfn: Arc<ThreadsafeFunction<String, Promise<String>, _, _, false>> =
                 Arc::clone(&tsfn);
             let task_id = task_id.to_string();
             let input_json = String::from_utf8_lossy(&input).into_owned();
@@ -150,7 +152,7 @@ impl NapiWorker {
                 })
                 .to_string();
                 let output_json: String = tsfn
-                    .call_async(Ok(payload))
+                    .call_async(payload)
                     .await
                     .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })?
                     .await
