@@ -423,8 +423,8 @@ impl TaskClaimStore for InMemoryBackend {
 
         if let Some(claim) = claims.get(&key) {
             if claim.worker_id != worker_id {
-                return Err(BackendError::Backend(format!(
-                    "Claim owned by different worker: {}",
+                return Err(BackendError::ClaimLost(format!(
+                    "claim owned by {}",
                     claim.worker_id
                 )));
             }
@@ -450,8 +450,8 @@ impl TaskClaimStore for InMemoryBackend {
 
         if let Some(claim) = claims.get_mut(&key) {
             if claim.worker_id != worker_id {
-                return Err(BackendError::Backend(format!(
-                    "Claim owned by different worker: {}",
+                return Err(BackendError::ClaimLost(format!(
+                    "claim owned by {}",
                     claim.worker_id
                 )));
             }
@@ -969,7 +969,7 @@ mod tests {
                 "worker-2",
             )
             .await;
-        assert!(matches!(result, Err(BackendError::Backend(_))));
+        assert!(matches!(result, Err(BackendError::ClaimLost(_))));
     }
 
     #[tokio::test]
@@ -1045,7 +1045,7 @@ mod tests {
                 Duration::seconds(300),
             )
             .await;
-        assert!(matches!(result, Err(BackendError::Backend(_))));
+        assert!(matches!(result, Err(BackendError::ClaimLost(_))));
     }
 
     #[tokio::test]

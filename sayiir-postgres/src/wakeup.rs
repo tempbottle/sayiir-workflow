@@ -83,19 +83,36 @@ pub(crate) fn build_task_ready_payload(
     )
 }
 
+/// Dedup key for in-flight hints: one queued hint per (instance, task).
+type PendingKey = (String, [u8; 32]);
+type PendingSet = std::sync::Arc<std::sync::Mutex<std::collections::HashSet<PendingKey>>>;
+
 pub(crate) struct WakeupListener {
     rx: flume::Receiver<TaskWakeupHint>,
+    pending: PendingSet,
     shutdown: CancellationToken,
 }
 
 impl WakeupListener {
     /// Spawn the listener task and return a shared handle. Must be called
-    /// from a tokio runtime.
-    pub(crate) fn spawn(pool: PgPool) -> std::sync::Arc<Self> {
+    /// from a tokio runtime. When `url` is provided, the listener opens its
+    /// own connection instead of permanently occupying a pool slot.
+    pub(crate) fn spawn(pool: PgPool, url: Option<String>) -> std::sync::Arc<Self> {
         let (tx, rx) = flume::bounded(WAKEUP_CHANNEL_CAPACITY);
         let shutdown = CancellationToken::new();
-        tokio::spawn(run_listener(pool, tx, shutdown.clone()));
-        std::sync::Arc::new(Self { rx, shutdown })
+        let pending: PendingSet = std::sync::Arc::default();
+        tokio::spawn(run_listener(
+            pool,
+            url,
+            tx,
+            std::sync::Arc::clone(&pending),
+            shutdown.clone(),
+        ));
+        std::sync::Arc::new(Self {
+            rx,
+            pending,
+            shutdown,
+        })
     }
 
     /// Wait for the next wakeup or until `timeout` elapses.
@@ -106,7 +123,12 @@ impl WakeupListener {
     /// receiver without any mutex — fan-in is mpmc.
     pub(crate) async fn wait(&self, timeout: std::time::Duration) -> Option<TaskWakeupHint> {
         match tokio::time::timeout(timeout, self.rx.recv_async()).await {
-            Ok(Ok(hint)) => Some(hint),
+            Ok(Ok(hint)) => {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.remove(&(hint.instance_id.clone(), hint.task_id));
+                }
+                Some(hint)
+            }
             Ok(Err(flume::RecvError::Disconnected)) | Err(_) => None,
         }
     }
@@ -120,15 +142,17 @@ impl Drop for WakeupListener {
 
 async fn run_listener(
     pool: PgPool,
+    url: Option<String>,
     tx: flume::Sender<TaskWakeupHint>,
+    pending: PendingSet,
     shutdown: CancellationToken,
 ) {
     loop {
-        let listener = match connect_and_listen(&pool, &shutdown).await {
+        let listener = match connect_and_listen(&pool, url.as_deref(), &shutdown).await {
             ControlFlow::Break(()) => break,
             ControlFlow::Continue(l) => l,
         };
-        match recv_until_error(listener, &tx, &shutdown).await {
+        match recv_until_error(listener, &tx, &pending, &shutdown).await {
             ControlFlow::Break(()) => break,
             ControlFlow::Continue(()) => {}
         }
@@ -142,8 +166,13 @@ async fn run_listener(
 /// live subscription. The `backon` iterator is local to each call so
 /// exponential growth resets across reconnect cycles — a recovered PG
 /// isn't penalized for an earlier outage.
+///
+/// With a `url`, the listener gets a dedicated connection; otherwise it
+/// borrows one from `pool` for its lifetime. The pool is still consulted
+/// for `is_closed()` as the shutdown signal in both modes.
 async fn connect_and_listen(
     pool: &PgPool,
+    url: Option<&str>,
     shutdown: &CancellationToken,
 ) -> ControlFlow<(), PgListener> {
     let mut backoff = ExponentialBuilder::default()
@@ -159,10 +188,13 @@ async fn connect_and_listen(
             return ControlFlow::Break(());
         }
 
-        let mut listener = match shutdown
-            .run_until_cancelled(PgListener::connect_with(pool))
-            .await
-        {
+        let connect = async {
+            match url {
+                Some(u) => PgListener::connect(u).await,
+                None => PgListener::connect_with(pool).await,
+            }
+        };
+        let mut listener = match shutdown.run_until_cancelled(connect).await {
             None | Some(Err(sqlx::Error::PoolClosed)) => return ControlFlow::Break(()),
             Some(Ok(l)) => l,
             Some(Err(e)) => {
@@ -194,33 +226,49 @@ async fn connect_and_listen(
 /// socket failures and replays the LISTEN; `Err` here means recovery is
 /// exhausted. `Break` = exit; `Continue` = caller should reconnect.
 ///
+/// Hints are coalesced by `(instance_id, task_id)`: a hint identical to
+/// one still sitting in the queue is dropped without occupying a second
+/// slot, so a burst of saves for the same step can't crowd out hints for
+/// other instances.
+///
 /// Malformed payloads (base64 decode failure, nanoserde decode failure)
 /// are logged at WARN and skipped — a producer with a mismatched wire
 /// format shouldn't crash the listener.
 async fn recv_until_error(
     mut listener: PgListener,
     tx: &flume::Sender<TaskWakeupHint>,
+    pending: &PendingSet,
     shutdown: &CancellationToken,
 ) -> ControlFlow<(), ()> {
     loop {
         match shutdown.run_until_cancelled(listener.recv()).await {
             None | Some(Err(sqlx::Error::PoolClosed)) => return ControlFlow::Break(()),
             Some(Ok(notification)) => match TaskWakeupHint::decode(notification.payload()) {
-                Ok(hint) => match tx.try_send(hint) {
-                    // `Disconnected` only happens if every Receiver was
-                    // dropped — i.e. every PostgresBackend clone is
-                    // gone. At that point the shutdown CancellationToken
-                    // has also fired, so the outer loop will exit on
-                    // the next `run_until_cancelled` poll. Drop the
-                    // hint silently in either case.
-                    Ok(()) | Err(flume::TrySendError::Disconnected(_)) => {}
-                    Err(flume::TrySendError::Full(_)) => {
-                        WAKEUP_DROPS.fetch_add(1, Ordering::Relaxed);
-                        tracing::warn!(
-                            "wakeup channel full, dropping hint; worker falls back to poll",
-                        );
+                Ok(hint) => {
+                    let fresh = pending.lock().map_or(true, |mut p| {
+                        p.insert((hint.instance_id.clone(), hint.task_id))
+                    });
+                    if !fresh {
+                        continue; // identical hint already queued
                     }
-                },
+                    // On `Disconnected` every Receiver was dropped — i.e.
+                    // every PostgresBackend clone is gone and the shutdown
+                    // token has fired, so the outer loop exits on the next
+                    // `run_until_cancelled` poll. Drop the hint silently.
+                    if let Err(e) = tx.try_send(hint) {
+                        let full = matches!(e, flume::TrySendError::Full(_));
+                        let hint = e.into_inner();
+                        if let Ok(mut p) = pending.lock() {
+                            p.remove(&(hint.instance_id, hint.task_id));
+                        }
+                        if full {
+                            WAKEUP_DROPS.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(
+                                "wakeup channel full, dropping hint; worker falls back to poll",
+                            );
+                        }
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,

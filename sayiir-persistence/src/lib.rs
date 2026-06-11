@@ -45,8 +45,8 @@ mod lifecycle;
 pub mod validation;
 
 pub use backend::{
-    BackendError, PersistentBackend, SignalStore, SnapshotStore, TaskClaimStore, TaskResultStore,
-    TaskWakeupHint,
+    BackendError, ControlSignal, PersistentBackend, SignalStore, SnapshotStore, TaskClaimStore,
+    TaskResultStore, TaskWakeupHint,
 };
 pub use in_memory::InMemoryBackend;
 pub use lifecycle::{PrepareRunOutcome, RunConflict, prepare_run};
