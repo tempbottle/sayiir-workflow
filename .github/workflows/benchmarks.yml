@@ -197,6 +197,10 @@ jobs:
           event: push
           path: benchmarks/baseline-main
           if_no_artifact_found: warn
+          # Walk back through main runs until one actually carries the
+          # artifact — doc-only pushes skip the bench job, so the
+          # newest run frequently has no baseline attached.
+          search_artifacts: true
 
       # Render one markdown block per scenario, concatenate, post as
       # a single sticky comment. `--report-only` so a regression
