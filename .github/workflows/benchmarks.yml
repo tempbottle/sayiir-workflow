@@ -219,7 +219,13 @@ jobs:
           set -euo pipefail
           OUT=benchmarks/results/pr-comment.md
           : > "$OUT"
-          BASE_SHA="$(jq -r '.git_sha // "unknown"' benchmarks/baseline-main/linear-*.json 2>/dev/null | head -1)"
+          # `if_no_artifact_found: warn` reports success even when no
+          # baseline artifact exists yet (fresh repo, expired artifact,
+          # or main hasn't run the bench job) — every read of
+          # baseline-main/ below must tolerate the directory being
+          # absent or empty.
+          BASE_SHA="$(jq -r '.git_sha // "unknown"' benchmarks/baseline-main/linear-*.json 2>/dev/null | head -1 || true)"
+          BASE_SHA="${BASE_SHA:-none}"
           {
             echo "## Benchmark vs \`main\`"
             echo
