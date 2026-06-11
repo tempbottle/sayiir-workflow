@@ -230,9 +230,13 @@ where
         instance_id: &str,
         task_id: &sayiir_core::TaskId,
         worker_id: &str,
-        additional_duration: Duration,
+        ttl: Duration,
     ) -> Result<(), BackendError> {
-        // Heartbeat. A no-TTL claim is eternal-until-released; mirror
+        // Heartbeat. Renewal is absolute (`now() + ttl`), not additive:
+        // adding to `expires_at` would let the lease drift ahead of the
+        // wall clock by ~ttl per tick, so an orphaned claim from a
+        // crashed worker would block reclaim for far longer than one
+        // TTL. A no-TTL claim is eternal-until-released; mirror
         // the in-memory backend by silently no-op'ing the extension in
         // that case (no `COALESCE` — that would *introduce* a TTL).
         // When the row exists with our worker AND our task_id but
@@ -250,7 +254,7 @@ where
         let row = sqlx::query(
             "WITH upd AS (
                  UPDATE sayiir_workflow_claims
-                 SET expires_at = expires_at + $3
+                 SET expires_at = now() + $3
                  WHERE instance_id = $1
                    AND worker_id = $2
                    AND task_id = $4
@@ -269,7 +273,7 @@ where
         )
         .bind(instance_id)
         .bind(worker_id)
-        .bind(additional_duration)
+        .bind(ttl)
         .bind(task_id.as_bytes().as_slice())
         .fetch_one(&self.pool)
         .await

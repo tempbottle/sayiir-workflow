@@ -417,13 +417,21 @@ pub trait TaskClaimStore: SnapshotStore {
         worker_id: &str,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
-    /// Extend a task claim's expiration time.
+    /// Renew a task claim's lease.
+    ///
+    /// Sets the claim's expiration to `now + ttl` (absolute renewal), so a
+    /// claim expires one TTL after the holder's last successful heartbeat
+    /// regardless of how many heartbeats preceded it. Implementations must
+    /// NOT add `ttl` to the current expiration: under periodic heartbeats
+    /// that drifts the lease arbitrarily far ahead of the wall clock, and a
+    /// crashed holder's orphaned claim would block reclaim for much longer
+    /// than one TTL. Extending a no-TTL (eternal) claim is a silent no-op.
     fn extend_task_claim(
         &self,
         instance_id: &str,
         task_id: &sayiir_core::TaskId,
         worker_id: &str,
-        additional_duration: Duration,
+        ttl: Duration,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Find available tasks across all workflow instances.
