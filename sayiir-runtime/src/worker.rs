@@ -26,7 +26,7 @@ use sayiir_core::snapshot::{
 };
 use sayiir_core::task_claim::AvailableTask;
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
-use sayiir_persistence::{PersistentBackend, TaskClaimStore, TaskWakeupHint};
+use sayiir_persistence::{ControlSignal, PersistentBackend, TaskClaimStore, TaskWakeupHint};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -60,6 +60,7 @@ pub type WorkflowRegistry<C, Input, M> =
 /// Contains only the structural information (definition hash + continuation tree)
 /// needed by `PooledWorker` for position tracking, completion detection, retry
 /// policies, and timeouts. Task execution is delegated to an external executor.
+#[derive(Clone)]
 pub struct ExternalWorkflow {
     /// The continuation tree describing the workflow structure.
     pub continuation: Arc<WorkflowContinuation>,
@@ -113,6 +114,14 @@ pub type ExternalTaskExecutor = Arc<
 /// Internal command sent from [`WorkerHandle`] to the actor loop.
 enum WorkerCommand {
     Shutdown,
+}
+
+/// What woke an actor loop up.
+enum LoopEvent {
+    /// Shutdown requested (or every handle dropped).
+    Shutdown,
+    /// Time to look for work, with an optional targeted hint.
+    Wake(Option<TaskWakeupHint>),
 }
 
 struct WorkerHandleInner<B> {
@@ -206,7 +215,42 @@ enum ExecutionOutcome {
     Panic(Box<dyn std::any::Any + Send>),
     /// Heartbeat detected an expired deadline (active cancellation).
     Timeout(crate::error::RuntimeError),
+    /// Heartbeat saw a pending cancel signal and dropped the task future.
+    Cancelled,
+    /// The claim lease was lost mid-execution (stolen or unrenewable);
+    /// the local result must be abandoned, not persisted.
+    ClaimLost,
 }
+
+impl From<HeartbeatInterrupt> for ExecutionOutcome {
+    fn from(interrupt: HeartbeatInterrupt) -> Self {
+        match interrupt {
+            HeartbeatInterrupt::Timeout(err) => Self::Timeout(err),
+            HeartbeatInterrupt::Cancelled => Self::Cancelled,
+            HeartbeatInterrupt::ClaimLost => Self::ClaimLost,
+        }
+    }
+}
+
+/// Why `run_with_heartbeat` aborted the task future.
+enum HeartbeatInterrupt {
+    /// The task's deadline expired.
+    Timeout(crate::error::RuntimeError),
+    /// A cancel signal arrived for the instance.
+    Cancelled,
+    /// The claim could not be kept alive (stolen, released, or repeated
+    /// extension failures past the tolerance window).
+    ClaimLost,
+}
+
+/// Heartbeats fire at `claim_ttl / 4`, capped at this interval, so a
+/// crashed worker's claim expires (and a live worker's stays fresh)
+/// independently of how long the TTL is.
+const HEARTBEAT_MAX_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Consecutive heartbeat-extension failures tolerated before the worker
+/// assumes the lease is lost and abandons the task.
+const HEARTBEAT_FAILURE_LIMIT: u32 = 3;
 
 /// Extract a human-readable message from a panic payload.
 fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
@@ -267,6 +311,7 @@ pub struct PooledWorker<B> {
     registry: Arc<TaskRegistry>,
     claim_ttl: Option<Duration>,
     batch_size: NonZeroUsize,
+    max_concurrent_tasks: Option<NonZeroUsize>,
     aging_interval: Duration,
     tags: Vec<String>,
 }
@@ -285,8 +330,9 @@ where
     ///
     /// # Heartbeat
     ///
-    /// Heartbeats are derived automatically from `claim_ttl` (TTL / 2).
-    /// With the default 5-minute TTL, heartbeats fire every 2.5 minutes.
+    /// Heartbeats are derived automatically from `claim_ttl` (TTL / 4,
+    /// capped at 15 s), so a crashed worker's claim becomes reclaimable
+    /// quickly while a live worker renews well within margin.
     ///
     pub fn new(worker_id: impl Into<String>, backend: B, registry: TaskRegistry) -> Self {
         Self {
@@ -295,6 +341,7 @@ where
             registry: Arc::new(registry),
             claim_ttl: Some(Duration::from_mins(5)), // Default 5 minutes
             batch_size: NonZeroUsize::MIN,           // Default: fetch one task at a time (1)
+            max_concurrent_tasks: None,              // Default: follow batch_size
             aging_interval: Duration::from_mins(5),  // Default 5 minutes
             tags: vec![],
         }
@@ -335,17 +382,31 @@ where
         self
     }
 
-    /// Set the number of tasks to fetch per poll (default: 1).
+    /// Set the default in-flight task cap (default: 1).
     ///
-    /// With `batch_size=1`, the worker fetches one task, executes it, then polls again.
-    /// Other workers can pick up remaining tasks immediately.
-    ///
-    /// Higher values reduce polling overhead but may cause workers to hold task IDs
-    /// they won't process immediately (though other workers can still claim them).
+    /// The worker fetches up to its free concurrency slots per poll, so
+    /// this knob now seeds [`with_max_concurrent_tasks`](Self::with_max_concurrent_tasks)
+    /// when that isn't set explicitly.
     #[must_use]
     pub fn with_batch_size(mut self, size: NonZeroUsize) -> Self {
         self.batch_size = size;
         self
+    }
+
+    /// Set how many tasks this worker executes concurrently (default:
+    /// follows `batch_size`). Each in-flight task runs on its own tokio
+    /// task with its own claim + heartbeat; throughput on I/O-bound tasks
+    /// scales roughly linearly with this knob until the backend or the
+    /// executor saturates.
+    #[must_use]
+    pub fn with_max_concurrent_tasks(mut self, max: NonZeroUsize) -> Self {
+        self.max_concurrent_tasks = Some(max);
+        self
+    }
+
+    /// Effective in-flight task cap: explicit setting, else `batch_size`.
+    fn max_concurrent(&self) -> usize {
+        self.max_concurrent_tasks.unwrap_or(self.batch_size).get()
     }
 
     /// Set affinity tags for this worker.
@@ -460,8 +521,9 @@ where
     {
         let (tx, rx) = mpsc::channel(1);
         let backend = Arc::clone(&self.backend);
+        let worker = Arc::new(self);
         let join_handle =
-            tokio::spawn(async move { self.run_actor_loop(poll_interval, workflows, rx).await });
+            tokio::spawn(async move { worker.run_actor_loop(poll_interval, workflows, rx).await });
         WorkerHandle {
             inner: Arc::new(WorkerHandleInner {
                 backend,
@@ -492,8 +554,10 @@ where
     ) -> WorkerHandle<B> {
         let (tx, rx) = mpsc::channel(1);
         let backend = Arc::clone(&self.backend);
+        let worker = Arc::new(self);
         let join_handle = tokio::spawn(async move {
-            self.run_external_actor_loop(poll_interval, workflows, executor, rx)
+            worker
+                .run_external_actor_loop(poll_interval, workflows, executor, rx)
                 .await
         });
         WorkerHandle {
@@ -505,41 +569,115 @@ where
         }
     }
 
-    /// Actor loop for external executor mode.
-    async fn run_external_actor_loop(
+    /// Reap finished tasks, wait below capacity, then wait for the next
+    /// wakeup signal. Shared verbatim by both actor loops so their
+    /// concurrency/shutdown semantics can't drift.
+    async fn next_loop_event(
         &self,
+        interval: &mut time::Interval,
+        cmd_rx: &mut mpsc::Receiver<WorkerCommand>,
+        inflight: &mut tokio::task::JoinSet<()>,
+        max_inflight: usize,
+        poll_interval: Duration,
+    ) -> LoopEvent {
+        loop {
+            while inflight.try_join_next().is_some() {}
+
+            // At capacity: wait for a slot (or shutdown) instead of polling.
+            if inflight.len() >= max_inflight {
+                tokio::select! {
+                    biased;
+                    _ = cmd_rx.recv() => return LoopEvent::Shutdown,
+                    _ = inflight.join_next() => {}
+                }
+                continue;
+            }
+
+            return tokio::select! {
+                biased;
+
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        Some(WorkerCommand::Shutdown) | None => LoopEvent::Shutdown,
+                    }
+                }
+                _ = interval.tick() => {
+                    tracing::trace!(worker_id = %self.worker_id, "fallback poll tick");
+                    LoopEvent::Wake(None)
+                }
+                hint = self.backend.wait_for_wakeup(poll_interval) => {
+                    match hint {
+                        Ok(hint) => {
+                            tracing::debug!(
+                                worker_id = %self.worker_id,
+                                has_hint = hint.is_some(),
+                                "wakeup notification",
+                            );
+                            LoopEvent::Wake(hint)
+                        }
+                        Err(e) => {
+                            tracing::warn!(worker_id = %self.worker_id, error = %e, "wakeup wait failed");
+                            LoopEvent::Wake(None)
+                        }
+                    }
+                }
+            };
+        }
+    }
+
+    /// Fetch up to `limit` dispatchable tasks, logging (not propagating)
+    /// backend errors so a transient DB outage doesn't kill the worker.
+    async fn poll_batch(&self, limit: usize) -> Vec<AvailableTask> {
+        match self
+            .backend
+            .find_available_tasks(
+                &self.worker_id,
+                limit,
+                chrono::Duration::from_std(self.aging_interval).unwrap_or(chrono::Duration::MAX),
+                &self.tags,
+            )
+            .await
+        {
+            Ok(tasks) => tasks,
+            Err(e) => {
+                tracing::warn!(worker_id = %self.worker_id, error = %e, "task poll failed; will retry");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Actor loop for external executor mode.
+    ///
+    /// Up to [`max_concurrent`](Self::max_concurrent) tasks run
+    /// simultaneously, each on its own tokio task with its own claim and
+    /// heartbeat. Task failures (including timeouts) fail or retry that
+    /// workflow only — they never take the worker down. Backend errors on
+    /// the polling path are logged and retried on the next tick, so a
+    /// transient DB outage doesn't kill the fleet either.
+    async fn run_external_actor_loop(
+        self: Arc<Self>,
         poll_interval: Duration,
         workflows: WorkflowIndex,
         executor: ExternalTaskExecutor,
         mut cmd_rx: mpsc::Receiver<WorkerCommand>,
     ) -> Result<(), crate::error::RuntimeError> {
         let mut interval = staggered_poll_interval(&self.worker_id, poll_interval);
+        let max_inflight = self.max_concurrent();
+        let mut inflight = tokio::task::JoinSet::new();
 
         loop {
-            let hint = tokio::select! {
-                biased;
-
-                cmd = cmd_rx.recv() => {
-                    match cmd {
-                        Some(WorkerCommand::Shutdown) | None => {
-                            tracing::info!(worker_id = %self.worker_id, "Worker shutting down");
-                            return Ok(());
-                        }
-                    }
-                }
-                _ = interval.tick() => {
-                    tracing::trace!(worker_id = %self.worker_id, "fallback poll tick");
-                    None
-                }
-                hint = self.backend.wait_for_wakeup(poll_interval) => {
-                    let hint = hint?;
-                    tracing::debug!(
-                        worker_id = %self.worker_id,
-                        has_hint = hint.is_some(),
-                        "wakeup notification",
-                    );
-                    hint
-                }
+            let hint = match self
+                .next_loop_event(
+                    &mut interval,
+                    &mut cmd_rx,
+                    &mut inflight,
+                    max_inflight,
+                    poll_interval,
+                )
+                .await
+            {
+                LoopEvent::Shutdown => return self.drain_inflight(inflight).await,
+                LoopEvent::Wake(hint) => hint,
             };
 
             if let Some(h) = hint.as_ref()
@@ -555,68 +693,73 @@ where
             }
 
             if let Some(h) = hint.as_ref() {
-                match self.try_hinted_execute(h, &workflows, &executor).await {
+                match self
+                    .spawn_hinted_task(h, &workflows, &executor, &mut inflight)
+                    .await
+                {
                     Ok(true) => continue,
                     Ok(false) => {}
-                    Err(ref e) if e.is_timeout() => {
-                        tracing::error!(worker_id = %self.worker_id, error = %e, "Task timed out — worker shutting down");
-                        return Ok(());
+                    Err(e) => {
+                        tracing::warn!(worker_id = %self.worker_id, error = %e, "hinted lookup failed");
                     }
-                    Err(e) => return Err(e),
                 }
             }
 
-            let available_tasks = self
-                .backend
-                .find_available_tasks(
-                    &self.worker_id,
-                    self.batch_size.get(),
-                    chrono::Duration::from_std(self.aging_interval)
-                        .unwrap_or(chrono::Duration::MAX),
-                    &self.tags,
-                )
-                .await?;
-
-            for task in available_tasks {
+            // Fetch up to the free slots — `batch_size` only seeds the
+            // default concurrency; the in-flight cap is the real budget.
+            let limit = max_inflight - inflight.len();
+            for task in self.poll_batch(limit).await {
                 if let Ok(WorkerCommand::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) =
                     cmd_rx.try_recv()
                 {
-                    tracing::info!(worker_id = %self.worker_id, "Worker shutting down mid-batch");
-                    return Ok(());
+                    return self.drain_inflight(inflight).await;
                 }
 
                 if let Some(ext_wf) = workflows.get(&task.workflow_definition_hash) {
-                    match self
-                        .execute_external_task(
-                            ext_wf,
-                            &task.workflow_definition_hash,
-                            &executor,
-                            &task,
-                        )
-                        .await
-                    {
-                        Err(ref e) if e.is_timeout() => {
-                            tracing::error!(
-                                worker_id = %self.worker_id,
-                                error = %e,
-                                "Task timed out — worker shutting down"
-                            );
-                            return Ok(());
-                        }
-                        Ok(_) => {
-                            tracing::info!(worker_id = %self.worker_id, "completed task");
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                worker_id = %self.worker_id,
-                                error = %e,
-                                "task execution failed"
-                            );
-                        }
-                    }
+                    self.spawn_external_task(ext_wf.clone(), &executor, task, &mut inflight);
                 }
             }
         }
+    }
+
+    /// Finish all in-flight tasks, then exit. Callers needing a bound
+    /// should wrap [`WorkerHandle::join`] in `tokio::time::timeout`;
+    /// per-task deadlines keep this finite for deadline-bearing tasks.
+    async fn drain_inflight(
+        &self,
+        mut inflight: tokio::task::JoinSet<()>,
+    ) -> Result<(), crate::error::RuntimeError> {
+        tracing::info!(
+            worker_id = %self.worker_id,
+            inflight = inflight.len(),
+            "Worker shutting down; draining in-flight tasks"
+        );
+        while inflight.join_next().await.is_some() {}
+        Ok(())
+    }
+
+    /// Spawn one externally-executed task onto the in-flight set.
+    fn spawn_external_task(
+        self: &Arc<Self>,
+        ext_wf: ExternalWorkflow,
+        executor: &ExternalTaskExecutor,
+        task: AvailableTask,
+        inflight: &mut tokio::task::JoinSet<()>,
+    ) {
+        let worker = Arc::clone(self);
+        let executor = Arc::clone(executor);
+        inflight.spawn(async move {
+            let hash = task.workflow_definition_hash;
+            match worker
+                .execute_external_task(&ext_wf, &hash, &executor, task)
+                .await
+            {
+                Ok(_) => tracing::info!(worker_id = %worker.worker_id, "completed task"),
+                Err(e) => {
+                    tracing::error!(worker_id = %worker.worker_id, error = %e, "task execution failed");
+                }
+            }
+        });
     }
 
     /// True if the worker has the hint's workflow registered and its
@@ -629,14 +772,14 @@ where
         hint.tags.iter().all(|t| self.tags.contains(t))
     }
 
-    /// `Ok(true)` if the hinted task was claimed and executed (or its
-    /// execution failed non-fatally), `Ok(false)` to fall through to the
-    /// full polling scan, `Err(e)` on a fatal task timeout.
-    async fn try_hinted_execute(
-        &self,
+    /// `Ok(true)` if the hinted task resolved and was spawned for
+    /// execution, `Ok(false)` to fall through to the full polling scan.
+    async fn spawn_hinted_task(
+        self: &Arc<Self>,
         hint: &TaskWakeupHint,
         workflows: &WorkflowIndex,
         executor: &ExternalTaskExecutor,
+        inflight: &mut tokio::task::JoinSet<()>,
     ) -> Result<bool, crate::error::RuntimeError> {
         let Some(task) = self.backend.find_hinted_task(hint).await? else {
             return Ok(false);
@@ -644,16 +787,7 @@ where
         let Some(ext_wf) = workflows.get(&task.workflow_definition_hash) else {
             return Ok(false);
         };
-        match self
-            .execute_external_task(ext_wf, &task.workflow_definition_hash, executor, &task)
-            .await
-        {
-            Err(e) if e.is_timeout() => return Err(e),
-            Ok(_) => tracing::info!(worker_id = %self.worker_id, "completed hinted task"),
-            Err(e) => {
-                tracing::error!(worker_id = %self.worker_id, error = %e, "hinted task execution failed");
-            }
-        }
+        self.spawn_external_task(ext_wf.clone(), executor, task, inflight);
         Ok(true)
     }
 
@@ -673,7 +807,7 @@ where
         ext_wf: &ExternalWorkflow,
         definition_hash: &sayiir_core::DefinitionHash,
         executor: &ExternalTaskExecutor,
-        available_task: &AvailableTask,
+        mut available_task: AvailableTask,
     ) -> Result<WorkflowStatus, crate::error::RuntimeError> {
         // Link current span to the workflow's trace context (cross-worker propagation)
         #[cfg(feature = "otel")]
@@ -684,29 +818,30 @@ where
         }
 
         // Workers that lose the claim race drop the `available_task`
-        // (and its `Arc<WorkflowSnapshot>`) cheaply — keep the deep
-        // clone strictly past the claim_task gate.
+        // (and its `Arc<WorkflowSnapshot>`) cheaply — extract the owned
+        // snapshot strictly past the claim_task gate.
         let already_completed = Self::validate_task_preconditions(
             definition_hash,
             &ext_wf.task_index,
-            available_task,
+            &available_task,
             &available_task.snapshot,
         )?;
         if already_completed {
             return Ok(WorkflowStatus::InProgress);
         }
 
-        let Some(claim) = self.claim_task(available_task).await? else {
+        let Some(claim) = self.claim_task(&available_task).await? else {
             return Ok(WorkflowStatus::InProgress);
         };
 
-        if let Some(status) = self.check_post_claim_guards(available_task).await? {
+        if let Some(status) = self.check_post_claim_guards(&available_task).await? {
             claim.release_quietly().await;
             return Ok(status);
         }
 
-        // Past the claim gate — now pay for the deep clone exactly once.
-        let mut snapshot = (*available_task.snapshot).clone();
+        // Past the claim gate — take the snapshot out of its Arc (a move,
+        // not a deep clone: the dispatch Arc is never shared).
+        let mut snapshot = available_task.take_snapshot();
 
         tracing::debug!(
             instance_id = %available_task.instance_id,
@@ -715,14 +850,14 @@ where
         );
 
         let execution_result = self
-            .execute_with_deadline_ext(ext_wf, executor, available_task, &mut snapshot, &claim)
+            .execute_with_deadline_ext(ext_wf, executor, &available_task, &mut snapshot, &claim)
             .await;
 
         self.settle_execution_result_ext(
             execution_result,
             &ext_wf.continuation,
             &ext_wf.task_index,
-            available_task,
+            &available_task,
             &mut snapshot,
             claim,
         )
@@ -784,7 +919,7 @@ where
         snapshot.clear_task_deadline();
 
         match heartbeat_result {
-            Err(timeout_err) => ExecutionOutcome::Timeout(timeout_err),
+            Err(interrupt) => interrupt.into(),
             Ok(Err(panic_payload)) => ExecutionOutcome::Panic(panic_payload),
             Ok(Ok(Err(e))) => ExecutionOutcome::TaskError(e.into()),
             Ok(Ok(Ok(output))) => ExecutionOutcome::Success(output),
@@ -809,89 +944,170 @@ where
         tracing::debug!("settling execution result");
         match outcome {
             ExecutionOutcome::Timeout(err) => {
-                if let Ok(Some(status)) = self
-                    .try_schedule_retry(task_index, available_task, snapshot, &err.to_string())
+                match self
+                    .settle_failure(
+                        task_index,
+                        available_task,
+                        snapshot,
+                        claim,
+                        &err.to_string(),
+                    )
                     .await
                 {
-                    claim.release_quietly().await;
-                    return Ok(status);
+                    Some(status) => Ok(status),
+                    None => Err(err),
                 }
-
-                tracing::warn!(
-                    instance_id = %available_task.instance_id,
-                    task_id = %available_task.task_id,
-                    error = %err,
-                    "Task timed out via heartbeat — marking workflow failed, shutting down"
-                );
-                snapshot.mark_failed(err.to_string());
-                let _ = self.backend.save_snapshot(snapshot).await;
-                claim.release_quietly().await;
-                Err(err)
             }
             ExecutionOutcome::Panic(panic_payload) => {
                 let panic_msg = extract_panic_message(&panic_payload);
-
-                if let Ok(Some(status)) = self
-                    .try_schedule_retry(task_index, available_task, snapshot, &panic_msg)
+                match self
+                    .settle_failure(task_index, available_task, snapshot, claim, &panic_msg)
                     .await
                 {
-                    claim.release_quietly().await;
-                    return Ok(status);
+                    Some(status) => Ok(status),
+                    None => Err(WorkflowError::TaskPanicked(panic_msg).into()),
                 }
-
-                tracing::error!(
-                    instance_id = %available_task.instance_id,
-                    task_id = %available_task.task_id,
-                    panic = %panic_msg,
-                    "Task panicked - releasing claim"
-                );
-                claim.release_quietly().await;
-                Err(WorkflowError::TaskPanicked(panic_msg).into())
             }
             ExecutionOutcome::TaskError(e) => {
-                if let Ok(Some(status)) = self
-                    .try_schedule_retry(task_index, available_task, snapshot, &e.to_string())
+                match self
+                    .settle_failure(task_index, available_task, snapshot, claim, &e.to_string())
                     .await
                 {
-                    claim.release_quietly().await;
-                    return Ok(status);
+                    Some(status) => Ok(status),
+                    None => Err(e),
                 }
-
-                tracing::error!(
-                    instance_id = %available_task.instance_id,
-                    task_id = %available_task.task_id,
-                    error = %e,
-                    "Task execution failed"
-                );
-                claim.release_quietly().await;
-                Err(e)
             }
+            ExecutionOutcome::Cancelled => self.settle_cancelled(available_task, claim).await,
+            ExecutionOutcome::ClaimLost => Ok(Self::settle_claim_lost(available_task)),
             ExecutionOutcome::Success(output) => {
                 snapshot.clear_retry_state(&available_task.task_id);
-                self.commit_task_result(
-                    continuation,
-                    available_task,
-                    snapshot,
-                    output.clone(),
-                    claim,
-                )
-                .await?;
+                if !self
+                    .commit_task_result(
+                        continuation,
+                        available_task,
+                        snapshot,
+                        output.clone(),
+                        claim,
+                    )
+                    .await?
+                {
+                    return Ok(Self::settle_claim_lost(available_task));
+                }
                 self.determine_post_task_status(continuation, available_task, snapshot, output)
                     .await
             }
         }
     }
 
+    /// Retry-or-fail policy shared by every failure outcome: schedule a
+    /// retry if the policy allows (returning the resulting status), else
+    /// fail the workflow and return `None` so the caller surfaces the
+    /// final error.
+    async fn settle_failure(
+        &self,
+        task_index: &sayiir_core::TaskIndex,
+        available_task: &AvailableTask,
+        snapshot: &mut WorkflowSnapshot,
+        claim: ActiveTaskClaim<'_, B>,
+        error_msg: &str,
+    ) -> Option<WorkflowStatus> {
+        if let Ok(Some(status)) = self
+            .try_schedule_retry(task_index, available_task, snapshot, error_msg)
+            .await
+        {
+            claim.release_quietly().await;
+            return Some(status);
+        }
+        self.fail_workflow(available_task, snapshot, claim, error_msg)
+            .await;
+        None
+    }
+
+    /// Terminal-failure path shared by timeout/panic/error settles once
+    /// retries are exhausted (or absent): mark the workflow failed so the
+    /// poison task stops being re-offered at poll speed, persist under the
+    /// claim fence, release.
+    async fn fail_workflow(
+        &self,
+        available_task: &AvailableTask,
+        snapshot: &mut WorkflowSnapshot,
+        claim: ActiveTaskClaim<'_, B>,
+        error_msg: &str,
+    ) {
+        tracing::error!(
+            instance_id = %available_task.instance_id,
+            task_id = %available_task.task_id,
+            error = %error_msg,
+            "Task failed with no retries left — marking workflow failed"
+        );
+        snapshot.mark_failed(error_msg.to_string());
+        match self
+            .backend
+            .save_snapshot_fenced(snapshot, &claim.task_id, &claim.worker_id)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                instance_id = %available_task.instance_id,
+                "claim lost; failure state not persisted (new claimant owns the task)"
+            ),
+            Err(e) => tracing::warn!(
+                instance_id = %available_task.instance_id,
+                error = %e,
+                "failed to persist failure state"
+            ),
+        }
+        claim.release_quietly().await;
+    }
+
+    /// A cancel signal interrupted the running task: release the claim and
+    /// apply the cancellation (the dropped future did no further work).
+    async fn settle_cancelled(
+        &self,
+        available_task: &AvailableTask,
+        claim: ActiveTaskClaim<'_, B>,
+    ) -> Result<WorkflowStatus, crate::error::RuntimeError> {
+        claim.release_quietly().await;
+        if self
+            .backend
+            .check_and_cancel(&available_task.instance_id, Some(available_task.task_id))
+            .await?
+        {
+            return Ok(self
+                .load_cancelled_status(&available_task.instance_id)
+                .await);
+        }
+        // Signal vanished between detection and here — the task simply
+        // re-dispatches.
+        Ok(WorkflowStatus::InProgress)
+    }
+
+    /// The lease was lost mid-execution: another worker owns the task now.
+    /// Abandon the local result; do NOT release (the claim isn't ours).
+    fn settle_claim_lost(available_task: &AvailableTask) -> WorkflowStatus {
+        tracing::warn!(
+            instance_id = %available_task.instance_id,
+            task_id = %available_task.task_id,
+            "task claim lost mid-execution; abandoning local result"
+        );
+        WorkflowStatus::InProgress
+    }
+
     /// The actor loop: poll for tasks, execute them, respond to shutdown.
     ///
+    /// Same concurrency and resilience model as the external loop: up to
+    /// [`max_concurrent`](Self::max_concurrent) tasks in flight at once,
+    /// task failures fail that workflow only, and polling-path backend
+    /// errors are logged and retried on the next tick.
+    #[allow(clippy::too_many_lines)]
     async fn run_actor_loop<C, Input, M>(
-        &self,
+        self: Arc<Self>,
         poll_interval: Duration,
         workflows: WorkflowRegistry<C, Input, M>,
         mut cmd_rx: mpsc::Receiver<WorkerCommand>,
     ) -> Result<(), crate::error::RuntimeError>
     where
-        Input: Send + 'static,
+        Input: Send + Sync + 'static,
         M: Send + Sync + 'static,
         C: Codec
             + EnvelopeCodec
@@ -900,34 +1116,24 @@ where
             + 'static,
     {
         let mut interval = staggered_poll_interval(&self.worker_id, poll_interval);
+        let max_inflight = self.max_concurrent();
+        let mut inflight = tokio::task::JoinSet::new();
 
         loop {
             // In-process mode only filters irrelevant wakes; the direct-
             // claim shortcut lives on the external-executor path.
-            let hint = tokio::select! {
-                biased;
-
-                cmd = cmd_rx.recv() => {
-                    match cmd {
-                        Some(WorkerCommand::Shutdown) | None => {
-                            tracing::info!(worker_id = %self.worker_id, "Worker shutting down");
-                            return Ok(());
-                        }
-                    }
-                }
-                _ = interval.tick() => {
-                    tracing::trace!(worker_id = %self.worker_id, "fallback poll tick");
-                    None
-                }
-                hint = self.backend.wait_for_wakeup(poll_interval) => {
-                    let hint = hint?;
-                    tracing::debug!(
-                        worker_id = %self.worker_id,
-                        has_hint = hint.is_some(),
-                        "wakeup notification",
-                    );
-                    hint
-                }
+            let hint = match self
+                .next_loop_event(
+                    &mut interval,
+                    &mut cmd_rx,
+                    &mut inflight,
+                    max_inflight,
+                    poll_interval,
+                )
+                .await
+            {
+                LoopEvent::Shutdown => return self.drain_inflight(inflight).await,
+                LoopEvent::Wake(hint) => hint,
             };
 
             if let Some(h) = hint.as_ref()
@@ -942,23 +1148,14 @@ where
                 continue;
             }
 
-            let available_tasks = self
-                .backend
-                .find_available_tasks(
-                    &self.worker_id,
-                    self.batch_size.get(),
-                    chrono::Duration::from_std(self.aging_interval)
-                        .unwrap_or(chrono::Duration::MAX),
-                    &self.tags,
-                )
-                .await?;
-
-            for task in available_tasks {
+            // Fetch up to the free slots — `batch_size` only seeds the
+            // default concurrency; the in-flight cap is the real budget.
+            let limit = max_inflight - inflight.len();
+            for task in self.poll_batch(limit).await {
                 if let Ok(WorkerCommand::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) =
                     cmd_rx.try_recv()
                 {
-                    tracing::info!(worker_id = %self.worker_id, "Worker shutting down mid-batch");
-                    return Ok(());
+                    return self.drain_inflight(inflight).await;
                 }
 
                 if let Some((_, workflow)) = workflows
@@ -966,26 +1163,22 @@ where
                     .find(|(hash, _)| *hash == task.workflow_definition_hash)
                 // hash and task.workflow_definition_hash are both DefinitionHash
                 {
-                    match self.execute_task(workflow.as_ref(), task).await {
-                        Err(ref e) if e.is_timeout() => {
-                            tracing::error!(
-                                worker_id = %self.worker_id,
-                                error = %e,
-                                "Task timed out — worker shutting down"
-                            );
-                            return Ok(());
+                    let worker = Arc::clone(&self);
+                    let workflow = Arc::clone(workflow);
+                    inflight.spawn(async move {
+                        match worker.execute_task(workflow.as_ref(), task).await {
+                            Ok(_) => {
+                                tracing::info!(worker_id = %worker.worker_id, "completed task");
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    worker_id = %worker.worker_id,
+                                    error = %e,
+                                    "task execution failed"
+                                );
+                            }
                         }
-                        Ok(_) => {
-                            tracing::info!(worker_id = %self.worker_id, "completed task");
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                worker_id = %self.worker_id,
-                                error = %e,
-                                "task execution failed"
-                            );
-                        }
-                    }
+                    });
                 }
             }
         }
@@ -1050,7 +1243,7 @@ where
     pub async fn execute_task<C, Input, M>(
         &self,
         workflow: &Workflow<C, Input, M>,
-        available_task: AvailableTask,
+        mut available_task: AvailableTask,
     ) -> Result<WorkflowStatus, crate::error::RuntimeError>
     where
         Input: Send + 'static,
@@ -1071,7 +1264,7 @@ where
 
         // 1. Use the snapshot the dispatch SELECT already decoded.
         // Lost-race workers drop the `Arc<WorkflowSnapshot>` cheaply —
-        // keep the deep clone strictly past the claim_task gate.
+        // extract the owned snapshot strictly past the claim_task gate.
         let already_completed = Self::validate_task_preconditions(
             workflow.definition_hash(),
             workflow.task_index(),
@@ -1092,8 +1285,9 @@ where
             return Ok(status);
         }
 
-        // Past the claim gate — now pay for the deep clone exactly once.
-        let mut snapshot = (*available_task.snapshot).clone();
+        // Past the claim gate — take the snapshot out of its Arc (a move,
+        // not a deep clone: the dispatch Arc is never shared).
+        let mut snapshot = available_task.take_snapshot();
 
         tracing::debug!(
             instance_id = %available_task.instance_id,
@@ -1227,7 +1421,7 @@ where
         snapshot.clear_task_deadline();
 
         match heartbeat_result {
-            Err(timeout_err) => ExecutionOutcome::Timeout(timeout_err),
+            Err(interrupt) => interrupt.into(),
             Ok(Err(panic_payload)) => ExecutionOutcome::Panic(panic_payload),
             Ok(Ok(Err(e))) => ExecutionOutcome::TaskError(e),
             Ok(Ok(Ok(output))) => ExecutionOutcome::Success(output),
@@ -1262,7 +1456,11 @@ where
             Some(&self.worker_id),
         );
         snapshot.clear_task_deadline();
-        let _ = self.backend.save_snapshot(snapshot).await;
+        // Fenced: if the lease was lost the new claimant owns retry state.
+        let _ = self
+            .backend
+            .save_snapshot_fenced(snapshot, &available_task.task_id, &self.worker_id)
+            .await;
 
         tracing::info!(
             instance_id = %available_task.instance_id,
@@ -1302,83 +1500,67 @@ where
         tracing::debug!("settling execution result");
         match outcome {
             ExecutionOutcome::Timeout(err) => {
-                if let Ok(Some(status)) = self
-                    .try_schedule_retry(
+                match self
+                    .settle_failure(
                         workflow.task_index(),
                         available_task,
                         snapshot,
+                        claim,
                         &err.to_string(),
                     )
                     .await
                 {
-                    claim.release_quietly().await;
-                    return Ok(status);
+                    Some(status) => Ok(status),
+                    None => Err(err),
                 }
-
-                tracing::warn!(
-                    instance_id = %available_task.instance_id,
-                    task_id = %available_task.task_id,
-                    error = %err,
-                    "Task timed out via heartbeat — marking workflow failed, shutting down"
-                );
-                snapshot.mark_failed(err.to_string());
-                let _ = self.backend.save_snapshot(snapshot).await;
-                claim.release_quietly().await;
-                Err(err)
             }
             ExecutionOutcome::Panic(panic_payload) => {
                 let panic_msg = extract_panic_message(&panic_payload);
-
-                if let Ok(Some(status)) = self
-                    .try_schedule_retry(workflow.task_index(), available_task, snapshot, &panic_msg)
-                    .await
-                {
-                    claim.release_quietly().await;
-                    return Ok(status);
-                }
-
-                tracing::error!(
-                    instance_id = %available_task.instance_id,
-                    task_id = %available_task.task_id,
-                    panic = %panic_msg,
-                    "Task panicked - releasing claim"
-                );
-                claim.release_quietly().await;
-                Err(WorkflowError::TaskPanicked(panic_msg).into())
-            }
-            ExecutionOutcome::TaskError(e) => {
-                if let Ok(Some(status)) = self
-                    .try_schedule_retry(
+                match self
+                    .settle_failure(
                         workflow.task_index(),
                         available_task,
                         snapshot,
+                        claim,
+                        &panic_msg,
+                    )
+                    .await
+                {
+                    Some(status) => Ok(status),
+                    None => Err(WorkflowError::TaskPanicked(panic_msg).into()),
+                }
+            }
+            ExecutionOutcome::TaskError(e) => {
+                match self
+                    .settle_failure(
+                        workflow.task_index(),
+                        available_task,
+                        snapshot,
+                        claim,
                         &e.to_string(),
                     )
                     .await
                 {
-                    claim.release_quietly().await;
-                    return Ok(status);
+                    Some(status) => Ok(status),
+                    None => Err(e),
                 }
-
-                tracing::error!(
-                    instance_id = %available_task.instance_id,
-                    task_id = %available_task.task_id,
-                    error = %e,
-                    "Task execution failed"
-                );
-                claim.release_quietly().await;
-                Err(e)
             }
+            ExecutionOutcome::Cancelled => self.settle_cancelled(available_task, claim).await,
+            ExecutionOutcome::ClaimLost => Ok(Self::settle_claim_lost(available_task)),
             ExecutionOutcome::Success(output) => {
                 snapshot.clear_retry_state(&available_task.task_id);
-                self.commit_task_result(
-                    workflow.continuation(),
-                    available_task,
-                    snapshot,
-                    output.clone(),
-                    claim,
-                )
-                .await?;
+                if !self
+                    .commit_task_result(
+                        workflow.continuation(),
+                        available_task,
+                        snapshot,
+                        output.clone(),
+                        claim,
+                    )
+                    .await?
+                {
+                    return Ok(Self::settle_claim_lost(available_task));
+                }
                 // After saving the body task result, resolve any parent loop
                 // nodes so that is_workflow_complete() can detect loop completion.
                 Self::resolve_loop_completions(
@@ -1483,49 +1665,71 @@ where
     /// Returns `Some(status)` if the workflow is cancelled or paused
     /// (caller should release claim and return status).
     /// Returns `None` if execution should proceed.
+    ///
+    /// Uses the combined `check_control_signals`, which backends can
+    /// answer with a single probe in the (overwhelmingly common) case of
+    /// no pending signal.
     async fn check_post_claim_guards(
         &self,
         available_task: &AvailableTask,
     ) -> Result<Option<WorkflowStatus>, crate::error::RuntimeError> {
-        if self
+        match self
             .backend
-            .check_and_cancel(&available_task.instance_id, Some(available_task.task_id))
+            .check_control_signals(&available_task.instance_id, Some(available_task.task_id))
             .await?
         {
-            tracing::info!(
-                instance_id = %available_task.instance_id,
-                task_id = %available_task.task_id,
-                "Workflow was cancelled, releasing claim"
-            );
-            return Ok(Some(
-                self.load_cancelled_status(&available_task.instance_id)
+            Some(signal) => Ok(Some(
+                self.signal_status(signal, available_task, "releasing claim")
                     .await,
-            ));
+            )),
+            None => Ok(None),
         }
+    }
 
-        if self
-            .backend
-            .check_and_pause(&available_task.instance_id)
-            .await?
-        {
-            tracing::info!(
-                instance_id = %available_task.instance_id,
-                task_id = %available_task.task_id,
-                "Workflow was paused, releasing claim"
-            );
-            return Ok(Some(
-                self.load_paused_status(&available_task.instance_id).await,
-            ));
+    /// Resolve an applied control signal into the workflow status to
+    /// report, with a uniform log line (`context` says where it was caught).
+    async fn signal_status(
+        &self,
+        signal: ControlSignal,
+        available_task: &AvailableTask,
+        context: &str,
+    ) -> WorkflowStatus {
+        match signal {
+            ControlSignal::Cancelled => {
+                tracing::info!(
+                    instance_id = %available_task.instance_id,
+                    task_id = %available_task.task_id,
+                    "Workflow was cancelled, {context}"
+                );
+                self.load_cancelled_status(&available_task.instance_id)
+                    .await
+            }
+            ControlSignal::Paused => {
+                tracing::info!(
+                    instance_id = %available_task.instance_id,
+                    task_id = %available_task.task_id,
+                    "Workflow was paused, {context}"
+                );
+                self.load_paused_status(&available_task.instance_id).await
+            }
         }
-
-        Ok(None)
     }
 
     /// Execute a future while periodically extending the task claim.
     ///
-    /// If a `deadline` is provided, the heartbeat tick also checks whether the
-    /// deadline has expired. If it has, the task future is dropped (active
-    /// cancellation) and a `TaskTimedOut` error is returned.
+    /// Heartbeats fire at `claim_ttl / 4`, capped at
+    /// [`HEARTBEAT_MAX_INTERVAL`], so a crashed peer's stall window is
+    /// bounded by the TTL while a live worker renews with margin to spare.
+    /// Each tick also:
+    ///
+    /// - checks the task deadline — if expired, the future is dropped
+    ///   (active cancellation) and `Timeout` is returned;
+    /// - probes for a pending cancel signal — long-running tasks get
+    ///   cancelled cooperatively instead of running to completion;
+    /// - escalates lease loss: a `NotFound`/ownership failure from
+    ///   `extend_task_claim`, or [`HEARTBEAT_FAILURE_LIMIT`] consecutive
+    ///   failures of any kind, aborts the task as `ClaimLost` so a stale
+    ///   worker can't keep computing a result it may no longer commit.
     #[tracing::instrument(
         name = "task",
         skip_all,
@@ -1536,7 +1740,7 @@ where
         claim: &ActiveTaskClaim<'_, B>,
         deadline: Option<&TaskDeadline>,
         future: F,
-    ) -> Result<T, crate::error::RuntimeError>
+    ) -> Result<T, HeartbeatInterrupt>
     where
         F: std::future::Future<Output = T>,
     {
@@ -1548,9 +1752,12 @@ where
             return Ok(future.await);
         };
 
-        let interval_duration = ttl / 2;
+        let interval_duration = (ttl / 4)
+            .min(HEARTBEAT_MAX_INTERVAL)
+            .max(Duration::from_millis(1));
         let mut heartbeat_timer = time::interval(interval_duration);
         heartbeat_timer.tick().await; // skip first immediate tick
+        let mut consecutive_failures: u32 = 0;
 
         tokio::pin!(future);
 
@@ -1567,11 +1774,12 @@ where
                             task_id = %dl.task_id,
                             "Task deadline expired during heartbeat, cancelling"
                         );
-                        return Err(WorkflowError::TaskTimedOut {
-                            task_id: dl.task_id,
-                            timeout: std::time::Duration::from_millis(dl.timeout_ms),
-                        }
-                        .into());
+                        return Err(HeartbeatInterrupt::Timeout(
+                            crate::error::RuntimeError::from(WorkflowError::TaskTimedOut {
+                                task_id: dl.task_id,
+                                timeout: std::time::Duration::from_millis(dl.timeout_ms),
+                            }),
+                        ));
                     }
 
                     tracing::trace!(
@@ -1579,21 +1787,59 @@ where
                         task_id = %claim.task_id,
                         "Extending task claim via heartbeat"
                     );
-                    if let Err(e) = self.backend
-                        .extend_task_claim(
+                    // Cooperative-cancel probe and lease extension are
+                    // independent — run them in one round-trip's latency.
+                    let (cancel, extended) = tokio::join!(
+                        self.backend
+                            .get_signal(&claim.instance_id, SignalKind::Cancel),
+                        self.backend.extend_task_claim(
                             &claim.instance_id,
                             &claim.task_id,
                             &claim.worker_id,
                             chrono_ttl,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
+                        ),
+                    );
+
+                    // Don't let a long task run to completion under a
+                    // cancel that arrived mid-flight.
+                    if let Ok(Some(_)) = cancel {
+                        tracing::info!(
                             instance_id = %claim.instance_id,
                             task_id = %claim.task_id,
-                            error = %e,
-                            "Failed to extend task claim"
+                            "Cancel signal during heartbeat, dropping task future"
                         );
+                        return Err(HeartbeatInterrupt::Cancelled);
+                    }
+
+                    match extended {
+                        Ok(()) => consecutive_failures = 0,
+                        // Claim row gone or re-owned: the lease is
+                        // structurally lost, not flaky — abort now.
+                        Err(
+                            e @ (sayiir_persistence::BackendError::NotFound(_)
+                            | sayiir_persistence::BackendError::ClaimLost(_)),
+                        ) => {
+                            tracing::warn!(
+                                instance_id = %claim.instance_id,
+                                task_id = %claim.task_id,
+                                error = %e,
+                                "Claim no longer held, abandoning task"
+                            );
+                            return Err(HeartbeatInterrupt::ClaimLost);
+                        }
+                        Err(e) => {
+                            consecutive_failures += 1;
+                            tracing::warn!(
+                                instance_id = %claim.instance_id,
+                                task_id = %claim.task_id,
+                                error = %e,
+                                consecutive_failures,
+                                "Failed to extend task claim"
+                            );
+                            if consecutive_failures >= HEARTBEAT_FAILURE_LIMIT {
+                                return Err(HeartbeatInterrupt::ClaimLost);
+                            }
+                        }
                     }
                 }
             }
@@ -1601,6 +1847,10 @@ where
     }
 
     /// Persist task result and release the claim.
+    ///
+    /// Returns `Ok(false)` (without persisting) when the claim fence
+    /// rejects the write — the lease was lost mid-execution and the new
+    /// claimant owns the task's outcome.
     async fn commit_task_result(
         &self,
         continuation: &WorkflowContinuation,
@@ -1608,7 +1858,7 @@ where
         snapshot: &mut WorkflowSnapshot,
         output: Bytes,
         claim: ActiveTaskClaim<'_, B>,
-    ) -> Result<(), crate::error::RuntimeError> {
+    ) -> Result<bool, crate::error::RuntimeError> {
         snapshot.mark_task_completed(available_task.task_id, output);
         tracing::debug!(
             instance_id = %available_task.instance_id,
@@ -1621,7 +1871,13 @@ where
         {
             snapshot.trace_parent = crate::trace_context::current_trace_parent();
         }
-        self.backend.save_snapshot(snapshot).await?;
+        if !self
+            .backend
+            .save_snapshot_fenced(snapshot, &claim.task_id, &claim.worker_id)
+            .await?
+        {
+            return Ok(false);
+        }
 
         // If we just entered AtSignal, drain any event that was
         // buffered while the snapshot was still at AtTask. The
@@ -1638,7 +1894,7 @@ where
             .await?;
 
         claim.release().await?;
-        Ok(())
+        Ok(true)
     }
 
     /// If `snapshot` is parked at `AtSignal { signal_name }` and a
@@ -1693,7 +1949,8 @@ where
 
     /// Determine workflow status after a task completes.
     ///
-    /// Checks cancel/pause guards and workflow completion.
+    /// Checks cancel/pause guards (single combined round-trip in the
+    /// common no-signal case) and workflow completion.
     async fn determine_post_task_status(
         &self,
         continuation: &WorkflowContinuation,
@@ -1701,34 +1958,14 @@ where
         snapshot: &mut WorkflowSnapshot,
         output: Bytes,
     ) -> Result<WorkflowStatus, crate::error::RuntimeError> {
-        // Check for cancellation after task completion
-        if self
+        if let Some(signal) = self
             .backend
-            .check_and_cancel(&available_task.instance_id, None)
+            .check_control_signals(&available_task.instance_id, None)
             .await?
         {
-            tracing::info!(
-                instance_id = %available_task.instance_id,
-                task_id = %available_task.task_id,
-                "Workflow was cancelled after task completion"
-            );
             return Ok(self
-                .load_cancelled_status(&available_task.instance_id)
+                .signal_status(signal, available_task, "after task completion")
                 .await);
-        }
-
-        // Check for pause after task completion
-        if self
-            .backend
-            .check_and_pause(&available_task.instance_id)
-            .await?
-        {
-            tracing::info!(
-                instance_id = %available_task.instance_id,
-                task_id = %available_task.task_id,
-                "Workflow was paused after task completion"
-            );
-            return Ok(self.load_paused_status(&available_task.instance_id).await);
         }
 
         if Self::is_workflow_complete(continuation, snapshot) {
@@ -2190,6 +2427,7 @@ where
             registry,
             claim_ttl: Some(Duration::from_mins(5)),
             batch_size: NonZeroUsize::MIN,
+            max_concurrent_tasks: None,
             aging_interval: Duration::from_mins(5),
             tags: vec![],
         }
@@ -2427,6 +2665,7 @@ pub struct PooledWorkerBuilder<B> {
     registry: TaskRegistry,
     claim_ttl: Option<Duration>,
     batch_size: NonZeroUsize,
+    max_concurrent_tasks: Option<NonZeroUsize>,
     aging_interval: Duration,
     tags: Vec<String>,
 }
@@ -2451,10 +2690,18 @@ where
         self
     }
 
-    /// Set the number of tasks to fetch per poll (default: 1).
+    /// Set the default in-flight task cap (default: 1); see
+    /// [`PooledWorker::with_batch_size`].
     #[must_use]
     pub fn batch_size(mut self, size: NonZeroUsize) -> Self {
         self.batch_size = size;
+        self
+    }
+
+    /// Set the in-flight task cap (default: follows `batch_size`).
+    #[must_use]
+    pub fn max_concurrent_tasks(mut self, max: NonZeroUsize) -> Self {
+        self.max_concurrent_tasks = Some(max);
         self
     }
 
@@ -2493,6 +2740,7 @@ where
             registry: Arc::new(self.registry),
             claim_ttl: self.claim_ttl,
             batch_size: self.batch_size,
+            max_concurrent_tasks: self.max_concurrent_tasks,
             aging_interval: self.aging_interval,
             tags: self.tags,
         }
